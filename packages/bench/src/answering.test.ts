@@ -5,7 +5,10 @@ import {
   answerBenchmarkQuestion,
   buildAgenticMemoryBenchmarkQuestion,
   buildStrictBenchmarkQuestion,
+  buildUnknownRetryQuestion,
+  hasExplicitTrajectoryEvidence,
   inferAnswerFormat,
+  isUnknownOnlyAnswer,
 } from "./answering.ts";
 
 test("without a responder the benchmark answer falls back to recalled text", async () => {
@@ -91,6 +94,7 @@ test("agentic-memory answering asks responders to synthesize grounded trajectory
         assert.match(question, /requires inference/);
         assert.match(question, /step numbers, action names, object names/);
         assert.match(question, /anchor the answer to those exact numbers/);
+        assert.match(question, /Answer every clause in the question/);
         assert.match(question, /Do not assume an object disappeared/);
         assert.equal(
           recalledText,
@@ -107,6 +111,142 @@ test("agentic-memory answering asks responders to synthesize grounded trajectory
   });
 
   assert.equal(result.finalAnswer, "It repositioned around the blocking ball.");
+});
+
+test("agentic-memory answering includes benchmark context when provided", async () => {
+  const result = await answerBenchmarkQuestion({
+    question: "What did the rule manipulation accomplish?",
+    recalledText: "[Action 4]: push IS\n[Observation 4]: ROCK IS PUSH",
+    answerMode: "agentic-memory",
+    questionContext: {
+      benchmark: "AMA-Bench",
+      domain: "Games",
+      task: "Baba Is You trajectory",
+      taskType: "game",
+      qaType: "reasoning",
+    },
+    responder: {
+      async respond(question) {
+        assert.match(question, /Benchmark context:/);
+        assert.match(question, /Benchmark: AMA-Bench/);
+        assert.match(question, /Domain: Games/);
+        assert.match(question, /Task type: game/);
+        assert.match(question, /QA type: reasoning/);
+        assert.match(question, /Task setting: Baba Is You trajectory/);
+        return {
+          text: "It changed the active rock rule.",
+          tokens: { input: 10, output: 6 },
+          latencyMs: 5,
+          model: "test-model",
+        };
+      },
+    },
+  });
+
+  assert.equal(result.finalAnswer, "It changed the active rock rule.");
+});
+
+test("agentic-memory answering retries one unknown answer when explicit trajectory evidence is present", async () => {
+  const questions: string[] = [];
+  const result = await answerBenchmarkQuestion({
+    question: "Why did the agent move right after step 12?",
+    recalledText: [
+      "## Explicit Cue Evidence",
+      "[Action 12]: right",
+      "[Observation 12]: The wall is now one tile to the left.",
+    ].join("\n"),
+    answerMode: "agentic-memory",
+    retryUnknownWithEvidence: true,
+    responder: {
+      async respond(question) {
+        questions.push(question);
+        if (questions.length === 1) {
+          return {
+            text: "unknown",
+            tokens: { input: 11, output: 1 },
+            latencyMs: 7,
+            model: "first-model",
+          };
+        }
+        assert.match(question, /prior answer was only "unknown"/);
+        assert.match(question, /explicit trajectory evidence/);
+        return {
+          text: "It moved right, making the wall shift to the left relative to the agent.",
+          tokens: { input: 13, output: 12 },
+          latencyMs: 9,
+          model: "retry-model",
+        };
+      },
+    },
+  });
+
+  assert.equal(questions.length, 2);
+  assert.equal(
+    result.finalAnswer,
+    "It moved right, making the wall shift to the left relative to the agent.",
+  );
+  assert.deepEqual(result.tokens, { input: 24, output: 13 });
+  assert.equal(result.latencyMs, 16);
+  assert.equal(result.model, "retry-model");
+});
+
+test("agentic-memory answering does not retry unknown without explicit trajectory evidence", async () => {
+  let calls = 0;
+  const result = await answerBenchmarkQuestion({
+    question: "What happened?",
+    recalledText: "## Remnic recall pipeline\nNo exact trajectory cue was found.",
+    answerMode: "agentic-memory",
+    retryUnknownWithEvidence: true,
+    responder: {
+      async respond() {
+        calls += 1;
+        return {
+          text: "unknown",
+          tokens: { input: 3, output: 1 },
+          latencyMs: 4,
+          model: "test-model",
+        };
+      },
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.finalAnswer, "unknown");
+  assert.deepEqual(result.tokens, { input: 3, output: 1 });
+});
+
+test("agentic-memory answering preserves the first unknown answer when the optional retry fails", async () => {
+  let calls = 0;
+  const result = await answerBenchmarkQuestion({
+    question: "Why did the agent move right after step 12?",
+    recalledText: [
+      "## Explicit Cue Evidence",
+      "[Action 12]: right",
+      "[Observation 12]: The wall is now one tile to the left.",
+    ].join("\n"),
+    answerMode: "agentic-memory",
+    retryUnknownWithEvidence: true,
+    responder: {
+      async respond() {
+        calls += 1;
+        if (calls === 2) {
+          throw new Error("retry timed out");
+        }
+        return {
+          text: "unknown",
+          tokens: { input: 5, output: 1 },
+          latencyMs: 6,
+          model: "first-model",
+        };
+      },
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.finalAnswer, "unknown");
+  assert.deepEqual(result.tokens, { input: 5, output: 1 });
+  assert.equal(result.latencyMs, 6);
+  assert.equal(result.model, "first-model");
 });
 
 test("strict question builder preserves structured protocols", () => {
@@ -134,6 +274,41 @@ test("agentic-memory question builder preserves strict safety while allowing tra
   assert.match(prompt, /synthesize the best-supported explanation/);
   assert.match(prompt, /do not name a later action outside the range/);
   assert.match(prompt, /Do not answer "unknown" merely because the answer requires inference/);
+});
+
+test("unknown retry helper preserves the original prompt and answer format constraints", () => {
+  const prompt = buildUnknownRetryQuestion(
+    "What happened?\n\nBenchmark answer protocol:",
+    "structured",
+  );
+
+  assert.match(prompt, /What happened\?/);
+  assert.match(prompt, /prior answer was only "unknown"/);
+  assert.match(prompt, /Preserve the requested structured output format exactly/);
+});
+
+test("unknown and explicit trajectory evidence helpers are conservative", () => {
+  assert.equal(isUnknownOnlyAnswer("unknown"), true);
+  assert.equal(isUnknownOnlyAnswer("\"The answer is unknown.\""), true);
+  assert.equal(isUnknownOnlyAnswer("unknown from the context"), false);
+  assert.equal(
+    hasExplicitTrajectoryEvidence(
+      "## Explicit Cue Evidence\n[Action 3]: up\n[Observation 3]: the key moved closer",
+    ),
+    true,
+  );
+  assert.equal(
+    hasExplicitTrajectoryEvidence(
+      "## Explicit Cue Evidence\nThe key moved closer without cited steps",
+    ),
+    false,
+  );
+  assert.equal(
+    hasExplicitTrajectoryEvidence(
+      "## Remnic recall pipeline\n[Action 3]: up\n[Observation 3]: the key moved closer",
+    ),
+    false,
+  );
 });
 
 test("strict question builder preserves free-form summarization prompts", () => {

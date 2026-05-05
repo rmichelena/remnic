@@ -93,6 +93,14 @@ export async function runAmaBenchBenchmark(
           recalledText,
           responder: options.system.responder,
           answerMode: "agentic-memory",
+          questionContext: {
+            benchmark: "AMA-Bench",
+            domain: episode.domain,
+            task: episode.task,
+            taskType: episode.task_type,
+            qaType: qa.type,
+          },
+          retryUnknownWithEvidence: true,
         });
         const judgeResult = await llmJudgeScoreDetailed(
           options.system.judge,

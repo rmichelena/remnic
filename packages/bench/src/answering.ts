@@ -23,12 +23,22 @@ export interface BenchmarkAnswerResult {
   model?: string;
 }
 
+export interface BenchmarkQuestionContext {
+  benchmark?: string;
+  domain?: string;
+  task?: string;
+  taskType?: string;
+  qaType?: string;
+}
+
 export async function answerBenchmarkQuestion(options: {
   question: string;
   recalledText: string;
   responder?: BenchResponder;
   answerMode?: BenchmarkAnswerMode;
   answerFormat?: BenchmarkAnswerFormat;
+  questionContext?: BenchmarkQuestionContext;
+  retryUnknownWithEvidence?: boolean;
 }): Promise<BenchmarkAnswerResult> {
   if (!options.responder) {
     return {
@@ -52,39 +62,68 @@ export async function answerBenchmarkQuestion(options: {
     answerMode === "strict"
       ? buildStrictBenchmarkQuestion(options.question, answerFormat)
       : answerMode === "agentic-memory"
-        ? buildAgenticMemoryBenchmarkQuestion(options.question, answerFormat)
+        ? buildAgenticMemoryBenchmarkQuestion(
+            options.question,
+            answerFormat,
+            options.questionContext,
+          )
       : options.question;
   const response = await options.responder.respond(
     question,
     options.recalledText,
   );
+  const shouldRetry =
+    options.retryUnknownWithEvidence === true &&
+    answerMode === "agentic-memory" &&
+    isUnknownOnlyAnswer(response.text) &&
+    hasExplicitTrajectoryEvidence(options.recalledText);
+  const retryResponse = shouldRetry
+    ? await options.responder
+        .respond(
+          buildUnknownRetryQuestion(question, answerFormat),
+          options.recalledText,
+        )
+        .catch(() => undefined)
+    : undefined;
+  const finalResponse = retryResponse ?? response;
 
   return {
-    finalAnswer: response.text,
+    finalAnswer: finalResponse.text,
     recalledText: options.recalledText,
-    answeredText: response.text,
-    latencyMs: response.latencyMs,
-    tokens: response.tokens,
-    model: response.model,
+    answeredText: finalResponse.text,
+    latencyMs: response.latencyMs + (retryResponse?.latencyMs ?? 0),
+    tokens: retryResponse
+      ? {
+          input: response.tokens.input + retryResponse.tokens.input,
+          output: response.tokens.output + retryResponse.tokens.output,
+        }
+      : response.tokens,
+    model: finalResponse.model ?? response.model,
   };
 }
 
 export function buildAgenticMemoryBenchmarkQuestion(
   question: string,
   answerFormat: BenchmarkAnswerFormat = "auto",
+  context?: BenchmarkQuestionContext,
 ): string {
   const prompt = buildStrictBenchmarkQuestion(question, answerFormat);
   return [
     prompt,
     "",
+    ...formatQuestionContext(context),
+    ...(context ? [""] : []),
     "Agentic trajectory protocol:",
     "- Treat action and observation sequences as evidence for causal, strategic, and temporal reasoning.",
     "- When the question asks why an action mattered, what a maneuver accomplished, what would have happened, or what can be inferred, synthesize the best-supported explanation from the trajectory instead of looking only for an explicit quoted answer.",
     "- For explicit step, action, observation, or turn references, anchor the answer to those exact numbers. Do not shift the answer to a neighboring step unless the question explicitly asks for the next or previous step.",
     "- For cited step ranges, identify the action or state change inside that range; do not name a later action outside the range as the answer.",
-    "- If a game or tool trajectory requires a strategic abstraction, name the concrete mechanism being prepared or avoided, such as pushing a rule block, breaking a rule, opening a path, collecting an object, or undoing a loop.",
+    "- If a game or tool trajectory requires a strategic abstraction, name the concrete mechanism being prepared or avoided, such as pushing a rule block, breaking a rule, opening a path, satisfying a tool requirement, aligning with an object, or undoing a loop.",
+    "- Answer every clause in the question: include both the concrete state/action/value and the causal or strategic implication when the question asks for both.",
     "- Use step numbers, action names, object names, files, tools, commands, rewards, or state changes from the memory context when they support the answer.",
-    "- Do not assume an object disappeared because it was collected, pushed, or overlapped unless the before/after observations or active rules support that mechanism.",
+    "- Do not assume an object disappeared because it was collected, pushed, or overlapped unless the before/after observations, rewards, inventory, or active rules support that mechanism.",
+    "- In grid-game contexts, infer movement from relative-position changes carefully: if a static object's relative offset changes, explain the agent movement that caused that offset change.",
+    "- In rule-manipulation games, distinguish objects from rule text blocks and only claim a push/collect/win condition when active rules or observations support it.",
     "- Do not answer \"unknown\" merely because the answer requires inference; reserve \"unknown\" for cases where the trajectory evidence is absent or contradictory.",
     "- Keep the answer focused on the asked trajectory event and omit unrelated recalled history.",
   ].join("\n");
@@ -153,6 +192,53 @@ export function buildStrictBenchmarkQuestion(
   }
 
   return `${question}\n\n${instructions.join("\n")}`;
+}
+
+export function buildUnknownRetryQuestion(
+  question: string,
+  answerFormat: BenchmarkAnswerFormat = "auto",
+): string {
+  return [
+    question,
+    "",
+    "The prior answer was only \"unknown\", but the supplied Remnic context includes explicit trajectory evidence.",
+    "Retry once by deriving the best-supported answer from that evidence.",
+    "Use \"unknown\" only if the explicit evidence is absent, contradictory, or lacks the exact value requested.",
+    "For causal or strategic questions, answer with the concrete action/state change and the implication it supports.",
+    ...(answerFormat === "structured"
+      ? ["Preserve the requested structured output format exactly."]
+      : []),
+  ].join("\n");
+}
+
+export function isUnknownOnlyAnswer(answer: string): boolean {
+  const normalized = answer
+    .trim()
+    .toLowerCase()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+  return normalized === "unknown" || normalized === "the answer is unknown";
+}
+
+export function hasExplicitTrajectoryEvidence(recalledText: string): boolean {
+  return /^##\s+Explicit Cue Evidence\b/m.test(recalledText)
+    && /\[(?:Action|Observation)\s+\d+\]/.test(recalledText);
+}
+
+function formatQuestionContext(context: BenchmarkQuestionContext | undefined): string[] {
+  if (!context) {
+    return [];
+  }
+  const lines = [
+    "Benchmark context:",
+    ...(context.benchmark ? [`- Benchmark: ${context.benchmark}`] : []),
+    ...(context.domain ? [`- Domain: ${context.domain}`] : []),
+    ...(context.taskType ? [`- Task type: ${context.taskType}`] : []),
+    ...(context.qaType ? [`- QA type: ${context.qaType}`] : []),
+    ...(context.task ? [`- Task setting: ${context.task}`] : []),
+  ];
+  return lines.length > 1 ? lines : [];
 }
 
 export function inferAnswerFormat(question: string): BenchmarkAnswerFormat {
