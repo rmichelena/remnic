@@ -21,13 +21,20 @@ export type AmaBenchJudgeProtocol = "default" | "recommended";
  * the `localLlm*` plugin config on the Remnic core side so that
  * `remnic bench published --provider local-llm` actually exercises
  * the same transport path as the running plugin. Issue #566 slice 5.
+ *
+ * `codex-cli` shells out to `codex exec` as an isolated benchmark-only
+ * responder/judge target. It is intentionally not routed through Remnic
+ * memory or OpenClaw gateway state.
  */
 export type BuiltInProvider =
   | "openai"
   | "anthropic"
   | "ollama"
   | "litellm"
-  | "local-llm";
+  | "local-llm"
+  | "codex-cli";
+
+export type BenchReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 export interface ProviderConfig {
   provider: BuiltInProvider;
@@ -36,6 +43,7 @@ export interface ProviderConfig {
   apiKey?: string;
   retryOptions?: { maxAttempts?: number; baseBackoffMs?: number; timeoutMs?: number; max429WaitMs?: number };
   disableThinking?: boolean;
+  reasoningEffort?: BenchReasoningEffort;
 }
 
 export interface TaskTokenUsage {

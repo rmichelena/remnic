@@ -316,6 +316,7 @@ type PackageBenchProviderConfig = {
     max429WaitMs?: number;
   };
   disableThinking?: boolean;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
 };
 
 type PackageBenchModule = {
@@ -533,6 +534,7 @@ interface BenchProviderConfig {
     max429WaitMs?: number;
   };
   disableThinking?: boolean;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
 }
 
 interface ResolveBenchRuntimeProfileOptions {
@@ -647,11 +649,11 @@ Options:
   --gateway-agent-id <id>  OpenClaw agent persona id for gateway model routing
   --fast-gateway-agent-id <id>
                            OpenClaw fast-tier agent persona id for gateway model routing
-  --system-provider <openai|anthropic|ollama|litellm>
+  --system-provider <openai|anthropic|ollama|litellm|local-llm|codex-cli>
                            Use a direct provider-backed answering path
   --system-model <model>   Model name for the direct answering provider
   --system-base-url <url>  Base URL for the direct answering provider
-  --judge-provider <openai|anthropic|ollama|litellm>
+  --judge-provider <openai|anthropic|ollama|litellm|local-llm|codex-cli>
                            Use a direct provider-backed judge
   --judge-model <model>    Model name for the judge provider
   --judge-base-url <url>   Base URL for the judge provider
@@ -686,6 +688,7 @@ Examples:
   remnic bench run longmemeval --dataset-dir ~/datasets/longmemeval
   remnic bench run longmemeval --runtime-profile real --remnic-config ~/.config/remnic/config.json
   remnic bench run longmemeval --runtime-profile real --system-provider openai --system-model gpt-5.4-mini
+  remnic bench run longmemeval --quick --system-provider codex-cli --system-model gpt-5.5 --judge-provider codex-cli --judge-model gpt-5.5
   remnic bench run ama-bench --runtime-profile real --system-provider ollama --system-model gemma4:31b-cloud --judge-provider ollama --judge-model qwen3:32b --ama-bench-judge-protocol recommended
   remnic bench run longmemeval --runtime-profile openclaw-chain --openclaw-config ~/.openclaw/openclaw.json --gateway-agent-id memory-primary
   remnic bench run longmemeval --matrix baseline,real,openclaw-chain

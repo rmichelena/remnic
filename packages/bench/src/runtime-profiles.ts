@@ -350,6 +350,7 @@ function resolveProviderConfig(
         } }
       : {}),
     ...(disableThinking ? { disableThinking: true } : {}),
+    ...(provider === "codex-cli" ? { reasoningEffort: "xhigh" as const } : {}),
   };
 }
 
@@ -389,6 +390,7 @@ function asProviderFactoryConfig(config: ProviderConfig): ProviderFactoryConfig 
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
     ...(config.retryOptions ? { retryOptions: config.retryOptions } : {}),
     ...(config.disableThinking ? { disableThinking: config.disableThinking } : {}),
+    ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
   } as ProviderFactoryConfig;
 }
 

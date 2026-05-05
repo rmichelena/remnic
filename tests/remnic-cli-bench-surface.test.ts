@@ -183,9 +183,9 @@ test("bench CLI exposes runtime profile and provider-backed run surfaces", async
   assert.match(source, /--model-source <plugin\|gateway>/);
   assert.match(source, /--gateway-agent-id <id>/);
   assert.match(source, /--fast-gateway-agent-id <id>/);
-  assert.match(source, /--system-provider <openai\|anthropic\|ollama\|litellm>/);
+  assert.match(source, /--system-provider <openai\|anthropic\|ollama\|litellm\|local-llm\|codex-cli>/);
   assert.match(source, /--system-model <model>/);
-  assert.match(source, /--judge-provider <openai\|anthropic\|ollama\|litellm>/);
+  assert.match(source, /--judge-provider <openai\|anthropic\|ollama\|litellm\|local-llm\|codex-cli>/);
   assert.match(source, /--judge-model <model>/);
   assert.match(source, /remnic bench run --quick longmemeval --runtime-profile baseline/);
   assert.match(source, /remnic bench run longmemeval --runtime-profile real --remnic-config/);
@@ -977,9 +977,9 @@ test("parseBenchArgs rejects unknown bench publish targets", async () => {
   );
 });
 
-// Issue #566 slice 5 — local-llm provider parity. `--provider`,
-// `--system-provider`, and `--judge-provider` must all accept
-// "local-llm" (CLAUDE.md rule 52: allow-lists in lockstep). When
+// Issue #566 slice 5 and Codex CLI provider parity. `--provider`,
+// `--system-provider`, and `--judge-provider` must all accept the same
+// provider list (CLAUDE.md rule 52: allow-lists in lockstep). When
 // the chosen provider is local-llm, a base URL is REQUIRED at the
 // boundary — silent OpenAI fallback violates rule 51.
 test("parseBenchArgs accepts --provider local-llm with --base-url", async () => {
@@ -1073,7 +1073,7 @@ test("parseBenchArgs rejects unknown providers across all three flags with liste
         "--model",
         "m",
       ]),
-    /ERROR: --provider must be one of "openai", "anthropic", "ollama", "litellm", or "local-llm"\./,
+    /ERROR: --provider must be one of "openai", "anthropic", "ollama", "litellm", "local-llm", or "codex-cli"\./,
   );
   assert.throws(
     () =>
@@ -1085,7 +1085,7 @@ test("parseBenchArgs rejects unknown providers across all three flags with liste
         "--system-model",
         "m",
       ]),
-    /ERROR: --system-provider must be one of "openai", "anthropic", "ollama", "litellm", or "local-llm"\./,
+    /ERROR: --system-provider must be one of "openai", "anthropic", "ollama", "litellm", "local-llm", or "codex-cli"\./,
   );
   assert.throws(
     () =>
@@ -1097,7 +1097,7 @@ test("parseBenchArgs rejects unknown providers across all three flags with liste
         "--judge-model",
         "m",
       ]),
-    /ERROR: --judge-provider must be one of "openai", "anthropic", "ollama", "litellm", or "local-llm"\./,
+    /ERROR: --judge-provider must be one of "openai", "anthropic", "ollama", "litellm", "local-llm", or "codex-cli"\./,
   );
 });
 

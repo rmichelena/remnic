@@ -18,6 +18,7 @@ export type {
   BenchmarkStatus,
   BenchmarkCategory,
   BenchRuntimeProfile,
+  BenchReasoningEffort,
   BuiltInProvider,
   ProviderConfig,
   TaskTokenUsage,
@@ -95,6 +96,7 @@ export type {
 } from "./ingestion-adapters/synthetic-email-adapter.js";
 export type {
   AnthropicProviderConfig,
+  CodexCliProviderConfig,
   CompletionOpts,
   CompletionResult,
   DiscoveredModel,
@@ -142,6 +144,7 @@ export type {
   WriteBenchmarkArtifactResult,
 } from "./published-artifact.js";
 export { createAnthropicProvider } from "./providers/anthropic.js";
+export { createCodexCliProvider } from "./providers/codex-cli.js";
 export { getRemnicVersion } from "./reporter.js";
 export {
   createProvider,

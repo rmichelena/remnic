@@ -154,6 +154,26 @@ test("parseBenchArgs accepts --provider shorthand", () => {
   assert.equal(parsed.systemBaseUrl, "https://api.openai.com");
 });
 
+test("parseBenchArgs accepts codex-cli as a system and judge provider", () => {
+  const parsed = parseBenchArgs([
+    "run",
+    "longmemeval",
+    "--system-provider",
+    "codex-cli",
+    "--system-model",
+    "gpt-5.5",
+    "--judge-provider",
+    "codex-cli",
+    "--judge-model",
+    "gpt-5.5",
+  ]);
+
+  assert.equal(parsed.systemProvider, "codex-cli");
+  assert.equal(parsed.systemModel, "gpt-5.5");
+  assert.equal(parsed.judgeProvider, "codex-cli");
+  assert.equal(parsed.judgeModel, "gpt-5.5");
+});
+
 test("parseBenchArgs accepts AMA-Bench recommended judge and cross-judge flags", () => {
   const parsed = parseBenchArgs([
     "run",
@@ -215,7 +235,7 @@ test("parseBenchArgs rejects unknown --provider", () => {
         "--provider",
         "not-a-provider",
       ]),
-    /--provider must be one of "openai", "anthropic", "ollama", "litellm", or "local-llm"/,
+    /--provider must be one of "openai", "anthropic", "ollama", "litellm", "local-llm", or "codex-cli"/,
   );
 });
 

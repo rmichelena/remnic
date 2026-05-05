@@ -308,3 +308,26 @@ test("provider-backed runtime resolution rejects incomplete provider configurati
     /judge provider requires both provider and model/i,
   );
 });
+
+test("provider-backed runtime resolution configures codex-cli with xhigh reasoning", async () => {
+  const resolved = await resolveBenchRuntimeProfile({
+    runtimeProfile: "baseline",
+    systemProvider: "codex-cli",
+    systemModel: "gpt-5.5",
+    judgeProvider: "codex-cli",
+    judgeModel: "gpt-5.5",
+  });
+
+  assert.deepEqual(resolved.systemProvider, {
+    provider: "codex-cli",
+    model: "gpt-5.5",
+    reasoningEffort: "xhigh",
+  });
+  assert.deepEqual(resolved.judgeProvider, {
+    provider: "codex-cli",
+    model: "gpt-5.5",
+    reasoningEffort: "xhigh",
+  });
+  assert.equal(typeof resolved.adapterOptions.responder?.respond, "function");
+  assert.equal(typeof resolved.adapterOptions.judge?.score, "function");
+});

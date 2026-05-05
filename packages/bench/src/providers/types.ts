@@ -2,7 +2,10 @@
  * Minimal LLM provider contract for the bench engine.
  */
 
-import type { BuiltInProvider } from "../types.js";
+import type {
+  BenchReasoningEffort,
+  BuiltInProvider,
+} from "../types.js";
 
 export interface CompletionOpts {
   systemPrompt?: string;
@@ -63,11 +66,20 @@ export interface LocalLlmProviderConfig extends ProviderBaseConfig {
   baseUrl: string;
 }
 
+export interface CodexCliProviderConfig extends ProviderBaseConfig {
+  provider?: "codex-cli";
+  /** Codex CLI model reasoning effort. Bench CLI defaults this to xhigh. */
+  reasoningEffort?: BenchReasoningEffort;
+  /** Optional executable override for tests or non-standard Codex CLI installs. */
+  executable?: string;
+}
+
 export type ProviderFactoryConfig =
   | (OpenAiCompatibleProviderConfig & { provider: "openai" | "litellm" })
   | (AnthropicProviderConfig & { provider: "anthropic" })
   | (OllamaProviderConfig & { provider: "ollama" })
-  | (LocalLlmProviderConfig & { provider: "local-llm" });
+  | (LocalLlmProviderConfig & { provider: "local-llm" })
+  | (CodexCliProviderConfig & { provider: "codex-cli" });
 
 export interface ProviderDiscoveryResult {
   provider: BuiltInProvider;
