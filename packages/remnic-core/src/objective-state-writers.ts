@@ -470,6 +470,10 @@ function syntheticPartId(options: {
       String(options.messageIndex),
       String(options.part.ordinal ?? options.partIndex),
       options.part.kind,
+      optionalString(options.part.toolName) ?? "",
+      optionalString(options.part.tool_name) ?? "",
+      optionalString(options.part.filePath) ?? "",
+      optionalString(options.part.file_path) ?? "",
       stableStringify(options.part.payload),
     ].join("|"),
   ).slice(0, 12);

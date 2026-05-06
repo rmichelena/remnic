@@ -377,6 +377,55 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages uses stable ids for obse
   assert.equal(first[0]?.snapshotId, second[0]?.snapshotId);
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages includes top-level part scope in stable ids", () => {
+  const first = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:05:30.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Updated a file.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "file_write",
+            toolName: "write_file",
+            filePath: "workspace/first.txt",
+            payload: {
+              content: "same content",
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const second = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:30.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Updated a file.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "file_write",
+            toolName: "write_file",
+            filePath: "workspace/second.txt",
+            payload: {
+              content: "same content",
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.notEqual(first[0]?.snapshotId, second[0]?.snapshotId);
+});
+
 test("deriveObjectiveStateSnapshotsFromAgentMessages falls back to generic failed tool snapshots", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromAgentMessages({
     sessionKey: "agent:main",
