@@ -3369,6 +3369,20 @@ export class EngramAccessService {
       projectTag: request.projectTag,
     });
 
+    const hasExplicitNamespace =
+      typeof request.namespace === "string" &&
+      request.namespace.trim().length > 0;
+    const objectiveStateNamespace = hasExplicitNamespace
+      ? namespace
+      : this.orchestrator.applyCodingNamespaceOverlay(
+          request.sessionKey,
+          namespace,
+        );
+    const objectiveStateSessionKey =
+      objectiveStateNamespace !== this.orchestrator.config.defaultNamespace
+        ? `${objectiveStateNamespace}:${request.sessionKey}`
+        : request.sessionKey;
+
     // Prefix sessionKey with namespace for LCM archival so turns are namespace-scoped.
     // This ensures multi-tenant isolation in the LCM archive.
     const lcmSessionKey = namespace !== this.orchestrator.config.defaultNamespace
@@ -3381,14 +3395,16 @@ export class EngramAccessService {
     ) {
       try {
         const objectiveStateLocation =
-          await this.objectiveStateStoreLocationForNamespace(namespace);
+          await this.objectiveStateStoreLocationForNamespace(
+            objectiveStateNamespace,
+          );
         await recordObjectiveStateSnapshotsFromObservedMessages({
           memoryDir: objectiveStateLocation.memoryDir,
           objectiveStateStoreDir: objectiveStateLocation.objectiveStateStoreDir,
           objectiveStateMemoryEnabled: this.orchestrator.config.objectiveStateMemoryEnabled,
           objectiveStateSnapshotWritesEnabled:
             this.orchestrator.config.objectiveStateSnapshotWritesEnabled,
-          sessionKey: lcmSessionKey,
+          sessionKey: objectiveStateSessionKey,
           recordedAt: new Date().toISOString(),
           messages: request.messages,
         });

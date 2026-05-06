@@ -17,8 +17,19 @@ function createObjectiveStateObserveService(
       includeInRecallByDefault?: boolean;
     }>;
     storageDirs?: Record<string, string>;
+    codingMode?: {
+      projectScope?: boolean;
+      branchScope?: boolean;
+      globalFallback?: boolean;
+    };
+    applyCodingNamespaceOverlay?: (
+      sessionKey: string | undefined,
+      baseNamespace: string,
+      codingContext: unknown,
+    ) => string;
   } = {},
 ): EngramAccessService {
+  const codingContexts = new Map<string, unknown>();
   return new EngramAccessService({
     config: {
       memoryDir,
@@ -33,6 +44,11 @@ function createObjectiveStateObserveService(
       recallCrossNamespaceBudgetWindowMs: 60_000,
       recallCrossNamespaceBudgetSoftLimit: 10,
       recallCrossNamespaceBudgetHardLimit: 30,
+      codingMode: options.codingMode ?? {
+        projectScope: false,
+        branchScope: false,
+        globalFallback: false,
+      },
       objectiveStateMemoryEnabled: true,
       objectiveStateSnapshotWritesEnabled: true,
     },
@@ -40,6 +56,20 @@ function createObjectiveStateObserveService(
     getStorage: async (namespace?: string) => ({
       dir: options.storageDirs?.[namespace ?? "global"] ?? memoryDir,
     }),
+    getCodingContextForSession: (sessionKey?: string) =>
+      sessionKey ? codingContexts.get(sessionKey) ?? null : null,
+    setCodingContextForSession: (sessionKey: string, codingContext: unknown) => {
+      codingContexts.set(sessionKey, codingContext);
+    },
+    applyCodingNamespaceOverlay: (
+      sessionKey: string | undefined,
+      baseNamespace: string,
+    ) =>
+      options.applyCodingNamespaceOverlay?.(
+        sessionKey,
+        baseNamespace,
+        sessionKey ? codingContexts.get(sessionKey) : null,
+      ) ?? baseNamespace,
   } as never);
 }
 
@@ -166,5 +196,85 @@ test("observe writes objective-state snapshots into the resolved namespace store
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
     await rm(teamDir, { recursive: true, force: true });
+  }
+});
+
+test("observe writes objective-state snapshots into the coding namespace overlay", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-global-"));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-project-"));
+  const service = createObjectiveStateObserveService(memoryDir, {
+    namespacesEnabled: true,
+    storageDirs: { "global-project-a": projectDir },
+    codingMode: {
+      projectScope: true,
+      branchScope: false,
+      globalFallback: false,
+    },
+    applyCodingNamespaceOverlay: (sessionKey, baseNamespace, codingContext) => {
+      assert.equal(sessionKey, "agent:main");
+      assert.equal(baseNamespace, "global");
+      assert.deepEqual(codingContext, {
+        projectId: "tag:project-a",
+        branch: null,
+        rootPath: "tag:project-a",
+        defaultBranch: null,
+      });
+      return "global-project-a";
+    },
+  });
+
+  try {
+    const response = await service.observe({
+      sessionKey: "agent:main",
+      projectTag: "project-a",
+      skipExtraction: true,
+      messages: [
+        {
+          role: "assistant",
+          content: "Ran the project validation command.",
+          parts: [
+            {
+              ordinal: 0,
+              kind: "tool_call",
+              toolName: "exec_command",
+              payload: {
+                id: "call-project-validate",
+                name: "exec_command",
+                arguments: { cmd: "npm run project-validate" },
+              },
+            },
+            {
+              ordinal: 1,
+              kind: "tool_result",
+              payload: {
+                id: "call-project-validate",
+                output: { exitCode: 0, stdout: "all checks passed" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(response.accepted, 1);
+
+    const globalStatus = await getObjectiveStateStoreStatus({
+      memoryDir,
+      enabled: true,
+      writesEnabled: true,
+    });
+    const projectStatus = await getObjectiveStateStoreStatus({
+      memoryDir: projectDir,
+      enabled: true,
+      writesEnabled: true,
+    });
+
+    assert.equal(globalStatus.snapshots.total, 0);
+    assert.equal(projectStatus.snapshots.total, 1);
+    assert.equal(projectStatus.latestSnapshot?.sessionKey, "global-project-a:agent:main");
+    assert.equal(projectStatus.latestSnapshot?.scope, "npm run project-validate");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+    await rm(projectDir, { recursive: true, force: true });
   }
 });
