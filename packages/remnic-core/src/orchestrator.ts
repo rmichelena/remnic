@@ -6875,9 +6875,7 @@ export class Orchestrator {
             }),
             query: retrievalQuery,
             maxResults,
-            sessionKey: namespace !== this.config.defaultNamespace && sessionKey
-              ? `${namespace}:${sessionKey}`
-              : sessionKey,
+            sessionKey,
           });
         }),
       );

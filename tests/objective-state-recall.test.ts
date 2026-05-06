@@ -161,12 +161,30 @@ test("recall searches objective-state snapshots from the requested namespace sto
         schemaVersion: 1,
         snapshotId: "snap-team-validation",
         recordedAt: "2026-03-07T10:01:00.000Z",
-        sessionKey: "team-a:agent:main",
+        sessionKey: "agent:main",
         source: "tool_result",
         kind: "process",
         changeKind: "failed",
         scope: "npm run team-validation",
         summary: "Team validation failed with a namespace-scoped error.",
+        toolName: "exec_command",
+        command: "npm run team-validation",
+        outcome: "failure",
+        tags: ["validation"],
+      },
+    });
+    await recordObjectiveStateSnapshot({
+      memoryDir: teamStorage.dir,
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: "snap-team-other-validation",
+        recordedAt: "2026-03-07T10:02:00.000Z",
+        sessionKey: "agent:other",
+        source: "tool_result",
+        kind: "process",
+        changeKind: "failed",
+        scope: "npm run team-validation",
+        summary: "Other validation failed with a namespace-scoped error.",
         toolName: "exec_command",
         command: "npm run team-validation",
         outcome: "failure",
@@ -183,6 +201,11 @@ test("recall searches objective-state snapshots from the requested namespace sto
     assert.match(context, /## Objective State/);
     assert.match(context, /namespace-scoped error/i);
     assert.equal(context.includes("default-namespace error"), false);
+    assert.ok(
+      context.indexOf("Team validation failed") <
+        context.indexOf("Other validation failed"),
+      "raw session-key boost should rank the current session first",
+    );
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
   }
