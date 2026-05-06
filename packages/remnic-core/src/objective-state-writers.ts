@@ -221,6 +221,14 @@ function inferOutcome(message: Record<string, unknown>, parsedPayload: unknown):
     if (optionalString(parsedPayload.error)) return "failure";
     if (parsedPayload.status === "error" || parsedPayload.status === "failed") return "failure";
     if (parsedPayload.status === "ok" || parsedPayload.status === "success") return "success";
+    const outputText = [
+      optionalString(parsedPayload.stdout),
+      optionalString(parsedPayload.stderr),
+    ].filter((entry): entry is string => entry !== undefined).join("\n");
+    if (outputText) {
+      const outputOutcome = inferOutcome({}, outputText);
+      if (outputOutcome !== "unknown") return outputOutcome;
+    }
   }
   if (typeof parsedPayload === "string") {
     const lowered = parsedPayload.toLowerCase();
@@ -645,7 +653,9 @@ function partHasInlineToolResult(part: LcmMessagePartInput): boolean {
     hasDefinedPayloadKey(payload, "exitCode") ||
     hasDefinedPayloadKey(payload, "ok") ||
     hasDefinedPayloadKey(payload, "success") ||
-    hasDefinedPayloadKey(payload, "error")
+    hasDefinedPayloadKey(payload, "error") ||
+    hasDefinedPayloadKey(payload, "stdout") ||
+    hasDefinedPayloadKey(payload, "stderr")
   );
 }
 

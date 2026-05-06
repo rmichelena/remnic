@@ -774,6 +774,37 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages uses inline file result 
   assert.deepEqual(snapshots[0]?.after, { ref: "workspace/inline-failure.txt" });
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages treats inline stdout as a tool result", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:47.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Ran tests.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              name: "exec_command",
+              arguments: { cmd: "npm test" },
+              stdout: "All tests pass.",
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "process");
+  assert.equal(snapshots[0]?.changeKind, "executed");
+  assert.equal(snapshots[0]?.scope, "npm test");
+  assert.equal(snapshots[0]?.outcome, "success");
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages does not treat file body content as inline result", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",
