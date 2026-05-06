@@ -389,14 +389,17 @@ function objectiveStatePartsForObservedMessage(
   message: ObservedMessageWithParts,
 ): LcmMessagePartInput[] {
   if (message.role === "user") {
+    if (Array.isArray(message.parts) && message.parts.length > 0) {
+      return sanitizeUserRoleToolResultParts(message.parts);
+    }
     const rawContent = message.rawContent ?? message.content;
     if (!containsProviderToolResultBlock(rawContent)) {
       return [];
     }
-    return parseMessageParts(rawContent, {
+    return sanitizeUserRoleToolResultParts(parseMessageParts(rawContent, {
       sourceFormat: message.sourceFormat,
       renderedContent: message.content,
-    }).filter((part) => part.kind === "tool_result");
+    }));
   }
   if (message.role !== "assistant") {
     return [];
@@ -425,6 +428,24 @@ function flattenObservedParts(messages: readonly ObservedMessageWithParts[]): Ob
     if (aOrdinal !== bOrdinal) return aOrdinal - bOrdinal;
     return a.partIndex - b.partIndex;
   });
+}
+
+function sanitizeUserRoleToolResultParts(parts: LcmMessagePartInput[]): LcmMessagePartInput[] {
+  return parts
+    .filter((part) => part.kind === "tool_result")
+    .map((part) => {
+      const payload = { ...partPayload(part) };
+      delete payload.name;
+      delete payload.tool;
+      delete payload.toolName;
+      delete payload.tool_name;
+      return {
+        ...part,
+        toolName: null,
+        tool_name: null,
+        payload,
+      };
+    });
 }
 
 function containsProviderToolResultBlock(value: unknown): boolean {
@@ -642,7 +663,8 @@ function observedPartsToAgentMessages(options: {
         ? id
         : undefined;
 
-      if (partHasInlineToolResult(part)) {
+      const hasSeparateToolResult = resultIds.has(id) || nextIsIdlessToolResult;
+      if (partHasInlineToolResult(part) && !hasSeparateToolResult) {
         synthetic.push({
           role: "tool",
           tool_call_id: id,

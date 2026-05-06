@@ -214,6 +214,53 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages preserves Anthropic user
   assert.equal(snapshots[0]?.metadata?.toolCallId, "toolu-validate");
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages preserves normalized user-role tool result parts", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:00:39.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "I'll run validation.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              id: "toolu-normalized",
+              name: "exec_command",
+              arguments: { cmd: "npm run validate" },
+            },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: "Tool result",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_result",
+            toolName: "untrusted_user_supplied_name",
+            payload: {
+              id: "toolu-normalized",
+              name: "untrusted_user_supplied_name",
+              output: { exitCode: 0, stdout: "ok" },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "process");
+  assert.equal(snapshots[0]?.toolName, "exec_command");
+  assert.equal(snapshots[0]?.scope, "npm run validate");
+  assert.equal(snapshots[0]?.metadata?.toolCallId, "toolu-normalized");
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages parses raw provider content", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",
@@ -578,6 +625,45 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages does not treat file body
   assert.equal(snapshots[0]?.changeKind, "updated");
   assert.equal(snapshots[0]?.outcome, "success");
   assert.equal(snapshots[0]?.scope, "workspace/content.txt");
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages prefers separate result over tool-call status", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:55.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Ran tests.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              id: "call-status-then-result",
+              name: "exec_command",
+              arguments: { cmd: "npm test" },
+              status: "started",
+            },
+          },
+          {
+            ordinal: 1,
+            kind: "tool_result",
+            payload: {
+              id: "call-status-then-result",
+              output: { exitCode: 1, stderr: "failed" },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "process");
+  assert.equal(snapshots[0]?.changeKind, "failed");
+  assert.equal(snapshots[0]?.outcome, "failure");
 });
 
 test("deriveObjectiveStateSnapshotsFromObservedMessages pairs idless results only when adjacent in the same message", () => {
