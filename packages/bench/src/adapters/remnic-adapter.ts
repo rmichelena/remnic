@@ -30,6 +30,7 @@ export interface RemnicAdapterOptions {
   preserveRuntimeDefaults?: boolean;
   responder?: BenchResponder;
   judge?: BenchJudge;
+  drainTimeoutMs?: number;
 }
 
 type BenchAdapterMode = "lightweight" | "direct";
@@ -116,6 +117,7 @@ type OrchestratorTeardownView = {
 };
 
 const BENCH_TEARDOWN_DEFERRED_READY_WAIT_MS = 500;
+const DEFAULT_BENCH_DRAIN_TIMEOUT_MS = 5 * 60_000;
 const CORE_EXPLICIT_CUE_MAX_CHARS = 18_000;
 const CORE_EXPLICIT_CUE_MAX_ITEM_CHARS = 2_400;
 const CORE_EXPLICIT_CUE_MAX_REFERENCES = 24;
@@ -321,6 +323,18 @@ function resolveConfiguredQmdBinary(value: string): string {
   return path.resolve(trimmed);
 }
 
+function normalizeDrainTimeoutMs(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_BENCH_DRAIN_TIMEOUT_MS;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `benchmark drain timeout must be a positive integer; received ${String(value)}`,
+    );
+  }
+  return value;
+}
+
 async function removeBenchQmdSandbox(sandbox: BenchQmdSandbox): Promise<void> {
   if (!sandbox.indexName.startsWith("remnic-bench-")) {
     return;
@@ -336,6 +350,7 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
     options: RemnicAdapterOptions = {},
   ): Promise<BenchMemoryAdapter> {
     const useCoreMemoryPipeline = shouldUseCoreMemoryPipeline(mode, options);
+    const drainTimeoutMs = normalizeDrainTimeoutMs(options.drainTimeoutMs);
     let state = await createBenchOrchestrator(
       mode,
       options.configOverrides,
@@ -640,23 +655,22 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
       },
 
       async drain(): Promise<void> {
-        const DRAIN_TIMEOUT_MS = 5 * 60_000;
         const engine = getEngine();
         const abortController = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
         const timeout = new Promise<void>((_, reject) => {
           timer = setTimeout(() => {
             abortController.abort();
-            reject(new Error("drain() timed out after 5 minutes"));
-          }, DRAIN_TIMEOUT_MS);
+            reject(new Error(`drain() timed out after ${drainTimeoutMs}ms`));
+          }, drainTimeoutMs);
         });
         try {
           await Promise.race([
             (async () => {
               const [, extractionIdle, consolidationIdle] = await Promise.all([
                 engine.waitForObserveQueueIdle(),
-                state.orchestrator.waitForExtractionIdle(DRAIN_TIMEOUT_MS),
-                state.orchestrator.waitForConsolidationIdle(DRAIN_TIMEOUT_MS),
+                state.orchestrator.waitForExtractionIdle(drainTimeoutMs),
+                state.orchestrator.waitForConsolidationIdle(drainTimeoutMs),
               ]);
               if (!extractionIdle) {
                 throw new Error("drain() timed out waiting for extraction idle");

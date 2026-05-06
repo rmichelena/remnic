@@ -67,6 +67,7 @@ export interface ResolvedBenchRuntimeProfile {
     preserveRuntimeDefaults?: boolean;
     responder?: BenchResponder;
     judge?: BenchJudge;
+    drainTimeoutMs?: number;
   };
   systemProvider: ProviderConfig | null;
   judgeProvider: ProviderConfig | null;
@@ -122,6 +123,7 @@ export async function resolveBenchRuntimeProfile(
     internalProvider,
     { disableThinking: options.internalDisableThinking === true },
   );
+  const drainTimeoutMs = normalizeDrainTimeoutMs(options.requestTimeout);
   registerCodexCliFallbackRunnerIfNeeded(internalProvider);
   const responderFactoryConfig = systemProvider
     ? asProviderFactoryConfig(systemProvider)
@@ -161,6 +163,7 @@ export async function resolveBenchRuntimeProfile(
         configOverrides: effectiveRemnicConfig,
         responder,
         judge,
+        ...(drainTimeoutMs ? { drainTimeoutMs } : {}),
       },
       systemProvider,
       judgeProvider,
@@ -205,6 +208,7 @@ export async function resolveBenchRuntimeProfile(
         preserveRuntimeDefaults: true,
         responder,
         judge,
+        ...(drainTimeoutMs ? { drainTimeoutMs } : {}),
       },
       systemProvider,
       judgeProvider,
@@ -259,6 +263,7 @@ export async function resolveBenchRuntimeProfile(
       preserveRuntimeDefaults: true,
       responder: gatewayResponder,
       judge,
+      ...(drainTimeoutMs ? { drainTimeoutMs } : {}),
     },
     systemProvider: null,
     judgeProvider,
@@ -400,6 +405,18 @@ function resolveProviderConfig(
     ...(disableThinking ? { disableThinking: true } : {}),
     ...(provider === "codex-cli" ? { reasoningEffort: reasoningEffort ?? "xhigh" } : {}),
   };
+}
+
+function normalizeDrainTimeoutMs(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `request timeout must be a positive integer when used for benchmark drain; received ${value}`,
+    );
+  }
+  return value;
 }
 
 function applyInternalProviderDefaults(

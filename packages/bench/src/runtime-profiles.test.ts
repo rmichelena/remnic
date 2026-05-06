@@ -353,12 +353,15 @@ test("runtime profile can route Remnic internal LLM calls through codex-cli", as
     internalProvider: "codex-cli",
     internalModel: "gpt-5.5",
     internalCodexReasoningEffort: "xhigh",
+    requestTimeout: 900_000,
   });
 
+  assert.equal(resolved.adapterOptions.drainTimeoutMs, 900_000);
   assert.deepEqual(resolved.internalProvider, {
     provider: "codex-cli",
     model: "gpt-5.5",
     baseUrl: "codex-cli://local",
+    retryOptions: { timeoutMs: 900_000 },
     reasoningEffort: "xhigh",
   });
   assert.equal(resolved.remnicConfig.modelSource, "gateway");
