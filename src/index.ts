@@ -15,6 +15,7 @@ import { registerTools } from "./tools.js";
 import { registerLcmTools } from "./lcm/index.js";
 import { estimateTokens as estimateLcmTokens } from "./lcm/archive.js";
 import { registerCli } from "./cli.js";
+import { objectiveStateStoreOverrideForNamespace } from "./objective-state.js";
 import { recordObjectiveStateSnapshotsFromAgentMessages } from "./objective-state-writers.js";
 import { probeQmdAvailability } from "./qmd-availability-probe.js";
 import { EngramAccessService } from "./access-service.js";
@@ -2972,15 +2973,33 @@ const pluginDefinition = {
           }
 
           try {
+            const objectiveStateNamespace =
+              orchestrator.config.namespacesEnabled &&
+              typeof orchestrator.resolveSelfNamespace === "function"
+                ? orchestrator.resolveSelfNamespace(sessionKey)
+                : orchestrator.config.defaultNamespace;
+            const objectiveStateStorage =
+              orchestrator.config.namespacesEnabled &&
+              typeof orchestrator.getStorageForNamespace === "function"
+                ? await orchestrator.getStorageForNamespace(objectiveStateNamespace)
+                : null;
             await recordObjectiveStateSnapshotsFromAgentMessages({
-              memoryDir: orchestrator.config.memoryDir,
-              objectiveStateStoreDir:
-                orchestrator.config.objectiveStateStoreDir,
+              memoryDir:
+                objectiveStateStorage?.dir ?? orchestrator.config.memoryDir,
+              objectiveStateStoreDir: objectiveStateStoreOverrideForNamespace({
+                memoryDir: orchestrator.config.memoryDir,
+                configuredStoreDir: orchestrator.config.objectiveStateStoreDir,
+                namespacesEnabled: orchestrator.config.namespacesEnabled,
+                namespace: objectiveStateNamespace,
+              }),
               objectiveStateMemoryEnabled:
                 orchestrator.config.objectiveStateMemoryEnabled,
               objectiveStateSnapshotWritesEnabled:
                 orchestrator.config.objectiveStateSnapshotWritesEnabled,
-              sessionKey,
+              sessionKey: orchestrator.config.namespacesEnabled &&
+                objectiveStateNamespace !== orchestrator.config.defaultNamespace
+                ? `${objectiveStateNamespace}:${sessionKey}`
+                : sessionKey,
               recordedAt: eventTimestamp,
               messages,
             });
