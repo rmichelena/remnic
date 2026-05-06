@@ -8,6 +8,7 @@ import { EngramAccessInputError, EngramAccessService } from "../src/access-servi
 import { runMemoryGovernance } from "../src/maintenance/memory-governance.ts";
 import { rebuildMemoryProjection } from "../src/maintenance/rebuild-memory-projection.ts";
 import { getMemoryProjectionPath } from "../src/memory-projection-store.js";
+import { getObjectiveStateStoreStatus } from "../src/objective-state.js";
 import {
   keyring,
   runSecureStoreInit,
@@ -105,6 +106,85 @@ function createService(dreamsPhases = dreamsPhasesConfig()) {
   };
   return new EngramAccessService(orchestrator as any);
 }
+
+test("observe writes raw session keys to namespaced objective-state stores", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-access-observe-obj-ns-"));
+  const namespace = "project-x";
+  const namespaceDir = path.join(memoryDir, "namespaces", namespace);
+  const objectiveStateStoreDir = path.join(memoryDir, "objective-state-override");
+  const service = new EngramAccessService({
+    config: {
+      memoryDir,
+      namespacesEnabled: true,
+      defaultNamespace: "global",
+      sharedNamespace: "shared",
+      principalFromSessionKeyMode: "prefix",
+      principalFromSessionKeyRules: [],
+      namespacePolicies: [
+        {
+          name: namespace,
+          readPrincipals: [namespace],
+          writePrincipals: [namespace],
+        },
+      ],
+      defaultRecallNamespaces: ["self"],
+      objectiveStateMemoryEnabled: true,
+      objectiveStateSnapshotWritesEnabled: true,
+      objectiveStateStoreDir,
+    },
+    getStorage: async (requestedNamespace: string) => {
+      assert.equal(requestedNamespace, namespace);
+      return { dir: namespaceDir };
+    },
+  } as any);
+
+  try {
+    await service.observe({
+      sessionKey: "agent-session",
+      namespace,
+      authenticatedPrincipal: namespace,
+      skipExtraction: true,
+      messages: [
+        {
+          role: "assistant",
+          content: "Ran verification.",
+          parts: [
+            {
+              ordinal: 0,
+              kind: "tool_call",
+              toolName: "exec_command",
+              payload: {
+                id: "call-access-observe",
+                name: "exec_command",
+                arguments: { cmd: "npm test" },
+              },
+            },
+            {
+              ordinal: 1,
+              kind: "tool_result",
+              payload: {
+                id: "call-access-observe",
+                output: { exitCode: 0, stdout: "ok" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const status = await getObjectiveStateStoreStatus({
+      memoryDir: namespaceDir,
+      objectiveStateStoreDir: path.join(objectiveStateStoreDir, "namespaces", namespace),
+      enabled: true,
+      writesEnabled: true,
+    });
+    assert.equal(status.snapshots.total, 1);
+    assert.equal(status.latestSnapshot?.sessionKey, "agent-session");
+    assert.equal(status.latestSnapshot?.kind, "process");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
 
 function createMemoryActionService(contextCompressionActionsEnabled: boolean) {
   const capturedEvents: any[] = [];

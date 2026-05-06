@@ -3407,10 +3407,6 @@ export class EngramAccessService {
           request.sessionKey,
           objectiveStateBaseNamespace,
         );
-    const objectiveStateSessionKey =
-      objectiveStateNamespace !== this.orchestrator.config.defaultNamespace
-        ? `${objectiveStateNamespace}:${request.sessionKey}`
-        : request.sessionKey;
 
     // Prefix sessionKey with namespace for LCM archival so turns are namespace-scoped.
     // This ensures multi-tenant isolation in the LCM archive.
@@ -3430,7 +3426,7 @@ export class EngramAccessService {
           objectiveStateMemoryEnabled: this.orchestrator.config.objectiveStateMemoryEnabled,
           objectiveStateSnapshotWritesEnabled:
             this.orchestrator.config.objectiveStateSnapshotWritesEnabled,
-          sessionKey: objectiveStateSessionKey,
+          sessionKey: request.sessionKey,
           recordedAt: new Date().toISOString(),
           messages: request.messages,
         });

@@ -2996,10 +2996,7 @@ const pluginDefinition = {
                 orchestrator.config.objectiveStateMemoryEnabled,
               objectiveStateSnapshotWritesEnabled:
                 orchestrator.config.objectiveStateSnapshotWritesEnabled,
-              sessionKey: orchestrator.config.namespacesEnabled &&
-                objectiveStateNamespace !== orchestrator.config.defaultNamespace
-                ? `${objectiveStateNamespace}:${sessionKey}`
-                : sessionKey,
+              sessionKey,
               recordedAt: eventTimestamp,
               messages,
             });

@@ -373,7 +373,7 @@ test("scenario: agent_end objective-state snapshots use namespaced configured st
     const snapshot = JSON.parse(
       fs.readFileSync(snapshotFiles[0]!, "utf8"),
     ) as { sessionKey?: string; kind?: string; scope?: string };
-    assert.equal(snapshot.sessionKey, `${namespace}:agent-session`);
+    assert.equal(snapshot.sessionKey, "agent-session");
     assert.equal(snapshot.kind, "process");
     assert.equal(snapshot.scope, "npm test");
     assert.equal(fs.existsSync(path.join(overrideDir, "snapshots")), false);
