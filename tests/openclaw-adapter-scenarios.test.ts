@@ -65,6 +65,20 @@ async function withScenarioRegistration(
   }
 }
 
+function listJsonFiles(root: string): string[] {
+  if (!fs.existsSync(root)) return [];
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listJsonFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".json")) {
+      files.push(fullPath);
+    }
+  }
+  return files.sort((left, right) => left.localeCompare(right));
+}
+
 test("scenario: memory_store writes through the registered tool and memory_search routes through active memory search", async () => {
   await withScenarioRegistration(async ({ capture, orchestrator }) => {
     const store = registeredTool(capture, "memory_store");
@@ -299,6 +313,70 @@ test("scenario: agent_end buffers the last user and assistant turns without live
     assert.match(processed[0].content, /compact dashboard preference/);
     assert.equal(processed[0].options.logicalSessionKey, "agent-session");
     assert.equal(processed[0].options.bufferKey, "agent-session");
+  });
+});
+
+test("scenario: agent_end objective-state snapshots use namespaced configured store overrides", async () => {
+  await withScenarioRegistration(async ({ capture, orchestrator, memoryDir }) => {
+    const namespace = "project-a";
+    const namespaceDir = path.join(memoryDir, "namespaces", namespace);
+    const overrideDir = path.join(memoryDir, "objective-override");
+    orchestrator.config.namespacesEnabled = true;
+    orchestrator.config.objectiveStateMemoryEnabled = true;
+    orchestrator.config.objectiveStateSnapshotWritesEnabled = true;
+    orchestrator.config.objectiveStateStoreDir = overrideDir;
+    orchestrator.resolveSelfNamespace = () => namespace;
+    orchestrator.getStorageForNamespace = async (requestedNamespace: string) => {
+      assert.equal(requestedNamespace, namespace);
+      return { dir: namespaceDir };
+    };
+    orchestrator.processTurn = async () => {};
+
+    const agentEnd = registeredHook(capture, "agent_end");
+    await agentEnd(
+      {
+        success: true,
+        messages: [
+          {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "call-agent-end-test",
+                function: {
+                  name: "exec_command",
+                  arguments: JSON.stringify({ cmd: "npm test" }),
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call-agent-end-test",
+            name: "exec_command",
+            content: JSON.stringify({ exitCode: 0, stdout: "ok" }),
+          },
+          { role: "user", content: "Please remember that tests passed." },
+          { role: "assistant", content: "Tests passed." },
+        ],
+      },
+      { sessionKey: "agent-session" },
+    );
+
+    const snapshotsRoot = path.join(
+      overrideDir,
+      "namespaces",
+      namespace,
+      "snapshots",
+    );
+    const snapshotFiles = listJsonFiles(snapshotsRoot);
+    assert.equal(snapshotFiles.length, 1);
+    const snapshot = JSON.parse(
+      fs.readFileSync(snapshotFiles[0]!, "utf8"),
+    ) as { sessionKey?: string; kind?: string; scope?: string };
+    assert.equal(snapshot.sessionKey, "agent-session");
+    assert.equal(snapshot.kind, "process");
+    assert.equal(snapshot.scope, "npm test");
+    assert.equal(fs.existsSync(path.join(overrideDir, "snapshots")), false);
   });
 });
 

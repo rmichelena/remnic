@@ -119,6 +119,8 @@ import {
   type MemoryOutcomeKind,
   type RecordMemoryOutcomeResult,
 } from "./memory-worth-outcomes.js";
+import { objectiveStateStoreOverrideForNamespace } from "./objective-state.js";
+import { recordObjectiveStateSnapshotsFromObservedMessages } from "./objective-state-writers.js";
 import {
   importCapsule as importCapsuleFn,
   type ImportCapsuleOptions,
@@ -974,6 +976,28 @@ export class EngramAccessService {
       throw new EngramAccessInputError(`namespace is not writable: ${resolved}`);
     }
     return resolved;
+  }
+
+  private async objectiveStateStoreLocationForNamespace(namespace: string): Promise<{
+    memoryDir: string;
+    objectiveStateStoreDir?: string;
+  }> {
+    if (!this.orchestrator.config.namespacesEnabled) {
+      return {
+        memoryDir: this.orchestrator.config.memoryDir,
+        objectiveStateStoreDir: this.orchestrator.config.objectiveStateStoreDir,
+      };
+    }
+    const storage = await this.orchestrator.getStorage(namespace);
+    return {
+      memoryDir: storage.dir,
+      objectiveStateStoreDir: objectiveStateStoreOverrideForNamespace({
+        memoryDir: this.orchestrator.config.memoryDir,
+        configuredStoreDir: this.orchestrator.config.objectiveStateStoreDir,
+        namespacesEnabled: this.orchestrator.config.namespacesEnabled,
+        namespace,
+      }),
+    };
   }
 
   private resolveReadableNamespace(namespace: string | undefined, principal?: string): string {
@@ -3337,11 +3361,37 @@ export class EngramAccessService {
     // Validate namespace authorization BEFORE attaching coding context so
     // a failed auth check doesn't leave orphaned context on the session
     // (Codex review P2).
+    const hasExplicitNamespace =
+      typeof request.namespace === "string" &&
+      request.namespace.trim().length > 0;
+    const principal = this.resolveWritePrincipal(
+      request.sessionKey,
+      request.authenticatedPrincipal,
+    );
     const namespace = this.resolveWritableNamespace(
       request.namespace,
       request.sessionKey,
       request.authenticatedPrincipal,
     );
+    const shouldWriteObjectiveState =
+      this.orchestrator.config.objectiveStateMemoryEnabled === true &&
+      this.orchestrator.config.objectiveStateSnapshotWritesEnabled === true;
+    const objectiveStateBaseNamespace = hasExplicitNamespace
+      ? namespace
+      : defaultNamespaceForPrincipal(principal, this.orchestrator.config);
+    if (
+      shouldWriteObjectiveState &&
+      !hasExplicitNamespace &&
+      !canWriteNamespace(
+        principal,
+        objectiveStateBaseNamespace,
+        this.orchestrator.config,
+      )
+    ) {
+      throw new EngramAccessInputError(
+        `namespace is not writable: ${objectiveStateBaseNamespace}`,
+      );
+    }
 
     // Auto-resolve coding context from cwd/projectTag so observe writes
     // route to the correct project namespace (rule 42: same namespace layer
@@ -3351,11 +3401,39 @@ export class EngramAccessService {
       projectTag: request.projectTag,
     });
 
+    const objectiveStateNamespace = hasExplicitNamespace
+      ? namespace
+      : this.orchestrator.applyCodingNamespaceOverlay(
+          request.sessionKey,
+          objectiveStateBaseNamespace,
+        );
+
     // Prefix sessionKey with namespace for LCM archival so turns are namespace-scoped.
     // This ensures multi-tenant isolation in the LCM archive.
     const lcmSessionKey = namespace !== this.orchestrator.config.defaultNamespace
       ? `${namespace}:${request.sessionKey}`
       : request.sessionKey;
+
+    if (shouldWriteObjectiveState) {
+      try {
+        const objectiveStateLocation =
+          await this.objectiveStateStoreLocationForNamespace(
+            objectiveStateNamespace,
+          );
+        await recordObjectiveStateSnapshotsFromObservedMessages({
+          memoryDir: objectiveStateLocation.memoryDir,
+          objectiveStateStoreDir: objectiveStateLocation.objectiveStateStoreDir,
+          objectiveStateMemoryEnabled: this.orchestrator.config.objectiveStateMemoryEnabled,
+          objectiveStateSnapshotWritesEnabled:
+            this.orchestrator.config.objectiveStateSnapshotWritesEnabled,
+          sessionKey: request.sessionKey,
+          recordedAt: new Date().toISOString(),
+          messages: request.messages,
+        });
+      } catch (err) {
+        log.error(`access-observe objective-state snapshot write failed: ${err}`);
+      }
+    }
 
     // lcmArchived in the response means "LCM archival was queued" (not
     // "completed"), matching extractionQueued semantics.  Both run async.

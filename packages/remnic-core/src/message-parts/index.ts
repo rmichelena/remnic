@@ -53,6 +53,7 @@ export interface LcmMessagePartRow extends LcmMessagePartInput {
 export interface ParseMessagePartsOptions {
   sourceFormat?: MessagePartSourceFormat;
   renderedContent?: string;
+  allowRenderedFallback?: boolean;
 }
 
 const SECRET_KEY_RE = /(api[_-]?key|authorization|bearer|credential|password|secret|token)/i;
@@ -146,8 +147,12 @@ export function parseOpenAiMessageParts(
     }
     if (type === "function_call") {
       const toolName = asNonEmptyString(item.name ?? item.tool_name);
+      const callId = asNonEmptyString(item.call_id ?? item.callId);
+      const itemId = asNonEmptyString(item.id);
       const payload = {
-        id: item.id ?? item.call_id,
+        id: callId ?? itemId,
+        ...(callId ? { call_id: callId } : {}),
+        ...(itemId && itemId !== callId ? { response_item_id: itemId } : {}),
         name: toolName,
         arguments: parseMaybeJson(item.arguments),
       };
@@ -156,7 +161,14 @@ export function parseOpenAiMessageParts(
     }
     if (type === "function_call_output") {
       const output = asNonEmptyString(item.output) ?? JSON.stringify(sanitizePayload(item.output ?? item));
-      parts.push(makePart("tool_result", { id: item.id ?? item.call_id, output }, {
+      const callId = asNonEmptyString(item.call_id ?? item.callId);
+      const itemId = asNonEmptyString(item.id);
+      parts.push(makePart("tool_result", {
+        id: callId ?? itemId,
+        ...(callId ? { call_id: callId } : {}),
+        ...(itemId && itemId !== callId ? { response_item_id: itemId } : {}),
+        output,
+      }, {
         filePath: firstFilePath(output),
       }));
       continue;
@@ -199,7 +211,12 @@ export function parseAnthropicMessageParts(
     if (type === "tool_result") {
       const content = block.content;
       const rendered = renderUnknownContent(content);
-      parts.push(makePart("tool_result", { id: block.tool_use_id, content: sanitizePayload(content) }, {
+      parts.push(makePart("tool_result", {
+        id: block.tool_use_id,
+        content: sanitizePayload(content),
+        ...(typeof block.is_error === "boolean" ? { is_error: block.is_error } : {}),
+        ...(typeof block.isError === "boolean" ? { isError: block.isError } : {}),
+      }, {
         filePath: firstFilePath(rendered),
       }));
       continue;
@@ -252,7 +269,9 @@ export function parseOpenClawMessageParts(
     ]);
   }
 
-  const rendered = options.renderedContent ?? asNonEmptyString(obj.content);
+  const rendered = options.allowRenderedFallback === false
+    ? null
+    : options.renderedContent ?? asNonEmptyString(obj.content);
   return rendered ? withOrdinals(partsFromRenderedText(rendered)) : [];
 }
 
@@ -377,6 +396,9 @@ function withRenderedFallback(
 }
 
 function renderedFallbackParts(options: ParseMessagePartsOptions): LcmMessagePartInput[] {
+  if (options.allowRenderedFallback === false) {
+    return [];
+  }
   const rendered = asNonEmptyString(options.renderedContent);
   return rendered ? partsFromRenderedText(rendered) : [];
 }

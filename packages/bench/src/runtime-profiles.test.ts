@@ -423,6 +423,30 @@ test("runtime profile can route Remnic internal LLM calls through Ollama native 
   );
 });
 
+test("runtime profile can route Remnic internal LLM calls through plugin local-llm", async () => {
+  const resolved = await resolveBenchRuntimeProfile({
+    runtimeProfile: "baseline",
+    internalProvider: "local-llm",
+    internalModel: "qwen3:32b",
+    internalBaseUrl: "http://localhost:1234/v1",
+    internalApiKey: "local-secret",
+  });
+
+  assert.deepEqual(resolved.internalProvider, {
+    provider: "local-llm",
+    model: "qwen3:32b",
+    baseUrl: "http://localhost:1234/v1",
+    apiKey: "[redacted]",
+  });
+  assert.equal(resolved.remnicConfig.modelSource, "plugin");
+  assert.equal(resolved.effectiveRemnicConfig.modelSource, "plugin");
+  assert.equal(resolved.effectiveRemnicConfig.localLlmEnabled, true);
+  assert.equal(resolved.effectiveRemnicConfig.localLlmFallback, false);
+  assert.equal(resolved.effectiveRemnicConfig.localLlmUrl, "http://localhost:1234/v1");
+  assert.equal(resolved.effectiveRemnicConfig.localLlmModel, "qwen3:32b");
+  assert.equal(resolved.effectiveRemnicConfig.localLlmApiKey, "local-secret");
+});
+
 test("runtime profile routes OpenAI internal LLM calls through Responses API", async () => {
   const resolved = await resolveBenchRuntimeProfile({
     runtimeProfile: "baseline",
