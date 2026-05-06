@@ -1,6 +1,13 @@
 #!/usr/bin/env tsx
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +23,7 @@ import type {
   ProviderConfig,
   SanitizedDiagnosticProvider,
   ProviderFactoryConfig,
+  TaskResult,
 } from "@remnic/bench";
 
 type BenchModule = typeof import("@remnic/bench");
@@ -45,11 +53,13 @@ const PROVIDERS: readonly BuiltInProvider[] = Object.freeze([
   "local-llm",
   "codex-cli",
 ]);
+const PROGRESS_TEXT_MAX_CHARS = 2_000;
 
 interface ParsedArgs {
   quick: boolean;
   datasetDir?: string;
   output?: string;
+  progressLog?: string;
   limit?: number;
   seed?: number;
   runtimeProfile: BenchRuntimeProfile;
@@ -98,6 +108,7 @@ interface ParsedArgs {
 interface MatrixRunResult {
   artifact: AmaBenchDiagnosticMatrixArtifact;
   outputPath?: string;
+  progressLogPath?: string;
 }
 
 export async function runAmaBenchDiagnosticMatrix(
@@ -166,10 +177,15 @@ export async function runAmaBenchDiagnosticMatrix(
   const adapterMode = parsed.quick && runtime.profile === "baseline"
     ? "lightweight"
     : "direct";
+  const progress = createProgressReporter(
+    parsed,
+    variants.map((variant) => variant.id),
+  );
   const summaries = [];
 
   for (const variant of variants) {
     process.stderr.write(`[ama-diagnostic] running ${variant.id}\n`);
+    const onTaskComplete = progress.createVariantReporter(variant.id);
     const adapterOptions = {
       ...runtime.adapterOptions,
       ...(primaryJudge ? { judge: primaryJudge } : {}),
@@ -199,6 +215,7 @@ export async function runAmaBenchDiagnosticMatrix(
           ? { amaBenchCrossJudgeProvider: crossJudge.provider }
           : {}),
         system,
+        onTaskComplete,
       });
       summaries.push(
         buildAmaBenchDiagnosticVariantSummary(variant, result, {
@@ -241,10 +258,209 @@ export async function runAmaBenchDiagnosticMatrix(
     const outputPath = path.resolve(parsed.output);
     await mkdir(path.dirname(outputPath), { recursive: true });
     await writeFile(outputPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
-    return { artifact, outputPath };
+    return { artifact, outputPath, progressLogPath: progress.progressLogPath };
   }
 
-  return { artifact };
+  return { artifact, progressLogPath: progress.progressLogPath };
+}
+
+interface ProgressReporter {
+  progressLogPath?: string;
+  createVariantReporter: (
+    variantId: string,
+  ) => (task: TaskResult, completedCount: number, totalCount?: number) => void;
+}
+
+function createProgressReporter(
+  parsed: ParsedArgs,
+  variantIds: readonly string[],
+): ProgressReporter {
+  const progressLogPath = resolveProgressLogPath(parsed);
+  let writableProgressLogPath = progressLogPath;
+  if (progressLogPath) {
+    try {
+      mkdirSync(path.dirname(progressLogPath), { recursive: true });
+      writeFileSync(
+        progressLogPath,
+        `${JSON.stringify({
+          type: "run_started",
+          timestamp: new Date().toISOString(),
+          mode: parsed.quick ? "quick" : "full",
+          limit: parsed.limit ?? null,
+          seed: parsed.seed ?? null,
+          variantIds,
+        })}\n`,
+        "utf8",
+      );
+    } catch (error) {
+      writableProgressLogPath = undefined;
+      process.stderr.write(
+        `[ama-diagnostic] progress log unavailable at ${progressLogPath}: ` +
+          `${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+  let progressWriteFailed = false;
+
+  return {
+    ...(writableProgressLogPath
+      ? { progressLogPath: writableProgressLogPath }
+      : {}),
+    createVariantReporter(variantId) {
+      const startedAtMs = Date.now();
+      return (task, completedCount, totalCount) => {
+        const nowMs = Date.now();
+        const etaAt = estimateEtaAt(startedAtMs, nowMs, completedCount, totalCount);
+        const preferredScore =
+          task.scores.ama_bench_recommended_accuracy ??
+          task.scores.llm_judge ??
+          task.scores.f1;
+        process.stderr.write(
+          `[ama-diagnostic] ${variantId} completed ${completedCount}/${totalCount ?? "?"}` +
+            ` task=${task.taskId}` +
+            ` score=${formatScore(preferredScore)}` +
+            ` elapsed=${formatDuration(nowMs - startedAtMs)}` +
+            ` eta=${etaAt ? formatDallasTimestamp(etaAt) : "n/a"}\n`,
+        );
+        if (writableProgressLogPath) {
+          try {
+            appendFileSync(
+              writableProgressLogPath,
+              `${JSON.stringify(taskToProgressRow({
+                variantId,
+                task,
+                completedCount,
+                totalCount,
+                elapsedMs: nowMs - startedAtMs,
+                etaAt,
+              }))}\n`,
+              "utf8",
+            );
+          } catch (error) {
+            if (!progressWriteFailed) {
+              progressWriteFailed = true;
+              process.stderr.write(
+                `[ama-diagnostic] progress log write failed at ${writableProgressLogPath}: ` +
+                  `${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            }
+          }
+        }
+      };
+    },
+  };
+}
+
+function resolveProgressLogPath(parsed: ParsedArgs): string | undefined {
+  if (parsed.progressLog) {
+    return path.resolve(parsed.progressLog);
+  }
+  if (!parsed.output) {
+    return undefined;
+  }
+  const extension = path.extname(parsed.output);
+  const base = extension
+    ? parsed.output.slice(0, -extension.length)
+    : parsed.output;
+  return path.resolve(`${base}.progress.jsonl`);
+}
+
+function taskToProgressRow(args: {
+  variantId: string;
+  task: TaskResult;
+  completedCount: number;
+  totalCount?: number;
+  elapsedMs: number;
+  etaAt?: number;
+}): Record<string, unknown> {
+  const details = args.task.details ?? {};
+  return {
+    type: "task_completed",
+    timestamp: new Date().toISOString(),
+    variantId: args.variantId,
+    completedCount: args.completedCount,
+    totalCount: args.totalCount ?? null,
+    elapsedMs: args.elapsedMs,
+    etaAt: args.etaAt ? new Date(args.etaAt).toISOString() : null,
+    taskId: args.task.taskId,
+    question: truncateProgressText(args.task.question),
+    expected: truncateProgressText(args.task.expected),
+    actual: truncateProgressText(args.task.actual),
+    scores: args.task.scores,
+    latencyMs: args.task.latencyMs,
+    tokens: args.task.tokens,
+    details: {
+      episodeId: details.episodeId ?? null,
+      qaType: details.qaType ?? null,
+      domain: details.domain ?? null,
+      task: details.task ?? null,
+      taskType: details.taskType ?? null,
+      numTurns: details.numTurns ?? null,
+      totalTokens: details.totalTokens ?? null,
+      recalledLength: details.recalledLength ?? null,
+      answeredLength: details.answeredLength ?? null,
+      recallSections: details.recallSections ?? null,
+      responderModel: details.responderModel ?? null,
+      judgeModel: details.judgeModel ?? null,
+      amaBenchCrossJudgeModel: details.amaBenchCrossJudgeModel ?? null,
+      amaBenchCrossJudgeScore: details.amaBenchCrossJudgeScore ?? null,
+      error: details.error ?? null,
+    },
+  };
+}
+
+function truncateProgressText(value: string): string {
+  if (value.length <= PROGRESS_TEXT_MAX_CHARS) {
+    return value;
+  }
+  return `${value.slice(0, PROGRESS_TEXT_MAX_CHARS)}...[truncated ${
+    value.length - PROGRESS_TEXT_MAX_CHARS
+  } chars]`;
+}
+
+function estimateEtaAt(
+  startedAtMs: number,
+  nowMs: number,
+  completedCount: number,
+  totalCount: number | undefined,
+): number | undefined {
+  if (!totalCount || completedCount <= 0 || completedCount >= totalCount) {
+    return undefined;
+  }
+  const meanMsPerTask = (nowMs - startedAtMs) / completedCount;
+  return nowMs + Math.round(meanMsPerTask * (totalCount - completedCount));
+}
+
+function formatScore(score: number | undefined): string {
+  return score === undefined ? "n/a" : score.toFixed(4);
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h${minutes.toString().padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
+function formatDallasTimestamp(ms: number): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(new Date(ms));
 }
 
 function createStrongResponder(parsed: ParsedArgs): BenchResponder | undefined {
@@ -566,6 +782,10 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--output":
       case "--out":
         parsed.output = resolveUserPath(takeValue(index, arg));
+        index += 1;
+        break;
+      case "--progress-log":
+        parsed.progressLog = resolveUserPath(takeValue(index, arg));
         index += 1;
         break;
       case "--limit":
@@ -891,6 +1111,7 @@ function printUsage(): void {
 
 Core options:
   --output <path>                    Write sanitized matrix JSON. If omitted, JSON is printed to stdout.
+  --progress-log <path>              Write per-task JSONL progress. Defaults to <output>.progress.jsonl when --output is set.
   --limit <n>                        Limit episodes before expanding QA pairs.
   --seed <n>                         Record benchmark seed metadata.
   --runtime-profile <profile>        baseline, real, or openclaw-chain. Defaults to real.
@@ -964,10 +1185,14 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  const { artifact, outputPath } = await runAmaBenchDiagnosticMatrix(parsed);
+  const { artifact, outputPath, progressLogPath } =
+    await runAmaBenchDiagnosticMatrix(parsed);
   if (outputPath) {
     printSummary(artifact);
     console.log(`Matrix JSON: ${outputPath}`);
+    if (progressLogPath) {
+      console.log(`Progress JSONL: ${progressLogPath}`);
+    }
   } else {
     printSummary(artifact, process.stderr);
     console.log(JSON.stringify(artifact, null, 2));

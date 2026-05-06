@@ -225,13 +225,13 @@ export interface RunBenchmarkOptions {
   amaBenchJudgeProtocol?: AmaBenchJudgeProtocol;
   amaBenchCrossJudge?: import("./adapters/types.js").BenchJudge;
   amaBenchCrossJudgeProvider?: ProviderConfig | null;
+  /** Called after each task completes for progress logging and partial result tracking. */
+  onTaskComplete?: (task: TaskResult, completedCount: number, totalCount?: number) => void;
 }
 
 export interface ResolvedRunBenchmarkOptions extends RunBenchmarkOptions {
   mode: BenchmarkMode;
   benchmark: BenchmarkDefinition;
-  /** Called after each task completes for progress logging and partial result tracking. */
-  onTaskComplete?: (task: TaskResult, completedCount: number, totalCount?: number) => void;
 }
 
 // Legacy latency-benchmark surface retained for CLI compatibility while the
