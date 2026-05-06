@@ -369,12 +369,48 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages uses stable ids for obse
   });
   const second = deriveObjectiveStateSnapshotsFromObservedMessages({
     ...input,
-    recordedAt: "2026-03-07T12:05:30.000Z",
+    recordedAt: "2026-03-07T12:00:30.000Z",
   });
 
   assert.equal(first.length, 1);
   assert.equal(second.length, 1);
   assert.equal(first[0]?.snapshotId, second[0]?.snapshotId);
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages does not reuse stable ids across times", () => {
+  const input = {
+    sessionKey: "agent:main",
+    messages: [
+      {
+        role: "assistant",
+        content: "Updated a file.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "file_write",
+            toolName: "write_file",
+            filePath: "workspace/stable-time.txt",
+            payload: {
+              content: "stable content",
+            },
+          },
+        ],
+      },
+    ],
+  } as const;
+
+  const first = deriveObjectiveStateSnapshotsFromObservedMessages({
+    ...input,
+    recordedAt: "2026-03-07T12:00:30.000Z",
+  });
+  const second = deriveObjectiveStateSnapshotsFromObservedMessages({
+    ...input,
+    recordedAt: "2026-03-07T12:05:30.000Z",
+  });
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.notEqual(first[0]?.snapshotId, second[0]?.snapshotId);
 });
 
 test("deriveObjectiveStateSnapshotsFromObservedMessages includes top-level part scope in stable ids", () => {
@@ -424,6 +460,84 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages includes top-level part 
   assert.equal(first.length, 1);
   assert.equal(second.length, 1);
   assert.notEqual(first[0]?.snapshotId, second[0]?.snapshotId);
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages uses inline file result payloads before synthesizing success", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:45.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Observed a failed write.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "file_write",
+            toolName: "write_file",
+            filePath: "workspace/inline-failure.txt",
+            payload: {
+              input: {
+                path: "workspace/inline-failure.txt",
+                content: "failed",
+              },
+              output: {
+                ok: false,
+                error: "disk full",
+              },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "file");
+  assert.equal(snapshots[0]?.changeKind, "failed");
+  assert.equal(snapshots[0]?.outcome, "failure");
+  assert.deepEqual(snapshots[0]?.after, { ref: "workspace/inline-failure.txt" });
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages pairs idless results only when adjacent in the same message", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:07:00.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Ran tests.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              name: "exec_command",
+              arguments: { cmd: "npm test" },
+            },
+          },
+          {
+            ordinal: 1,
+            kind: "file_read",
+            filePath: "workspace/package.json",
+            payload: {
+              path: "workspace/package.json",
+            },
+          },
+          {
+            ordinal: 2,
+            kind: "tool_result",
+            payload: {
+              output: { exitCode: 0, stdout: "ok" },
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 0);
 });
 
 test("deriveObjectiveStateSnapshotsFromAgentMessages falls back to generic failed tool snapshots", () => {

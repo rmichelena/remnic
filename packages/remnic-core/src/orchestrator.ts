@@ -6857,13 +6857,30 @@ export class Orchestrator {
         return null;
       }
 
-      const results = await searchObjectiveStateSnapshots({
-        memoryDir: this.config.memoryDir,
-        objectiveStateStoreDir: this.config.objectiveStateStoreDir,
-        query: retrievalQuery,
-        maxResults,
-        sessionKey,
-      });
+      const objectiveStateSearches = await Promise.all(
+        recallNamespaces.map(async (namespace) => {
+          const isDefaultNamespace = namespace === this.config.defaultNamespace;
+          const storage = isDefaultNamespace ? null : await this.getStorage(namespace);
+          return searchObjectiveStateSnapshots({
+            memoryDir: isDefaultNamespace ? this.config.memoryDir : storage!.dir,
+            objectiveStateStoreDir: isDefaultNamespace
+              ? this.config.objectiveStateStoreDir
+              : undefined,
+            query: retrievalQuery,
+            maxResults,
+            sessionKey: !isDefaultNamespace && sessionKey
+              ? `${namespace}:${sessionKey}`
+              : sessionKey,
+          });
+        }),
+      );
+      const results = objectiveStateSearches
+        .flat()
+        .sort((left, right) => {
+          if (right.score !== left.score) return right.score - left.score;
+          return right.snapshot.recordedAt.localeCompare(left.snapshot.recordedAt);
+        })
+        .slice(0, maxResults);
 
       recordRecallSectionMetric({
         section: "objectiveState",

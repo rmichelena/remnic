@@ -377,7 +377,7 @@ function snapshotIdFor(
     .createHash("sha256")
     .update(
       stableKey
-        ? `${sessionKey}|stable|${stableKey}`
+        ? `${sessionKey}|${recordedAt}|${index}|${toolName}|${scope}|stable|${stableKey}`
         : `${sessionKey}|${recordedAt}|${index}|${toolName}|${scope}`,
     )
     .digest("hex")
@@ -509,6 +509,24 @@ function toolResultContentFromPart(part: LcmMessagePartInput): unknown {
   return payload;
 }
 
+function hasDefinedPayloadKey(payload: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined;
+}
+
+function partHasInlineToolResult(part: LcmMessagePartInput): boolean {
+  const payload = partPayload(part);
+  return (
+    hasDefinedPayloadKey(payload, "output") ||
+    hasDefinedPayloadKey(payload, "result") ||
+    hasDefinedPayloadKey(payload, "value") ||
+    hasDefinedPayloadKey(payload, "exitCode") ||
+    hasDefinedPayloadKey(payload, "ok") ||
+    hasDefinedPayloadKey(payload, "success") ||
+    hasDefinedPayloadKey(payload, "error") ||
+    hasDefinedPayloadKey(payload, "status")
+  );
+}
+
 function toolResultIsError(part: LcmMessagePartInput): boolean {
   const payload = partPayload(part);
   return payload.isError === true ||
@@ -573,9 +591,24 @@ function observedPartsToAgentMessages(options: {
       synthetic.push(buildSyntheticAssistantToolCall(id, toolName, args));
       const nextEntry = entries[entryIndex + 1];
       const nextIsIdlessToolResult =
+        nextEntry?.messageIndex === entry.messageIndex &&
         nextEntry?.part.kind === "tool_result" &&
         partToolCallId(nextEntry.part) === undefined;
-      pendingIdlessToolCallId = observedToolCallId ? undefined : id;
+      pendingIdlessToolCallId = !observedToolCallId && nextIsIdlessToolResult
+        ? id
+        : undefined;
+
+      if (partHasInlineToolResult(part)) {
+        synthetic.push({
+          role: "tool",
+          tool_call_id: id,
+          name: toolName,
+          content: toolResultContentFromPart(part),
+          ...(toolResultIsError(part) ? { isError: true } : {}),
+        });
+        pendingIdlessToolCallId = undefined;
+        continue;
+      }
 
       if (
         (part.kind === "file_write" || part.kind === "patch") &&

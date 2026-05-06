@@ -977,6 +977,23 @@ export class EngramAccessService {
     return resolved;
   }
 
+  private async objectiveStateStoreLocationForNamespace(namespace: string): Promise<{
+    memoryDir: string;
+    objectiveStateStoreDir?: string;
+  }> {
+    if (
+      !this.orchestrator.config.namespacesEnabled ||
+      namespace === this.orchestrator.config.defaultNamespace
+    ) {
+      return {
+        memoryDir: this.orchestrator.config.memoryDir,
+        objectiveStateStoreDir: this.orchestrator.config.objectiveStateStoreDir,
+      };
+    }
+    const storage = await this.orchestrator.getStorage(namespace);
+    return { memoryDir: storage.dir };
+  }
+
   private resolveReadableNamespace(namespace: string | undefined, principal?: string): string {
     const resolved = this.resolveNamespace(namespace);
     const namespacesEnabled = this.orchestrator.config.namespacesEnabled;
@@ -3363,9 +3380,11 @@ export class EngramAccessService {
       this.orchestrator.config.objectiveStateSnapshotWritesEnabled === true
     ) {
       try {
+        const objectiveStateLocation =
+          await this.objectiveStateStoreLocationForNamespace(namespace);
         await recordObjectiveStateSnapshotsFromObservedMessages({
-          memoryDir: this.orchestrator.config.memoryDir,
-          objectiveStateStoreDir: this.orchestrator.config.objectiveStateStoreDir,
+          memoryDir: objectiveStateLocation.memoryDir,
+          objectiveStateStoreDir: objectiveStateLocation.objectiveStateStoreDir,
           objectiveStateMemoryEnabled: this.orchestrator.config.objectiveStateMemoryEnabled,
           objectiveStateSnapshotWritesEnabled:
             this.orchestrator.config.objectiveStateSnapshotWritesEnabled,
