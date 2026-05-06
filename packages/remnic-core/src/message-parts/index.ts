@@ -210,7 +210,12 @@ export function parseAnthropicMessageParts(
     if (type === "tool_result") {
       const content = block.content;
       const rendered = renderUnknownContent(content);
-      parts.push(makePart("tool_result", { id: block.tool_use_id, content: sanitizePayload(content) }, {
+      parts.push(makePart("tool_result", {
+        id: block.tool_use_id,
+        content: sanitizePayload(content),
+        ...(typeof block.is_error === "boolean" ? { is_error: block.is_error } : {}),
+        ...(typeof block.isError === "boolean" ? { isError: block.isError } : {}),
+      }, {
         filePath: firstFilePath(rendered),
       }));
       continue;

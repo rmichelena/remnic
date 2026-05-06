@@ -214,6 +214,56 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages preserves Anthropic user
   assert.equal(snapshots[0]?.metadata?.toolCallId, "toolu-validate");
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages preserves Anthropic tool result failures", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:00:38.500Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "I'll run validation.",
+        sourceFormat: "anthropic",
+        rawContent: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu-failed-validate",
+              name: "exec_command",
+              input: { cmd: "npm run validate" },
+            },
+          ],
+        },
+      },
+      {
+        role: "user",
+        content: "Tool result",
+        sourceFormat: "anthropic",
+        rawContent: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-failed-validate",
+              is_error: true,
+              content: [
+                {
+                  type: "text",
+                  text: "exit code 1",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "process");
+  assert.equal(snapshots[0]?.changeKind, "failed");
+  assert.equal(snapshots[0]?.outcome, "failure");
+  assert.equal(snapshots[0]?.metadata?.toolCallId, "toolu-failed-validate");
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages preserves normalized user-role tool result parts", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",

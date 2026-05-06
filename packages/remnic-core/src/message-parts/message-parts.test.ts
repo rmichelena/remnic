@@ -120,6 +120,24 @@ describe("message-parts parsers", () => {
     assert.equal(parts[1]!.filePath, "packages/core/src/config.ts");
   });
 
+  it("preserves Anthropic tool_result error flags", () => {
+    const parts = parseAnthropicMessageParts({
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "toolu_failed",
+          is_error: true,
+          content: [{ type: "text", text: "exit code 1" }],
+        },
+      ],
+    });
+
+    assert.equal(parts.length, 1);
+    assert.equal(parts[0]!.kind, "tool_result");
+    assert.equal(parts[0]!.payload.id, "toolu_failed");
+    assert.equal(parts[0]!.payload.is_error, true);
+  });
+
   it("normalizes explicit Remnic parts and redacts secrets", () => {
     const parts = parseMessageParts({
       parts: [
