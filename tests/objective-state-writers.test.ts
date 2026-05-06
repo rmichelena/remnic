@@ -346,6 +346,97 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages parses raw provider cont
   assert.equal(snapshots[0]?.metadata?.toolCallId, "raw-call");
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages reads raw provider content when rendered parts are present", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:00:41.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Ran validation.",
+        parts: [
+          {
+            kind: "text",
+            payload: { text: "Ran validation." },
+          },
+        ],
+        sourceFormat: "openai",
+        rawContent: {
+          output: [
+            {
+              type: "function_call",
+              call_id: "raw-call-with-rendered-parts",
+              name: "exec_command",
+              arguments: JSON.stringify({ cmd: "npm run validate" }),
+            },
+            {
+              type: "function_call_output",
+              call_id: "raw-call-with-rendered-parts",
+              output: JSON.stringify({ exitCode: 0, stdout: "ok" }),
+            },
+          ],
+        },
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "process");
+  assert.equal(snapshots[0]?.changeKind, "executed");
+  assert.equal(snapshots[0]?.scope, "npm run validate");
+  assert.equal(snapshots[0]?.metadata?.toolCallId, "raw-call-with-rendered-parts");
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages deduplicates explicit and raw provider parts", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:00:41.500Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Ran validation.",
+        parts: [
+          {
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              id: "raw-call-duplicated",
+              name: "exec_command",
+              arguments: { cmd: "npm run validate" },
+            },
+          },
+          {
+            kind: "tool_result",
+            payload: {
+              id: "raw-call-duplicated",
+              output: { exitCode: 0, stdout: "ok" },
+            },
+          },
+        ],
+        sourceFormat: "openai",
+        rawContent: {
+          output: [
+            {
+              type: "function_call",
+              call_id: "raw-call-duplicated",
+              name: "exec_command",
+              arguments: JSON.stringify({ cmd: "npm run validate" }),
+            },
+            {
+              type: "function_call_output",
+              call_id: "raw-call-duplicated",
+              output: JSON.stringify({ exitCode: 0, stdout: "ok" }),
+            },
+          ],
+        },
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.metadata?.toolCallId, "raw-call-duplicated");
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages correlates OpenAI response item ids by call_id", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",

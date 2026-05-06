@@ -389,24 +389,37 @@ function objectiveStatePartsForObservedMessage(
   message: ObservedMessageWithParts,
 ): LcmMessagePartInput[] {
   if (message.role === "user") {
+    const explicitParts = Array.isArray(message.parts) && message.parts.length > 0
+      ? sanitizeUserRoleToolResultParts(message.parts)
+      : [];
     if (Array.isArray(message.parts) && message.parts.length > 0) {
-      return sanitizeUserRoleToolResultParts(message.parts);
+      const rawParts = userRawToolResultParts(message);
+      return mergeObservedEvidenceParts(explicitParts, rawParts);
     }
-    const rawContent = message.rawContent ?? message.content;
-    if (!containsProviderToolResultBlock(rawContent)) {
-      return [];
-    }
-    return sanitizeUserRoleToolResultParts(parseMessageParts(rawContent, {
-      sourceFormat: message.sourceFormat,
-      allowRenderedFallback: false,
-    }));
+    return userRawToolResultParts(message);
   }
   if (message.role !== "assistant") {
     return [];
   }
-  if (Array.isArray(message.parts) && message.parts.length > 0) {
-    return message.parts;
+  const explicitParts = Array.isArray(message.parts) && message.parts.length > 0
+    ? message.parts
+    : [];
+  const rawParts = assistantRawObjectiveStateParts(message);
+  return mergeObservedEvidenceParts(explicitParts, rawParts);
+}
+
+function userRawToolResultParts(message: ObservedMessageWithParts): LcmMessagePartInput[] {
+  const rawContent = message.rawContent ?? message.content;
+  if (!containsProviderToolResultBlock(rawContent)) {
+    return [];
   }
+  return sanitizeUserRoleToolResultParts(parseMessageParts(rawContent, {
+    sourceFormat: message.sourceFormat,
+    allowRenderedFallback: false,
+  }));
+}
+
+function assistantRawObjectiveStateParts(message: ObservedMessageWithParts): LcmMessagePartInput[] {
   if (message.rawContent === undefined || message.rawContent === null) {
     return [];
   }
@@ -414,6 +427,48 @@ function objectiveStatePartsForObservedMessage(
     sourceFormat: message.sourceFormat,
     allowRenderedFallback: false,
   });
+}
+
+function mergeObservedEvidenceParts(
+  explicitParts: LcmMessagePartInput[],
+  rawParts: LcmMessagePartInput[],
+): LcmMessagePartInput[] {
+  if (explicitParts.length === 0) return rawParts;
+  if (rawParts.length === 0) return explicitParts;
+
+  const merged = [...explicitParts];
+  const seen = new Set(
+    explicitParts
+      .filter(isObjectiveStateEvidencePart)
+      .map(objectiveStateEvidencePartKey),
+  );
+
+  for (const part of rawParts) {
+    if (!isObjectiveStateEvidencePart(part)) continue;
+    const key = objectiveStateEvidencePartKey(part);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(part);
+  }
+
+  return merged;
+}
+
+function isObjectiveStateEvidencePart(part: LcmMessagePartInput): boolean {
+  return (
+    part.kind === "tool_call" ||
+    part.kind === "tool_result" ||
+    part.kind === "file_write" ||
+    part.kind === "patch"
+  );
+}
+
+function objectiveStateEvidencePartKey(part: LcmMessagePartInput): string {
+  const id = partToolCallId(part);
+  if (id) return `${part.kind}:id:${id}`;
+  const toolName = partToolName(part) ?? "";
+  const filePath = partFilePath(part) ?? "";
+  return `${part.kind}:shape:${toolName}:${filePath}:${stableStringify(partPayload(part))}`;
 }
 
 function flattenObservedParts(messages: readonly ObservedMessageWithParts[]): ObservedPartEntry[] {
