@@ -566,7 +566,7 @@ function inlineToolResultContentFromPart(part: LcmMessagePartInput): unknown {
   if (hasDefinedPayloadKey(payload, "value")) return payload.value;
 
   const statusPayload: Record<string, unknown> = {};
-  for (const key of ["exitCode", "ok", "success", "error", "status", "stdout", "stderr"]) {
+  for (const key of ["exitCode", "ok", "success", "error", "stdout", "stderr"]) {
     if (hasDefinedPayloadKey(payload, key)) {
       statusPayload[key] = payload[key];
     }
@@ -587,8 +587,7 @@ function partHasInlineToolResult(part: LcmMessagePartInput): boolean {
     hasDefinedPayloadKey(payload, "exitCode") ||
     hasDefinedPayloadKey(payload, "ok") ||
     hasDefinedPayloadKey(payload, "success") ||
-    hasDefinedPayloadKey(payload, "error") ||
-    hasDefinedPayloadKey(payload, "status")
+    hasDefinedPayloadKey(payload, "error")
   );
 }
 

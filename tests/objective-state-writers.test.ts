@@ -666,6 +666,34 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages prefers separate result 
   assert.equal(snapshots[0]?.outcome, "failure");
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages ignores status-only tool calls", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:57.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Tool call lifecycle status changed.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "tool_call",
+            toolName: "exec_command",
+            payload: {
+              id: "call-status-only",
+              name: "exec_command",
+              arguments: { cmd: "npm test" },
+              status: "completed",
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 0);
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages pairs idless results only when adjacent in the same message", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",

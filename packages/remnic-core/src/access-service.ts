@@ -981,10 +981,7 @@ export class EngramAccessService {
     memoryDir: string;
     objectiveStateStoreDir?: string;
   }> {
-    if (
-      !this.orchestrator.config.namespacesEnabled ||
-      namespace === this.orchestrator.config.defaultNamespace
-    ) {
+    if (!this.orchestrator.config.namespacesEnabled) {
       return {
         memoryDir: this.orchestrator.config.memoryDir,
         objectiveStateStoreDir: this.orchestrator.config.objectiveStateStoreDir,

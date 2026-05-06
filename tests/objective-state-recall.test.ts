@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { parseConfig } from "../src/config.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { recordObjectiveStateSnapshot } from "../src/objective-state.js";
@@ -183,6 +183,88 @@ test("recall searches objective-state snapshots from the requested namespace sto
     assert.match(context, /## Objective State/);
     assert.match(context, /namespace-scoped error/i);
     assert.equal(context.includes("default-namespace error"), false);
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("recall searches objective-state snapshots from routed default namespace storage", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-objective-state-recall-default-ns-"));
+  await mkdir(path.join(memoryDir, "namespaces", "global"), { recursive: true });
+  const cfg = parseConfig({
+    openaiApiKey: "test-openai-key",
+    memoryDir,
+    qmdEnabled: false,
+    transcriptEnabled: false,
+    sharedContextEnabled: false,
+    conversationIndexEnabled: false,
+    hourlySummariesEnabled: false,
+    injectQuestions: false,
+    namespacesEnabled: true,
+    defaultNamespace: "global",
+    sharedNamespace: "shared",
+    defaultRecallNamespaces: ["self"],
+    objectiveStateMemoryEnabled: true,
+    objectiveStateSnapshotWritesEnabled: true,
+    objectiveStateRecallEnabled: true,
+    recallPipeline: [
+      {
+        id: "objective-state",
+        enabled: true,
+        maxResults: 2,
+        maxChars: 1200,
+      },
+    ],
+  });
+  const orchestrator = new Orchestrator(cfg);
+
+  try {
+    await recordObjectiveStateSnapshot({
+      memoryDir,
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: "snap-legacy-default-validation",
+        recordedAt: "2026-03-07T10:00:00.000Z",
+        sessionKey: "agent:main",
+        source: "tool_result",
+        kind: "process",
+        changeKind: "failed",
+        scope: "npm run validation",
+        summary: "Legacy root validation failed in the old default store.",
+        toolName: "exec_command",
+        command: "npm run validation",
+        outcome: "failure",
+        tags: ["validation"],
+      },
+    });
+    const defaultStorage = await orchestrator.getStorage("global");
+    await recordObjectiveStateSnapshot({
+      memoryDir: defaultStorage.dir,
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: "snap-routed-default-validation",
+        recordedAt: "2026-03-07T10:01:00.000Z",
+        sessionKey: "agent:main",
+        source: "tool_result",
+        kind: "process",
+        changeKind: "failed",
+        scope: "npm run validation",
+        summary: "Routed default validation failed in the namespace store.",
+        toolName: "exec_command",
+        command: "npm run validation",
+        outcome: "failure",
+        tags: ["validation"],
+      },
+    });
+
+    const context = await (orchestrator as any).recallInternal(
+      "Why did validation fail?",
+      "agent:main",
+    );
+
+    assert.match(context, /## Objective State/);
+    assert.match(context, /namespace store/i);
+    assert.equal(context.includes("old default store"), false);
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
   }

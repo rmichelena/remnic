@@ -199,6 +199,68 @@ test("observe writes objective-state snapshots into the resolved namespace store
   }
 });
 
+test("observe writes default namespace snapshots through routed storage", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-root-"));
+  const routedDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-routed-"));
+  const service = createObjectiveStateObserveService(memoryDir, {
+    namespacesEnabled: true,
+    storageDirs: { global: routedDir },
+  });
+
+  try {
+    const response = await service.observe({
+      sessionKey: "agent:main",
+      skipExtraction: true,
+      messages: [
+        {
+          role: "assistant",
+          content: "Ran the routed default validation command.",
+          parts: [
+            {
+              ordinal: 0,
+              kind: "tool_call",
+              toolName: "exec_command",
+              payload: {
+                id: "call-routed-default-validate",
+                name: "exec_command",
+                arguments: { cmd: "npm run routed-default-validate" },
+              },
+            },
+            {
+              ordinal: 1,
+              kind: "tool_result",
+              payload: {
+                id: "call-routed-default-validate",
+                output: { exitCode: 0, stdout: "all checks passed" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(response.accepted, 1);
+
+    const rootStatus = await getObjectiveStateStoreStatus({
+      memoryDir,
+      enabled: true,
+      writesEnabled: true,
+    });
+    const routedStatus = await getObjectiveStateStoreStatus({
+      memoryDir: routedDir,
+      enabled: true,
+      writesEnabled: true,
+    });
+
+    assert.equal(rootStatus.snapshots.total, 0);
+    assert.equal(routedStatus.snapshots.total, 1);
+    assert.equal(routedStatus.latestSnapshot?.scope, "npm run routed-default-validate");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+    await rm(routedDir, { recursive: true, force: true });
+  }
+});
+
 test("observe writes objective-state snapshots into the coding namespace overlay", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-global-"));
   const projectDir = await mkdtemp(path.join(os.tmpdir(), "remnic-access-objective-state-project-"));

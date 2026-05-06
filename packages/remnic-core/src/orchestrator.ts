@@ -6859,16 +6859,19 @@ export class Orchestrator {
 
       const objectiveStateSearches = await Promise.all(
         recallNamespaces.map(async (namespace) => {
-          const isDefaultNamespace = namespace === this.config.defaultNamespace;
-          const storage = isDefaultNamespace ? null : await this.getStorage(namespace);
+          const storage = this.config.namespacesEnabled
+            ? await this.getStorage(namespace)
+            : null;
           return searchObjectiveStateSnapshots({
-            memoryDir: isDefaultNamespace ? this.config.memoryDir : storage!.dir,
-            objectiveStateStoreDir: isDefaultNamespace
+            memoryDir: this.config.namespacesEnabled
+              ? storage!.dir
+              : this.config.memoryDir,
+            objectiveStateStoreDir: !this.config.namespacesEnabled
               ? this.config.objectiveStateStoreDir
               : undefined,
             query: retrievalQuery,
             maxResults,
-            sessionKey: !isDefaultNamespace && sessionKey
+            sessionKey: namespace !== this.config.defaultNamespace && sessionKey
               ? `${namespace}:${sessionKey}`
               : sessionKey,
           });
