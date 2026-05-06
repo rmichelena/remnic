@@ -370,6 +370,31 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages does not fabricate succe
   assert.equal(snapshots.length, 0);
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages ignores shorthand raw calls without results", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:00:42.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Running tests.",
+        sourceFormat: "remnic",
+        rawContent: {
+          parts: [
+            {
+              kind: "tool_call",
+              toolName: "exec_command",
+              arguments: { cmd: "npm test" },
+            },
+          ],
+        },
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 0);
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages reads raw provider content when rendered parts are present", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",
@@ -859,6 +884,39 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages does not treat file body
   assert.equal(snapshots[0]?.changeKind, "updated");
   assert.equal(snapshots[0]?.outcome, "success");
   assert.equal(snapshots[0]?.scope, "workspace/content.txt");
+});
+
+test("deriveObjectiveStateSnapshotsFromObservedMessages records identified explicit file writes without separate results", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:51.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: "Observed a completed write.",
+        parts: [
+          {
+            ordinal: 0,
+            kind: "file_write",
+            toolName: "write_file",
+            filePath: "workspace/identified.txt",
+            payload: {
+              id: "call-write-identified",
+              path: "workspace/identified.txt",
+              content: "identified write",
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0]?.kind, "file");
+  assert.equal(snapshots[0]?.changeKind, "updated");
+  assert.equal(snapshots[0]?.outcome, "success");
+  assert.equal(snapshots[0]?.scope, "workspace/identified.txt");
+  assert.equal(snapshots[0]?.metadata?.toolCallId, "call-write-identified");
 });
 
 test("deriveObjectiveStateSnapshotsFromObservedMessages ignores rendered patch prose without provider evidence", () => {

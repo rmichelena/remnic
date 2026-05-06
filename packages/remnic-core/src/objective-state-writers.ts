@@ -644,7 +644,9 @@ function inlineToolResultContentFromPart(part: LcmMessagePartInput): unknown {
   const payload = partPayload(part);
   if (hasDefinedPayloadKey(payload, "output")) return payload.output;
   if (hasDefinedPayloadKey(payload, "result")) return payload.result;
-  if (hasDefinedPayloadKey(payload, "value")) return payload.value;
+  if (part.kind === "tool_result" && hasDefinedPayloadKey(payload, "value")) {
+    return payload.value;
+  }
 
   const statusPayload: Record<string, unknown> = {};
   for (const key of ["exitCode", "ok", "success", "error", "stdout", "stderr"]) {
@@ -664,7 +666,7 @@ function partHasInlineToolResult(part: LcmMessagePartInput): boolean {
   return (
     hasDefinedPayloadKey(payload, "output") ||
     hasDefinedPayloadKey(payload, "result") ||
-    hasDefinedPayloadKey(payload, "value") ||
+    (part.kind === "tool_result" && hasDefinedPayloadKey(payload, "value")) ||
     hasDefinedPayloadKey(payload, "exitCode") ||
     hasDefinedPayloadKey(payload, "ok") ||
     hasDefinedPayloadKey(payload, "success") ||
@@ -759,7 +761,6 @@ function observedPartsToAgentMessages(options: {
 
       if (
         (part.kind === "file_write" || part.kind === "patch") &&
-        !observedToolCallId &&
         !nextIsIdlessToolResult &&
         !resultIds.has(id) &&
         !isRawProviderPart(part)
