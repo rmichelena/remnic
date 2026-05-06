@@ -715,6 +715,27 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages does not treat file body
   assert.equal(snapshots[0]?.scope, "workspace/content.txt");
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages ignores rendered patch prose without provider evidence", () => {
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:52.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          "Here is the patch I suggest:",
+          "*** Begin Patch",
+          "*** Update File: workspace/suggested.txt",
+          "+suggested only",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 0);
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages prefers separate result over tool-call status", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",

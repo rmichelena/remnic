@@ -407,7 +407,10 @@ function objectiveStatePartsForObservedMessage(
   if (Array.isArray(message.parts) && message.parts.length > 0) {
     return message.parts;
   }
-  return parseMessageParts(message.rawContent ?? message.content, {
+  if (message.rawContent === undefined || message.rawContent === null) {
+    return [];
+  }
+  return parseMessageParts(message.rawContent, {
     sourceFormat: message.sourceFormat,
     renderedContent: message.content,
   });
