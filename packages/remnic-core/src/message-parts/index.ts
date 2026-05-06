@@ -53,6 +53,7 @@ export interface LcmMessagePartRow extends LcmMessagePartInput {
 export interface ParseMessagePartsOptions {
   sourceFormat?: MessagePartSourceFormat;
   renderedContent?: string;
+  allowRenderedFallback?: boolean;
 }
 
 const SECRET_KEY_RE = /(api[_-]?key|authorization|bearer|credential|password|secret|token)/i;
@@ -268,7 +269,9 @@ export function parseOpenClawMessageParts(
     ]);
   }
 
-  const rendered = options.renderedContent ?? asNonEmptyString(obj.content);
+  const rendered = options.allowRenderedFallback === false
+    ? null
+    : options.renderedContent ?? asNonEmptyString(obj.content);
   return rendered ? withOrdinals(partsFromRenderedText(rendered)) : [];
 }
 
@@ -393,6 +396,9 @@ function withRenderedFallback(
 }
 
 function renderedFallbackParts(options: ParseMessagePartsOptions): LcmMessagePartInput[] {
+  if (options.allowRenderedFallback === false) {
+    return [];
+  }
   const rendered = asNonEmptyString(options.renderedContent);
   return rendered ? partsFromRenderedText(rendered) : [];
 }

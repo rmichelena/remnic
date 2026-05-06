@@ -398,7 +398,7 @@ function objectiveStatePartsForObservedMessage(
     }
     return sanitizeUserRoleToolResultParts(parseMessageParts(rawContent, {
       sourceFormat: message.sourceFormat,
-      renderedContent: message.content,
+      allowRenderedFallback: false,
     }));
   }
   if (message.role !== "assistant") {
@@ -412,7 +412,7 @@ function objectiveStatePartsForObservedMessage(
   }
   return parseMessageParts(message.rawContent, {
     sourceFormat: message.sourceFormat,
-    renderedContent: message.content,
+    allowRenderedFallback: false,
   });
 }
 

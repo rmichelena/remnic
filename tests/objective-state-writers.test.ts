@@ -736,6 +736,34 @@ test("deriveObjectiveStateSnapshotsFromObservedMessages ignores rendered patch p
   assert.equal(snapshots.length, 0);
 });
 
+test("deriveObjectiveStateSnapshotsFromObservedMessages ignores text-only raw assistant patch prose", () => {
+  const patchSuggestion = [
+    "Here is the patch I suggest:",
+    "*** Begin Patch",
+    "*** Update File: workspace/suggested-raw.txt",
+    "+suggested only",
+    "*** End Patch",
+  ].join("\n");
+
+  const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
+    sessionKey: "agent:main",
+    recordedAt: "2026-03-07T12:06:53.000Z",
+    messages: [
+      {
+        role: "assistant",
+        content: patchSuggestion,
+        sourceFormat: "openclaw",
+        rawContent: {
+          role: "assistant",
+          content: patchSuggestion,
+        },
+      },
+    ],
+  });
+
+  assert.equal(snapshots.length, 0);
+});
+
 test("deriveObjectiveStateSnapshotsFromObservedMessages prefers separate result over tool-call status", () => {
   const snapshots = deriveObjectiveStateSnapshotsFromObservedMessages({
     sessionKey: "agent:main",

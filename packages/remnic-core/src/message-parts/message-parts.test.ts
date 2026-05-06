@@ -155,4 +155,25 @@ describe("message-parts parsers", () => {
       url: "https://example.test",
     });
   });
+
+  it("can disable rendered text fallback for structured-only callers", () => {
+    const parts = parseMessageParts(
+      {
+        role: "assistant",
+        content: [
+          "Suggested patch:",
+          "*** Begin Patch",
+          "*** Update File: src/suggested.ts",
+          "+not executed",
+          "*** End Patch",
+        ].join("\n"),
+      },
+      {
+        sourceFormat: "openclaw",
+        allowRenderedFallback: false,
+      },
+    );
+
+    assert.deepEqual(parts, []);
+  });
 });
