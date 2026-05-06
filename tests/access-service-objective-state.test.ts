@@ -199,7 +199,7 @@ test("observe writes objective-state snapshots into the resolved namespace store
 
     assert.equal(globalStatus.snapshots.total, 0);
     assert.equal(teamStatus.snapshots.total, 1);
-    assert.equal(teamStatus.latestSnapshot?.sessionKey, "team-a:agent:main");
+    assert.equal(teamStatus.latestSnapshot?.sessionKey, "agent:main");
     assert.equal(teamStatus.latestSnapshot?.scope, "npm run team-validate");
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
@@ -407,7 +407,7 @@ test("observe writes objective-state snapshots into the coding namespace overlay
 
     assert.equal(globalStatus.snapshots.total, 0);
     assert.equal(projectStatus.snapshots.total, 1);
-    assert.equal(projectStatus.latestSnapshot?.sessionKey, "global-project-a:agent:main");
+    assert.equal(projectStatus.latestSnapshot?.sessionKey, "agent:main");
     assert.equal(projectStatus.latestSnapshot?.scope, "npm run project-validate");
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
@@ -495,7 +495,7 @@ test("observe bases implicit objective-state snapshots on the principal namespac
 
     assert.equal(globalStatus.snapshots.total, 0);
     assert.equal(projectStatus.snapshots.total, 1);
-    assert.equal(projectStatus.latestSnapshot?.sessionKey, "alice-project-a:agent:main");
+    assert.equal(projectStatus.latestSnapshot?.sessionKey, "agent:main");
     assert.equal(projectStatus.latestSnapshot?.scope, "npm run principal-project-validate");
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
