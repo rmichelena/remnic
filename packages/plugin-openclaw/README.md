@@ -7,12 +7,12 @@ Part of [Remnic](https://github.com/joshuaswarren/remnic), the universal memory 
 ## Install
 
 ```bash
-openclaw plugins install clawhub:@remnic/plugin-openclaw
+openclaw plugins install clawhub:@joshuaswarren/plugin-openclaw
 ```
 
 Or ask your OpenClaw agent:
 
-> Install the @remnic/plugin-openclaw plugin and configure it as my memory system.
+> Install the @joshuaswarren/plugin-openclaw ClawHub plugin and configure it as my memory system.
 
 ## Configure
 
