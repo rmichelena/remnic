@@ -68,7 +68,10 @@ export function createTimeoutGuardedAdapter(
     );
   }
 
-  const run = async <T>(phase: string, fn: () => Promise<T>): Promise<T> => {
+  const run = async <T>(
+    phase: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => {
     const label = `${options.benchmarkId}:${phase}`;
     return runWithBenchmarkPhaseTimeout(label, options.timeoutMs, fn, options);
   };
@@ -135,7 +138,10 @@ export function createTimeoutGuardedIngestionAdapter(
     );
   }
 
-  const run = async <T>(phase: string, fn: () => Promise<T>): Promise<T> =>
+  const run = async <T>(
+    phase: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> =>
     runWithBenchmarkPhaseTimeout(`${options.benchmarkId}:${phase}`, options.timeoutMs, fn, options);
 
   return {
@@ -157,7 +163,7 @@ export function createTimeoutGuardedIngestionAdapter(
 export async function runWithBenchmarkPhaseTimeout<T>(
   label: string,
   timeoutMs: number,
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
   options: Pick<TimeoutGuardOptions, "logProgress" | "log" | "onTimeout"> = {},
 ): Promise<T> {
   if (options.logProgress) {
@@ -186,31 +192,33 @@ export async function runWithBenchmarkPhaseTimeout<T>(
 
 function wrapResponder(
   responder: BenchResponder,
-  run: <T>(phase: string, fn: () => Promise<T>) => Promise<T>,
+  run: <T>(phase: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>,
 ): BenchResponder {
   return {
     respond(question, recalledText) {
-      return run("respond", () => responder.respond(question, recalledText));
+      return run("respond", (signal) =>
+        responder.respond(question, recalledText, { signal }),
+      );
     },
   };
 }
 
 function wrapJudge(
   judge: BenchJudge,
-  run: <T>(phase: string, fn: () => Promise<T>) => Promise<T>,
+  run: <T>(phase: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>,
 ): BenchJudge {
   const wrapped: BenchJudge = {
     score(question, predicted, expected) {
-      return run("judge.score", () =>
-        judge.score(question, predicted, expected),
+      return run("judge.score", (signal) =>
+        judge.score(question, predicted, expected, { signal }),
       );
     },
   };
 
   if (judge.scoreWithMetrics) {
     wrapped.scoreWithMetrics = (question, predicted, expected) =>
-      run("judge.scoreWithMetrics", () =>
-        judge.scoreWithMetrics!(question, predicted, expected),
+      run("judge.scoreWithMetrics", (signal) =>
+        judge.scoreWithMetrics!(question, predicted, expected, { signal }),
       );
   }
 
@@ -263,25 +271,26 @@ function coerceBooleanConfig(value: unknown, key: string): boolean | undefined {
 async function withTimeout<T>(
   label: string,
   timeoutMs: number,
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
   onTimeout?: (label: string) => void | Promise<void>,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      const timeoutError = new Error(
+        `benchmark phase timed out after ${timeoutMs}ms: ${label}`,
+      );
+      reject(timeoutError);
+      controller.abort(timeoutError);
       if (onTimeout) {
         void Promise.resolve(onTimeout(label)).catch(() => {});
       }
-      reject(
-        new Error(
-          `benchmark phase timed out after ${timeoutMs}ms: ${label}`,
-        ),
-      );
     }, timeoutMs);
   });
 
   try {
-    return await Promise.race([fn(), timeout]);
+    return await Promise.race([fn(controller.signal), timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);

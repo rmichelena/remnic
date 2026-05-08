@@ -12,6 +12,7 @@ export interface CompletionOpts {
   temperature?: number;
   maxTokens?: number;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface CompletionResult {

@@ -75,6 +75,71 @@ test("timeout guard wraps responder and judge calls", async () => {
   assert.equal(await guarded.judge?.score("q", "p", "e"), 1);
 });
 
+test("timeout guard aborts responder phase work on timeout", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.responder = {
+    respond(_question, _recalledText, control) {
+      return new Promise<never>((_, reject) => {
+        const signal = control?.signal;
+        const onAbort = () => {
+          sawAbort = true;
+          reject(signal?.reason);
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 5,
+  });
+
+  await assert.rejects(
+    () => guarded.responder!.respond("q", "r"),
+    /benchmark phase timed out after 5ms: timeout-test:respond/,
+  );
+  assert.equal(sawAbort, true);
+});
+
+test("timeout guard aborts judge phase work on timeout", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.judge = {
+    async score() {
+      return 0;
+    },
+    scoreWithMetrics(_question, _predicted, _expected, control) {
+      return new Promise<never>((_, reject) => {
+        const signal = control?.signal;
+        const onAbort = () => {
+          sawAbort = true;
+          reject(signal?.reason);
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 5,
+  });
+
+  await assert.rejects(
+    () => guarded.judge!.scoreWithMetrics!("q", "p", "e"),
+    /benchmark phase timed out after 5ms: timeout-test:judge.scoreWithMetrics/,
+  );
+  assert.equal(sawAbort, true);
+});
+
 test("resolveBenchmarkPhaseTimeoutMs prefers explicit benchmark config", () => {
   assert.equal(
     resolveBenchmarkPhaseTimeoutMs({

@@ -54,7 +54,11 @@ export interface GatewayResponderOptions {
 
 export function createResponderFromProvider(provider: LlmProvider): BenchResponder {
   return {
-    async respond(question: string, recalledText: string): Promise<BenchResponse> {
+    async respond(
+      question: string,
+      recalledText: string,
+      control,
+    ): Promise<BenchResponse> {
       const completion = await provider.complete(
         [
           `QUESTION: ${question}`,
@@ -67,6 +71,7 @@ export function createResponderFromProvider(provider: LlmProvider): BenchRespond
         {
           systemPrompt: DEFAULT_RESPONDER_SYSTEM_PROMPT,
           temperature: 0,
+          signal: control?.signal,
         },
       );
 
@@ -93,6 +98,7 @@ function createJudgeFromProvider(provider: LlmProvider): BenchJudge {
     question: string,
     predicted: string,
     expected: string,
+    control?: { signal?: AbortSignal },
   ): Promise<BenchJudgeResult> {
     const completion = await provider.complete(
       [
@@ -107,6 +113,7 @@ function createJudgeFromProvider(provider: LlmProvider): BenchJudge {
       {
         systemPrompt: DEFAULT_JUDGE_SYSTEM_PROMPT,
         temperature: 0,
+        signal: control?.signal,
       },
     );
 
@@ -119,8 +126,13 @@ function createJudgeFromProvider(provider: LlmProvider): BenchJudge {
   }
 
   return {
-    async score(question: string, predicted: string, expected: string): Promise<number> {
-      return (await scoreWithMetrics(question, predicted, expected)).score;
+    async score(
+      question: string,
+      predicted: string,
+      expected: string,
+      control,
+    ): Promise<number> {
+      return (await scoreWithMetrics(question, predicted, expected, control)).score;
     },
     scoreWithMetrics,
   };
@@ -139,6 +151,7 @@ function createAmaBenchRecommendedJudgeFromProvider(provider: LlmProvider): Benc
     question: string,
     predicted: string,
     expected: string,
+    control?: { signal?: AbortSignal },
   ): Promise<BenchJudgeResult> {
     const completion = await provider.complete(
       [
@@ -153,6 +166,7 @@ function createAmaBenchRecommendedJudgeFromProvider(provider: LlmProvider): Benc
       {
         systemPrompt: AMA_BENCH_RECOMMENDED_JUDGE_SYSTEM_PROMPT,
         temperature: 0,
+        signal: control?.signal,
       },
     );
 
@@ -165,8 +179,13 @@ function createAmaBenchRecommendedJudgeFromProvider(provider: LlmProvider): Benc
   }
 
   return {
-    async score(question: string, predicted: string, expected: string): Promise<number> {
-      return (await scoreWithMetrics(question, predicted, expected)).score;
+    async score(
+      question: string,
+      predicted: string,
+      expected: string,
+      control,
+    ): Promise<number> {
+      return (await scoreWithMetrics(question, predicted, expected, control)).score;
     },
     scoreWithMetrics,
   };

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -191,6 +194,35 @@ test("codex-cli provider surfaces non-zero CLI exits", async () => {
     provider.complete("hello"),
     /Codex CLI completion failed \(exit 2\): invalid model/,
   );
+});
+
+test("codex-cli command terminates subprocess when aborted", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-codex-cli-test-"));
+  const controller = new AbortController();
+
+  try {
+    const run = __codexCliProviderTestHooks.runCodexCliCommand({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "process.stdin.resume(); setInterval(() => {}, 1000);",
+      ],
+      input: "hello",
+      outputPath: path.join(tempDir, "last-message.txt"),
+      workspacePath: tempDir,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+      env: process.env,
+    });
+
+    setTimeout(() => controller.abort(), 20);
+    const result = await run;
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Codex CLI aborted by benchmark timeout/);
+  } finally {
+    await rm(tempDir, { force: true, recursive: true });
+  }
 });
 
 test("codex-cli benchmark prompt keeps system and user input in separate JSON fields", () => {

@@ -32,8 +32,16 @@ export interface BenchResponse {
   model: string;
 }
 
+export interface BenchPhaseControl {
+  signal?: AbortSignal;
+}
+
 export interface BenchResponder {
-  respond(question: string, recalledText: string): Promise<BenchResponse>;
+  respond(
+    question: string,
+    recalledText: string,
+    control?: BenchPhaseControl,
+  ): Promise<BenchResponse>;
 }
 
 export interface BenchJudgeResult {
@@ -47,11 +55,17 @@ export interface BenchJudgeResult {
 }
 
 export interface BenchJudge {
-  score(question: string, predicted: string, expected: string): Promise<number>;
+  score(
+    question: string,
+    predicted: string,
+    expected: string,
+    control?: BenchPhaseControl,
+  ): Promise<number>;
   scoreWithMetrics?(
     question: string,
     predicted: string,
     expected: string,
+    control?: BenchPhaseControl,
   ): Promise<BenchJudgeResult>;
 }
 

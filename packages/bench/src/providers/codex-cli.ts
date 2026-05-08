@@ -19,6 +19,7 @@ interface CodexCliRunRequest {
   outputPath: string;
   workspacePath: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
   env: NodeJS.ProcessEnv;
 }
 
@@ -190,6 +191,7 @@ class CodexCliProvider implements LlmProvider {
       outputPath,
       workspacePath,
       timeoutMs: this.config.retryOptions?.timeoutMs,
+      signal: opts.signal,
       env: buildIsolatedCodexEnv(this.config.apiKey),
     };
   }
@@ -258,24 +260,71 @@ function buildIsolatedCodexEnv(apiKey?: string): NodeJS.ProcessEnv {
 
 function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunResult> {
   return new Promise((resolve, reject) => {
+    if (request.signal?.aborted) {
+      resolve({
+        status: 124,
+        signal: null,
+        stdout: "",
+        stderr: "Codex CLI aborted before start.",
+        outputText: "",
+      });
+      return;
+    }
+
     const child = spawn(request.executable, request.args, {
       cwd: request.workspacePath,
       env: request.env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let aborted = false;
     let killTimeout: NodeJS.Timeout | undefined;
+    const clearKillTimeout = (): void => {
+      if (killTimeout) {
+        clearTimeout(killTimeout);
+        killTimeout = undefined;
+      }
+    };
+    const terminateChild = (signal: NodeJS.Signals): void => {
+      if (child.pid && process.platform !== "win32") {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to killing the direct child below.
+        }
+      }
+      child.kill(signal);
+    };
+    const scheduleForcedKill = (): void => {
+      clearKillTimeout();
+      killTimeout = setTimeout(() => {
+        terminateChild("SIGKILL");
+      }, 1_000);
+      killTimeout.unref();
+    };
+    const onAbort = (): void => {
+      if (aborted) {
+        return;
+      }
+      aborted = true;
+      stderr = appendBounded(stderr, "\nCodex CLI aborted by benchmark timeout.");
+      terminateChild("SIGTERM");
+      scheduleForcedKill();
+    };
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) {
+      onAbort();
+    }
     const timeout = request.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill("SIGTERM");
-          killTimeout = setTimeout(() => {
-            child.kill("SIGKILL");
-          }, 1_000);
-          killTimeout.unref();
+          terminateChild("SIGTERM");
+          scheduleForcedKill();
         }, request.timeoutMs)
       : undefined;
     timeout?.unref();
@@ -298,18 +347,16 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
       if (timeout) {
         clearTimeout(timeout);
       }
-      if (killTimeout) {
-        clearTimeout(killTimeout);
-      }
+      clearKillTimeout();
+      request.signal?.removeEventListener("abort", onAbort);
       reject(error);
     });
     child.on("close", async (status, signal) => {
       if (timeout) {
         clearTimeout(timeout);
       }
-      if (killTimeout) {
-        clearTimeout(killTimeout);
-      }
+      clearKillTimeout();
+      request.signal?.removeEventListener("abort", onAbort);
       if (timedOut) {
         resolve({
           status: status ?? 124,
@@ -319,6 +366,16 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
             stderr,
             `\nCodex CLI timed out after ${request.timeoutMs}ms.`,
           ),
+          outputText: "",
+        });
+        return;
+      }
+      if (aborted) {
+        resolve({
+          status: status ?? 124,
+          signal,
+          stdout,
+          stderr,
           outputText: "",
         });
         return;
@@ -414,4 +471,5 @@ export const __codexCliProviderTestHooks = {
   buildCodexCompletionPrompt,
   buildIsolatedCodexEnv,
   parseCodexTokenUsage,
+  runCodexCliCommand,
 };
