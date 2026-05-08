@@ -41,6 +41,15 @@ interface CodexCliProviderDeps {
 
 const DEFAULT_REASONING_EFFORT = "xhigh";
 const CODEX_CLI_STDIO_LIMIT = 64_000;
+const CODEX_CLI_PARENT_SIGNALS: NodeJS.Signals[] = [
+  "SIGHUP",
+  "SIGINT",
+  "SIGTERM",
+];
+const CODEX_CLI_FORCED_PARENT_EXIT_MS = 1_000;
+
+const activeCodexCliChildPids = new Set<number>();
+let codexCliParentCleanupInstalled = false;
 
 class CodexCliProvider implements LlmProvider {
   readonly provider = "codex-cli" as const;
@@ -278,6 +287,9 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+    if (child.pid) {
+      registerActiveCodexCliChild(child.pid);
+    }
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -348,6 +360,9 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
         clearTimeout(timeout);
       }
       clearKillTimeout();
+      if (child.pid) {
+        unregisterActiveCodexCliChild(child.pid);
+      }
       request.signal?.removeEventListener("abort", onAbort);
       reject(error);
     });
@@ -356,6 +371,9 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
         clearTimeout(timeout);
       }
       clearKillTimeout();
+      if (child.pid) {
+        unregisterActiveCodexCliChild(child.pid);
+      }
       request.signal?.removeEventListener("abort", onAbort);
       if (timedOut) {
         resolve({
@@ -397,6 +415,78 @@ function runCodexCliCommand(request: CodexCliRunRequest): Promise<CodexCliRunRes
       );
     }
   });
+}
+
+function registerActiveCodexCliChild(pid: number): void {
+  installCodexCliParentCleanup();
+  activeCodexCliChildPids.add(pid);
+}
+
+function unregisterActiveCodexCliChild(pid: number): void {
+  activeCodexCliChildPids.delete(pid);
+}
+
+function installCodexCliParentCleanup(): void {
+  if (codexCliParentCleanupInstalled) {
+    return;
+  }
+  codexCliParentCleanupInstalled = true;
+
+  process.once("exit", () => {
+    terminateActiveCodexCliChildren("SIGTERM");
+  });
+
+  for (const signal of CODEX_CLI_PARENT_SIGNALS) {
+    process.once(signal, () => {
+      const activeChildren = activeCodexCliChildPids.size;
+      terminateActiveCodexCliChildren(signal === "SIGINT" ? "SIGINT" : "SIGTERM");
+      process.exitCode = signalExitCode(signal);
+
+      setTimeout(
+        () => {
+          terminateActiveCodexCliChildren("SIGKILL");
+          process.exit(signalExitCode(signal));
+        },
+        activeChildren > 0 ? CODEX_CLI_FORCED_PARENT_EXIT_MS : 0,
+      );
+    });
+  }
+}
+
+function terminateActiveCodexCliChildren(signal: NodeJS.Signals): void {
+  for (const pid of activeCodexCliChildPids) {
+    terminateCodexCliChildPid(pid, signal);
+  }
+}
+
+function terminateCodexCliChildPid(pid: number, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall back to killing the direct child below.
+    }
+  }
+
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // The child may already have exited.
+  }
+}
+
+function signalExitCode(signal: NodeJS.Signals): number {
+  switch (signal) {
+    case "SIGHUP":
+      return 129;
+    case "SIGINT":
+      return 130;
+    case "SIGTERM":
+      return 143;
+    default:
+      return 1;
+  }
 }
 
 async function readCodexOutput(
@@ -470,6 +560,8 @@ export function createCodexCliProvider(
 export const __codexCliProviderTestHooks = {
   buildCodexCompletionPrompt,
   buildIsolatedCodexEnv,
+  getActiveCodexCliChildCount: () => activeCodexCliChildPids.size,
   parseCodexTokenUsage,
   runCodexCliCommand,
+  terminateActiveCodexCliChildren,
 };

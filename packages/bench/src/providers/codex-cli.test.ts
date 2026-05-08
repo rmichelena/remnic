@@ -220,7 +220,39 @@ test("codex-cli command terminates subprocess when aborted", async () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Codex CLI aborted by benchmark timeout/);
+    assert.equal(__codexCliProviderTestHooks.getActiveCodexCliChildCount(), 0);
   } finally {
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("codex-cli parent cleanup terminates active subprocesses", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-codex-cli-test-"));
+
+  try {
+    const run = __codexCliProviderTestHooks.runCodexCliCommand({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "process.stdin.resume(); setInterval(() => {}, 1000);",
+      ],
+      input: "hello",
+      outputPath: path.join(tempDir, "last-message.txt"),
+      workspacePath: tempDir,
+      timeoutMs: 60_000,
+      env: process.env,
+    });
+
+    assert.equal(__codexCliProviderTestHooks.getActiveCodexCliChildCount(), 1);
+    __codexCliProviderTestHooks.terminateActiveCodexCliChildren("SIGTERM");
+
+    const result = await run;
+
+    assert.equal(result.status, null);
+    assert.equal(result.signal, "SIGTERM");
+    assert.equal(__codexCliProviderTestHooks.getActiveCodexCliChildCount(), 0);
+  } finally {
+    __codexCliProviderTestHooks.terminateActiveCodexCliChildren("SIGKILL");
     await rm(tempDir, { force: true, recursive: true });
   }
 });
