@@ -47,6 +47,8 @@ for config-key behavior, backup behavior, and local patch preservation notes.
 Publish ClawHub releases from the built npm/ClawPack tarball, not from the raw
 GitHub source folder. Source-folder publishing does not run the package build,
 so ClawHub can scan an incomplete three-file artifact with no `dist/index.js`.
+The package is named `@remnic/plugin-openclaw`, but the current ClawHub owner is
+the `joshuaswarren` account.
 
 ```bash
 pnpm --filter @remnic/plugin-openclaw build
@@ -55,6 +57,7 @@ clawhub package pack packages/plugin-openclaw --pack-destination /tmp/remnic-cla
 clawhub package publish /tmp/remnic-clawpack/remnic-plugin-openclaw-<version>.tgz \
   --family code-plugin \
   --name @remnic/plugin-openclaw \
+  --owner joshuaswarren \
   --display-name "Remnic OpenClaw Plugin" \
   --version <version> \
   --source-repo joshuaswarren/remnic \
