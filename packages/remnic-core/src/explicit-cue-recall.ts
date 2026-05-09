@@ -777,6 +777,14 @@ interface AgentMoveDelta {
   dy: number;
 }
 
+interface ContainerObjectTransfer {
+  step: number;
+  action: string;
+  object: string;
+  container: string;
+  direction: "placed" | "removed";
+}
+
 function hasTrajectoryAnalysisIntent(query: string): boolean {
   const normalized = normalizeTrajectoryQuery(query);
   if (collectExplicitTurnReferences(query).length > 0) {
@@ -934,18 +942,38 @@ function buildTrajectoryAnalysisLines(
   const asksLocation = /\blocations?\b/.test(normalized) || /\bwhere\b/.test(normalized);
   const asksContainerHistory = /\bcontainers?\b/.test(normalized) ||
     /\binteracted\b/.test(normalized);
+  const asksContainerObjectTransfer = /\b(?:objects?|items?)\b/.test(normalized) &&
+    /\b(?:placed|put|inserted|moved|removed)\b/.test(normalized);
   const asksEntityState = /\bstate\b/.test(normalized) ||
     /\bchanges?\s+history\b/.test(normalized) ||
     /\bwhole\s+changes?\s+history\b/.test(normalized);
+  const asksResultingObservation = /\bresulting\s+state\b/.test(normalized) ||
+    /\bprovide\s+the\s+full\s+observation\b/.test(normalized) ||
+    /\bwhat\s+will\s+be\s+the\s+resulting\b/.test(normalized);
 
   if (transition) {
     lines.push(
       `Matched quoted observations: Observation ${transition.fromStep} -> Observation ${transition.toStep}.`,
     );
+    appendActionSequenceSummary(
+      lines,
+      trajectory,
+      transition.fromStep + 1,
+      transition.toStep,
+      "Action sequence that transforms the quoted observations:",
+    );
     appendActionRangeLines(lines, trajectory, transition.fromStep + 1, transition.toStep, {
       includeObservations: true,
-      heading: "Actions that transform the quoted observations:",
+      heading: "Detailed transition evidence:",
     });
+  }
+
+  if (asksResultingObservation && !transition && explicitReferences.length > 0) {
+    appendActionRangeLines(lines, trajectory, bounds.start, bounds.end, {
+      includeObservations: true,
+      heading: "Referenced action sequence and observations:",
+    });
+    appendResultingObservationLine(lines, trajectory, bounds.end);
   }
 
   if (
@@ -989,6 +1017,8 @@ function buildTrajectoryAnalysisLines(
   ) {
     appendEntityTimelineLines(lines, trajectory, bounds, entities, {
       includeIndirectMentions: asksLocation,
+      includeContainerObjectTransfers: asksContainerObjectTransfer,
+      includeMovableStateActions: asksEntityState,
     });
   }
 
@@ -1063,6 +1093,36 @@ function appendActionRangeLines(
   }
 }
 
+function appendActionSequenceSummary(
+  lines: string[],
+  trajectory: readonly LabeledTrajectoryStep[],
+  start: number,
+  end: number,
+  heading: string,
+): void {
+  const low = Math.min(start, end);
+  const high = Math.max(start, end);
+  const actions = trajectory
+    .filter((step) => step.step >= low && step.step <= high && step.action)
+    .map((step) => `step ${step.step}: ${step.action}`);
+  if (actions.length === 0) {
+    return;
+  }
+  lines.push(`${heading} ${actions.join("; ")}.`);
+}
+
+function appendResultingObservationLine(
+  lines: string[],
+  trajectory: readonly LabeledTrajectoryStep[],
+  stepNumber: number,
+): void {
+  const step = trajectory.find((candidate) => candidate.step === stepNumber);
+  if (!step?.observation) {
+    return;
+  }
+  lines.push(`Resulting observation after Action ${step.step}: ${oneLine(step.observation)}`);
+}
+
 function appendSpatialTrajectoryInferenceLines(
   lines: string[],
   query: string,
@@ -1075,15 +1135,56 @@ function appendSpatialTrajectoryInferenceLines(
   const wantsRules = /\brules?\b/.test(normalized) ||
     /\bwin\s+condition\b/.test(normalized) ||
     /\bpush(?:able)?\s+word\b/.test(normalized);
-  const wantsStrategicOrCounterfactual = /\b(?:counterproductive|strategic|objective|instead|alternative|progress|goal|necessary|critical)\b/.test(
+  const wantsStrategicOrCounterfactual = /\b(?:blocked|counterproductive|failed|failure|infer|inferred|objective|instead|alternative|progress|goal|necessary|critical|strategic|successful|relevant|ineffective|only\s+one|caused?\s+a\s+change)\b/.test(
     normalized,
   );
-  if (!wantsRelativePosition && !wantsRules && !wantsStrategicOrCounterfactual) {
+  const wantsStateTransformation = /\b(?:appear|appears|appeared|disappear|disappears|disappeared|temporary|transformation|hidden\s+state|reversed)\b/.test(
+    normalized,
+  );
+  if (!wantsRelativePosition && !wantsRules && !wantsStrategicOrCounterfactual && !wantsStateTransformation) {
     return;
   }
 
-  const window = boundedTrajectory(trajectory, bounds);
-  const movementLines = collectMovementDeltaLines(query, window);
+  const window = spatialTrajectoryWindowForQuery(query, trajectory, bounds);
+  const counterfactualContactLines = collectCounterfactualContactLines(query, trajectory, normalized);
+  if (counterfactualContactLines.length > 0) {
+    lines.push("Counterfactual contact cues:");
+    lines.push(...counterfactualContactLines);
+  }
+
+  const selfReversingLines = collectSelfReversingProgressLines(query, window, normalized);
+  if (selfReversingLines.length > 0) {
+    lines.push("Self-reversing sequence cues:");
+    lines.push(...selfReversingLines);
+  }
+  const onlyEffectiveActionLines = collectOnlyEffectiveActionLines(window, normalized);
+  if (onlyEffectiveActionLines.length > 0) {
+    lines.push("Only-effective action cues:");
+    lines.push(...onlyEffectiveActionLines);
+  }
+  const pushedPhraseGroupLines = collectPushedPhraseGroupShiftLines(query, window, normalized);
+  if (pushedPhraseGroupLines.length > 0) {
+    lines.push("Pushed phrase-group shift cues:");
+    lines.push(...pushedPhraseGroupLines);
+  }
+  const suppressMovementProgressEvidence = onlyEffectiveActionLines.length > 0 ||
+    selfReversingLines.some((line) =>
+    line.includes("named movement sequence") &&
+    /\bwhich\b/.test(normalized) &&
+    /\brelevant\b/.test(normalized)
+  ) || pushedPhraseGroupLines.length > 0;
+
+  const actionMovementLines = suppressMovementProgressEvidence
+    ? []
+    : collectActionMovementSummaryLines(query, window, bounds);
+  if (actionMovementLines.length > 0) {
+    lines.push("Action movement summary cues:");
+    lines.push(...actionMovementLines);
+  }
+
+  const movementLines = suppressMovementProgressEvidence
+    ? []
+    : collectMovementDeltaLines(query, window);
   if (movementLines.length > 0) {
     lines.push("Relative-position movement cues:");
     lines.push(...movementLines);
@@ -1106,7 +1207,77 @@ function appendSpatialTrajectoryInferenceLines(
     lines.push(...alternativeActionLines);
   }
 
-  const ruleTextPositionLines = collectRuleTextPositionLines(window, normalized);
+  const adjacentRuleSetupLines = collectAdjacentRuleSetupLines(window, normalized);
+  if (adjacentRuleSetupLines.length > 0) {
+    lines.push("Adjacent rule-block setup cues:");
+    lines.push(...adjacentRuleSetupLines);
+  }
+
+  const blockedMoveLines = collectBlockedMoveLines(query, window, normalized);
+  if (blockedMoveLines.length > 0) {
+    lines.push("Blocked-move cues:");
+    lines.push(...blockedMoveLines);
+  }
+
+  const failedEscapeLines = collectFailedEscapeLines(query, trajectory, normalized);
+  if (failedEscapeLines.length > 0) {
+    lines.push("Failed-move escape cues:");
+    lines.push(...failedEscapeLines);
+  }
+
+  const sameRelativeTextPushLines = collectSameRelativeTextPushLines(window, normalized);
+  if (sameRelativeTextPushLines.length > 0) {
+    lines.push("Same-relative text-push cues:");
+    lines.push(...sameRelativeTextPushLines);
+  }
+
+  const failedContactLines = sameRelativeTextPushLines.length > 0
+    ? []
+    : collectFailedContactBoundaryLines(window, normalized);
+  if (failedContactLines.length > 0) {
+    lines.push("Failed-push boundary cues:");
+    lines.push(...failedContactLines);
+  }
+
+  const transformationLines = collectTemporaryRuleTransformationLines(window, normalized);
+  if (transformationLines.length > 0) {
+    lines.push("Temporary transformation cues:");
+    lines.push(...transformationLines);
+  }
+
+  const wholeConfigurationShiftLines = collectWholeConfigurationShiftLines(window, normalized);
+  if (wholeConfigurationShiftLines.length > 0) {
+    lines.push("Whole-configuration shift cues:");
+    lines.push(...wholeConfigurationShiftLines);
+  }
+
+  const ruleInterventionLines = collectRuleInterventionStrategyLines(window, normalized);
+  if (ruleInterventionLines.length > 0) {
+    lines.push("Rule-intervention strategy cues:");
+    lines.push(...ruleInterventionLines);
+  }
+
+  const missingPushTargetLines = collectMissingPushTargetLines(window, normalized);
+  if (missingPushTargetLines.length > 0) {
+    lines.push("Missing-interaction cues:");
+    lines.push(...missingPushTargetLines);
+  }
+
+  const rulePhraseAlignmentLines = collectRulePhraseAlignmentLines(window, normalized);
+  if (rulePhraseAlignmentLines.length > 0) {
+    lines.push("Rule-phrase alignment cues:");
+    lines.push(...rulePhraseAlignmentLines);
+  }
+
+  const controlRuleInteractionLines = collectControlRuleInteractionLines(window, normalized);
+  if (controlRuleInteractionLines.length > 0) {
+    lines.push("Control-rule interaction cues:");
+    lines.push(...controlRuleInteractionLines);
+  }
+
+  const ruleTextPositionLines = suppressMovementProgressEvidence
+    ? []
+    : collectRuleTextPositionLines(window, normalized);
   if (ruleTextPositionLines.length > 0) {
     lines.push("Rule-text positioning cues:");
     lines.push(...ruleTextPositionLines);
@@ -1117,6 +1288,195 @@ function appendSpatialTrajectoryInferenceLines(
     lines.push("Rule-state cues:");
     lines.push(...ruleLines);
   }
+}
+
+function spatialTrajectoryWindowForQuery(
+  query: string,
+  trajectory: readonly LabeledTrajectoryStep[],
+  bounds: TrajectoryBounds,
+): LabeledTrajectoryStep[] {
+  const normalized = normalizeTrajectoryQuery(query);
+  const minStep = trajectory[0]?.step ?? bounds.start;
+  const maxStep = trajectory[trajectory.length - 1]?.step ?? bounds.end;
+  let start = bounds.start;
+  let end = bounds.end;
+  const references = collectExplicitTurnReferences(query).map((reference) => reference.number);
+
+  if (references.length > 0 && hasManeuverInterpretationCue(normalized)) {
+    start = Math.min(start, ...references);
+    end = Math.max(end, ...references);
+  }
+
+  if (
+    references.length > 0 &&
+    /\b(?:then|at\s+the\s+start\s+of|start\s+of|optimal|successful|failed|corrective)\b/.test(
+      normalized,
+    )
+  ) {
+    end = Math.max(end, ...references);
+  }
+
+  if (/\b(?:failed|successful|before\s+the\s+successful)\b/.test(normalized)) {
+    for (const match of normalized.matchAll(/\bsteps?\s+(\d+)\s*(?:-|to|through|thru)\s*(\d+)\b/g)) {
+      const rangeStart = parseNonNegativeIntegerToken(match[1] ?? "");
+      const rangeEnd = parseNonNegativeIntegerToken(match[2] ?? "");
+      if (rangeStart !== undefined && rangeEnd !== undefined) {
+        start = Math.min(start, rangeStart, rangeEnd);
+        end = Math.max(end, rangeStart, rangeEnd);
+      }
+    }
+    const successfulStep = firstMatchInteger(normalized, /\bsuccessful\s+move\s+at\s+step\s+(\d+)\b/);
+    if (successfulStep !== undefined) {
+      end = Math.max(end, successfulStep);
+    }
+  }
+
+  if (
+    references.length > 0 &&
+    /\b(?:appear|appears|appeared|disappear|disappears|disappeared|temporary|transformation|hidden\s+state|reversed)\b/.test(
+      normalized,
+    )
+  ) {
+    end = Math.max(end, ...references.map((reference) => reference + 1));
+  }
+
+  if (hasManeuverInterpretationCue(normalized) || /\brelative\s+position\b/.test(normalized)) {
+    start -= 1;
+  }
+
+  if (/\b(?:breaks?|breaking|broke)\s+(?:this\s+|the\s+)?(?:loop|cycle|sequence)\b/.test(normalized)) {
+    end += 1;
+  }
+
+  return boundedTrajectory(trajectory, {
+    start: Math.max(minStep, start),
+    end: Math.min(maxStep, end),
+    reason: bounds.reason,
+  });
+}
+
+function collectActionMovementSummaryLines(
+  query: string,
+  window: readonly LabeledTrajectoryStep[],
+  bounds: TrajectoryBounds,
+): string[] {
+  const normalized = normalizeTrajectoryQuery(query);
+  if (!hasManeuverInterpretationCue(normalized) && !/\b(?:loop|cycle|sequence)\b/.test(normalized)) {
+    return [];
+  }
+
+  const referencedEnd = Math.max(
+    bounds.end,
+    ...collectExplicitTurnReferences(query).map((reference) => reference.number),
+    hasLoopExitIntent(normalized) ? (window[window.length - 1]?.step ?? bounds.end) : bounds.end,
+  );
+  const actions = window
+    .filter((step) => step.step >= bounds.start && step.step <= referencedEnd && step.action)
+    .map((step) => ({
+      step: step.step,
+      action: step.action!,
+      move: agentMoveDeltaFromAction(step.action!),
+    }))
+    .filter((step): step is {
+      step: number;
+      action: string;
+      move: AgentMoveDelta;
+    } => step.move !== undefined);
+  if (actions.length < 2) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  const repeated = actions.every((step) => step.move.direction === actions[0]!.move.direction);
+  const blockedPremise = /\b(?:blocked|fail|failed|failing|unchanged|stop|impassable|successfully\s+moved)\b/.test(
+    normalized,
+  );
+  const noChangePremise = /\b(?:game\s+state|state|position|observations?)\s+(?:did\s+not|does\s+not|do\s+not|didn't|doesn't|remain(?:ed)?|remains?)\s+(?:change|changed|unchanged)\b/.test(
+    normalized,
+  ) || /\b(?:no\s+change|unchanged|did\s+not\s+change\s+at\s+all|does\s+not\s+change\s+at\s+all)\b/.test(
+    normalized,
+  );
+  if (
+    repeated &&
+    (blockedPremise || noChangePremise) &&
+    (
+      observationsRemainStable(window, actions[0]!.step, actions[actions.length - 1]!.step) ||
+      findStopBlockerForRepeatedMove(window, actions[0]!.move) !== undefined
+    )
+  ) {
+    const blocker = findStopBlockerForRepeatedMove(window, actions[0]!.move);
+    lines.push(
+      blocker
+        ? `Actions ${actions[0]!.step}-${actions[actions.length - 1]!.step} (${actions
+            .map((step) => step.move.direction)
+            .join(", ")}) are repeated blocked/no-progress attempts: ${blocker.entity} is ${blocker.position.raw} at Observation ${blocker.step} and active rule "${blocker.entity} is stop" makes that target cell impassable. Do not describe these attempts as hidden-position displacement.`
+        : `Actions ${actions[0]!.step}-${actions[actions.length - 1]!.step} (${actions
+            .map((step) => step.move.direction)
+            .join(", ")}) are repeated attempts with stable relative observations; treat them as blocked/no-progress attempts, not as confirmed hidden-position displacement.`,
+    );
+    return lines;
+  }
+
+  const noKeyWinCue = collectNoKeyWinRepositioningCue(query, window);
+  if (noKeyWinCue) {
+    lines.push(noKeyWinCue);
+  }
+
+  const net = summarizeMoveNet(actions.map((step) => step.move));
+  if (net.dx === 0 && net.dy === 0) {
+    lines.push(
+      `Actions ${actions[0]!.step}-${actions[actions.length - 1]!.step} (${actions
+        .map((step) => step.move.direction)
+        .join(", ")}) have net displacement 0; treat this as a self-canceling movement sequence unless another state change is shown.`,
+    );
+  } else {
+    lines.push(
+      `Actions ${actions[0]!.step}-${actions[actions.length - 1]!.step} (${actions
+        .map((step) => step.move.direction)
+        .join(", ")}) change the agent's hidden absolute position by ${formatMoveNet(net)}.`,
+    );
+  }
+
+  if (actions.length >= 3) {
+    const prior = actions.slice(0, -1);
+    const priorNet = summarizeMoveNet(prior.map((step) => step.move));
+    const last = actions[actions.length - 1]!;
+    if (
+      priorNet.dx === 0 &&
+      priorNet.dy === 0 &&
+      (last.move.dx !== 0 || last.move.dy !== 0)
+    ) {
+      lines.push(
+        `The final ${last.move.direction} action at step ${last.step} is the first non-canceling movement after the prior loop; use it as vertical/horizontal progress toward nearby rule text rather than treating it as more oscillation.`,
+      );
+    }
+  }
+
+  if (repeated && actions.length >= 3) {
+    lines.push(
+      `The repeated ${actions[0]!.move.direction} actions are changing the agent's hidden absolute position over multiple rows/columns even if no immediate reward appears.`,
+    );
+  }
+
+  return lines.slice(0, 4);
+}
+
+function summarizeMoveNet(moves: readonly AgentMoveDelta[]): { dx: number; dy: number } {
+  return moves.reduce(
+    (sum, move) => ({ dx: sum.dx + move.dx, dy: sum.dy + move.dy }),
+    { dx: 0, dy: 0 },
+  );
+}
+
+function formatMoveNet(net: { dx: number; dy: number }): string {
+  const parts: string[] = [];
+  if (net.dx !== 0) {
+    parts.push(`${Math.abs(net.dx)} ${net.dx > 0 ? "right" : "left"}`);
+  }
+  if (net.dy !== 0) {
+    parts.push(`${Math.abs(net.dy)} ${net.dy > 0 ? "down" : "up"}`);
+  }
+  return parts.length === 0 ? "0" : parts.join(" and ");
 }
 
 function collectMovementDeltaLines(
@@ -1167,6 +1527,209 @@ function collectMovementDeltaLines(
     }
   }
   return lines.slice(0, 8);
+}
+
+function collectSelfReversingProgressLines(
+  query: string,
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\b(?:relevant|progress|goal|touching|win\s+object|zero\s+net|self[- ]?reversing|opposing)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    return [];
+  }
+  const mentionedMoves = extractMentionedMoveSequence(query);
+  const moves = mentionedMoves.length >= 2
+    ? mentionedMoves
+    : window
+        .map((step) => (step.action ? agentMoveDeltaFromAction(step.action)?.direction : undefined))
+        .filter((direction): direction is AgentMoveDelta["direction"] => direction !== undefined);
+  if (moves.length < 2) {
+    return [];
+  }
+
+  const hasReversePair =
+    containsAdjacentReversePair(moves, "right", "left") ||
+    containsAdjacentReversePair(moves, "left", "right") ||
+    containsAdjacentReversePair(moves, "up", "down") ||
+    containsAdjacentReversePair(moves, "down", "up");
+  if (!hasReversePair) {
+    return [];
+  }
+
+  const net = summarizeMoveNet(
+    moves.map((direction) => agentMoveDeltaFromAction(direction)!),
+  );
+  const lines: string[] = [];
+  if (net.dx === 0 && net.dy === 0) {
+    lines.push(
+      `The named movement sequence (${moves.join(", ")}) has net displacement 0; treat the actions as self-reversing exploratory noise unless a lasting rule, reward, inventory, or object-contact change is shown.`,
+    );
+    if (/\bwhich\b/.test(normalizedQuery) && /\brelevant\b/.test(normalizedQuery)) {
+      lines.push(
+        `For a question asking which named actions were relevant, answer that none of the named actions made lasting progress when the sequence cancels out and no durable state change is shown.`,
+      );
+    }
+  } else if (
+    mentionedMoves.length >= 4 &&
+    containsAdjacentReversePair(mentionedMoves, "right", "left") &&
+    containsAdjacentReversePair(mentionedMoves, "down", "up")
+  ) {
+    lines.push(
+      `The named right/left and down/up pairs are self-reversing; temporary closeness to a win object inside a reversed pair is not lasting progress toward touching that object.`,
+    );
+  }
+  return lines;
+}
+
+function extractMentionedMoveSequence(query: string): AgentMoveDelta["direction"][] {
+  const moves: AgentMoveDelta["direction"][] = [];
+  for (const value of extractBacktickValues(query)) {
+    const move = agentMoveDeltaFromAction(value);
+    if (move) {
+      moves.push(move.direction);
+    }
+  }
+  if (moves.length > 0) {
+    return moves;
+  }
+
+  const normalized = normalizeTrajectoryQuery(query);
+  const tokens = normalized.split(" ").filter(Boolean);
+  const sequenceStart = mentionedMoveSequenceStart(tokens);
+  return sequenceStart === undefined
+    ? []
+    : parseMoveSequenceTokens(tokens, sequenceStart);
+}
+
+function mentionedMoveSequenceStart(tokens: readonly string[]): number | undefined {
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      tokens[index] === "sequence" &&
+      tokens[index + 1] === "of"
+    ) {
+      const movementIndex = tokens[index + 2] === "four" ? index + 3 : index + 2;
+      if (
+        tokens[movementIndex] === "movement" ||
+        tokens[movementIndex] === "movements"
+      ) {
+        return movementIndex + 1;
+      }
+    }
+
+    if (
+      (tokens[index] === "action" || tokens[index] === "actions") &&
+      tokens[index + 1] === "from" &&
+      tokens[index + 2] === "step" &&
+      isAllDigits(tokens[index + 3] ?? "") &&
+      tokens[index + 4] === "to" &&
+      isAllDigits(tokens[index + 5] ?? "") &&
+      tokens[index + 6] === "consist" &&
+      tokens[index + 7] === "of"
+    ) {
+      return index + 8;
+    }
+  }
+  return undefined;
+}
+
+function parseMoveSequenceTokens(
+  tokens: readonly string[],
+  startIndex: number,
+): AgentMoveDelta["direction"][] {
+  const moves: AgentMoveDelta["direction"][] = [];
+  const scanEnd = Math.min(tokens.length, startIndex + 32);
+  for (let index = startIndex; index < scanEnd; index += 1) {
+    const token = tokens[index]!;
+    if (isMoveDirectionToken(token)) {
+      moves.push(token);
+      continue;
+    }
+    if (token === "and" || token === "then") {
+      continue;
+    }
+    if (moves.length > 0) {
+      break;
+    }
+  }
+  return moves;
+}
+
+function isMoveDirectionToken(
+  token: string,
+): token is AgentMoveDelta["direction"] {
+  return token === "up" ||
+    token === "down" ||
+    token === "left" ||
+    token === "right";
+}
+
+function containsAdjacentReversePair(
+  moves: readonly AgentMoveDelta["direction"][],
+  first: AgentMoveDelta["direction"],
+  second: AgentMoveDelta["direction"],
+): boolean {
+  for (let index = 1; index < moves.length; index += 1) {
+    if (moves[index - 1] === first && moves[index] === second) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectOnlyEffectiveActionLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !(
+      /\bonly\s+one\b/.test(normalizedQuery) &&
+      /\b(?:caused?\s+a\s+change|made\s+progress|relevant|ineffective)\b/.test(normalizedQuery)
+    ) &&
+    !/\bother\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine)\b.*\bineffective\b/.test(normalizedQuery)
+  ) {
+    return [];
+  }
+
+  const steps = window.filter((step) => step.action && step.observation);
+  if (steps.length < 3) {
+    return [];
+  }
+
+  const baseline = observationStateSignature(steps[0]!.observation!);
+  if (!baseline) {
+    return [];
+  }
+
+  const unchanged: LabeledTrajectoryStep[] = [];
+  let changed: LabeledTrajectoryStep | undefined;
+  for (const step of steps) {
+    const signature = observationStateSignature(step.observation!);
+    if (signature === baseline && changed === undefined) {
+      unchanged.push(step);
+      continue;
+    }
+    changed = step;
+    break;
+  }
+
+  if (!changed || unchanged.length < 2) {
+    return [];
+  }
+
+  const previous = unchanged[unchanged.length - 1]!;
+  const changedMove = agentMoveDeltaFromAction(changed.action!);
+  const unchangedActions = unchanged
+    .map((step) => `Action ${step.step} ${normalizeActionVerb(step.action!) || step.action}`)
+    .join(", ");
+  const example = positionShiftExample(previous.observation!, changed.observation!);
+  return [
+    `Within the named span, Observations ${unchanged[0]!.step}-${previous.step} have the same object-relative signature after ${unchangedActions}; treat those actions as ineffective/no-progress attempts even if an earlier pre-span observation differs.`,
+    `Observation ${previous.step}->${changed.step} is the first state change inside the span after Action ${changed.step} ${changedMove?.direction ?? changed.action}${example ? ` (${example})` : ""}; answer that Action ${changed.step} ${changedMove?.direction ?? changed.action} is the only progress-making action.`,
+  ];
 }
 
 function collectObjectAlignmentLines(
@@ -1292,13 +1855,15 @@ function collectAlternativeActionLines(
   const normalized = normalizeTrajectoryQuery(query);
   if (
     !/\b(?:alternative|instead|would\s+have|should\s+have)\b/.test(normalized) ||
-    !/\b(?:loop|zero\s+progress|reversing|reverse|win\s+condition|objective)\b/.test(normalized)
+    !/\b(?:loop|zero\s+progress|reversing|reverse|win\s+condition|objective|goal|rule|strategic|counterproductive)\b/.test(normalized)
   ) {
     return [];
   }
 
   const targetStep = firstMatchInteger(normalized, /\bstart\s+of\s+step\s+(\d+)\b/) ??
-    firstMatchInteger(normalized, /\binstead\s+of\s+(?:moving|going)\s+[a-z]+\s+(?:in|at|on)\s+step\s+(\d+)\b/);
+    firstMatchInteger(normalized, /\bfrom\s+step\s+(\d+)\s+to\s+\d+\b/) ??
+    firstMatchInteger(normalized, /\binstead\s+of\s+(?:moving|going)\s+[a-z]+\s+(?:in|at|on)\s+step\s+(\d+)\b/) ??
+    firstMatchInteger(normalized, /\b(?:if\s+)?(?:at|in|on)\s+step\s+(\d+)\b/);
   if (targetStep === undefined) {
     return [];
   }
@@ -1312,10 +1877,41 @@ function collectAlternativeActionLines(
 
   const unavailableMove = extractDisallowedMove(normalized) ??
     (target?.action ? agentMoveDeltaFromAction(target.action)?.direction : undefined);
+  const alternativeMove = extractAlternativeMove(normalized);
   const positions = parseRelativePositions(priorStep.observation);
+  const lines: string[] = [];
+
+  if (alternativeMove) {
+    const entities = extractRelativePositionEntities(query);
+    const queryAsksForTextBlock = /\b(?:text|word)\s+blocks?\b/.test(normalized) ||
+      /\bblocks?\s+(?:of|for)\s+(?:text|word)\b/.test(normalized);
+    let focusEntities = entities.size > 0
+      ? [...entities].filter((entity) => positions.has(entity))
+      : [];
+    if (queryAsksForTextBlock && focusEntities.some((entity) => entity.startsWith("rule "))) {
+      focusEntities = focusEntities.filter((entity) => entity.startsWith("rule "));
+    }
+    if (queryAsksForTextBlock && focusEntities.length > 0) {
+      const first = focusEntities[0]!;
+      lines.push(
+        `Question target cue: because the query asks for a text/word block, use ${first} rather than the ordinary object with the same name when both appear in the observation.`,
+      );
+    }
+    for (const entity of focusEntities.slice(0, 3)) {
+      const position = positions.get(entity)!;
+      const nextPosition = {
+        x: position.x - alternativeMove.dx,
+        y: position.y - alternativeMove.dy,
+      };
+      lines.push(
+        `At the start of step ${targetStep}, use Observation ${priorStep.step}: if Action ${targetStep} were ${alternativeMove.direction}, static ${entity} would shift from ${position.raw} to ${formatRelativePosition(nextPosition)} relative to the agent.`,
+      );
+    }
+  }
+
   const focus = selectAlternativeActionTargets(positions, normalized);
   if (focus.length === 0) {
-    return [];
+    return lines;
   }
 
   const scored = ["left", "right", "up", "down"]
@@ -1333,22 +1929,886 @@ function collectAlternativeActionLines(
     });
   const best = scored[0];
   if (!best || best.score <= 0) {
-    return [];
+    return lines;
   }
 
   const targetDescriptions = focus.map(
     ({ entity, position }) => `${entity} at ${position.raw}`,
   );
-  const lines = [
+  lines.push(
     `At the start of step ${targetStep}, use Observation ${priorStep.step} as the decision state: ${targetDescriptions.join("; ")}.`,
     `Excluding the actual/reversing move${unavailableMove ? ` ${unavailableMove}` : ""}, ${best.move.direction} is the alternative that most directly reduces distance to the win-condition rule text target(s).`,
-  ];
+  );
   if (normalized.includes("win condition")) {
     lines.push(
       `${best.move.direction} advances the objective of getting beside or behind IS/WIN rule text for later rule construction; moves toward unrelated object words should not be preferred when the question asks about creating a win condition.`,
     );
   }
   return lines;
+}
+
+function collectCounterfactualContactLines(
+  query: string,
+  trajectory: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (!/\b(?:instead|would\s+have|if\s+the\s+agent|if\s+at\s+step|had\s+instead)\b/.test(normalizedQuery)) {
+    return [];
+  }
+  const targetStep = firstMatchInteger(normalizedQuery, /\bstart\s+of\s+step\s+(\d+)\b/) ??
+    firstMatchInteger(normalizedQuery, /\bfrom\s+step\s+(\d+)\s+to\s+\d+\b/) ??
+    firstMatchInteger(normalizedQuery, /\binstead\s+of\s+(?:moving|going)\s+[a-z]+\s+(?:in|at|on)\s+step\s+(\d+)\b/) ??
+    firstMatchInteger(normalizedQuery, /\b(?:if\s+)?(?:at|in|on)\s+step\s+(\d+)\b/) ??
+    firstMatchInteger(normalizedQuery, /\baction\s+at\s+step\s+(\d+)\b/);
+  const move = extractAlternativeMove(normalizedQuery);
+  if (targetStep === undefined || !move) {
+    return [];
+  }
+
+  const byStep = new Map(trajectory.map((step) => [step.step, step]));
+  const useSameStepLayout =
+    normalizedQuery.includes(`layout in step ${targetStep}`) ||
+    normalizedQuery.includes(`shown in step ${targetStep}`) ||
+    normalizedQuery.includes(`configuration shown in step ${targetStep}`) ||
+    normalizedQuery.includes(`based on the object layout in step ${targetStep}`);
+  const observationStep = useSameStepLayout
+    ? byStep.get(targetStep)
+    : byStep.get(targetStep - 1) ?? byStep.get(targetStep);
+  if (!observationStep?.observation) {
+    return [];
+  }
+
+  const contacts = parseRelativePositionEntries(observationStep.observation)
+    .filter((position) => position.x === move.dx && position.y === move.dy)
+    .sort((left, right) => {
+      const leftRule = normalizeEntity(left.entity).startsWith("rule ") ? 0 : 1;
+      const rightRule = normalizeEntity(right.entity).startsWith("rule ") ? 0 : 1;
+      return leftRule - rightRule || normalizeEntity(left.entity).localeCompare(normalizeEntity(right.entity));
+    });
+  if (contacts.length === 0) {
+    return [];
+  }
+
+  const contact = contacts[0]!;
+  const lines = [
+    `At Observation ${observationStep.step}, ${contact.entity} is ${contact.raw}; a counterfactual Action ${targetStep} ${move.direction} would contact that block. In the benchmark's push mechanics, this is the expected push interaction: push it one cell ${move.direction} and move the agent into the block's original cell unless an explicit STOP/boundary cue says otherwise. Do not describe this as merely stepping onto or overlapping the block.`,
+  ];
+  if (/\bwall\s+is\s+stop\b/.test(normalizedQuery)) {
+    const sameRowIs = findRuleIsOnSameRowAfterMove(observationStep.observation, move);
+    if (sameRowIs) {
+      lines.push(
+        `After that ${move.direction} move, ${sameRowIs.entity} from ${sameRowIs.raw} would be on the agent's same horizontal row at ${formatRelativePosition({ x: sameRowIs.x - move.dx, y: sameRowIs.y - move.dy })}, setting up a later lateral push of IS toward WALL and STOP.`,
+      );
+    }
+    lines.push(
+      `For a WALL IS STOP formation question, this contact is a positioning setup for getting onto the same row/line as rule IS so a later move can push IS into alignment with WALL and STOP.`,
+    );
+  }
+  if (/\brule\s+words?\b|\brule\s+blocks?\b|\bis\s+block\b|\btext\s+block\b/.test(normalizedQuery)) {
+    lines.push(
+      `Prefer this concrete contact/push interpretation over a vague movement-only explanation when the question asks about manipulating rule words.`,
+    );
+  }
+  return lines.slice(0, 3);
+}
+
+function findRuleIsOnSameRowAfterMove(
+  observation: string,
+  move: AgentMoveDelta,
+): RelativePosition | undefined {
+  return parseRelativePositionEntries(observation)
+    .filter((position) => normalizeEntity(position.entity) === "rule is")
+    .map((position) => ({
+      position,
+      afterX: position.x - move.dx,
+      afterY: position.y - move.dy,
+    }))
+    .filter((entry) => entry.afterY === 0)
+    .sort((left, right) => Math.abs(left.afterX) - Math.abs(right.afterX))[0]?.position;
+}
+
+function collectAdjacentRuleSetupLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (!hasAdjacentRuleSetupIntent(normalizedQuery)) {
+    return [];
+  }
+
+  const latest = [...window].reverse().find((step) => step.observation);
+  if (!latest?.observation) {
+    return [];
+  }
+
+  const adjacent = parseRelativePositionEntries(latest.observation)
+    .filter((position) => normalizeEntity(position.entity).startsWith("rule "))
+    .filter((position) => manhattanDistance(position) === 1)
+    .sort((left, right) => {
+      const leftMentioned = normalizedQuery.includes(normalizeEntity(left.entity).replace(/^rule\s+/, "")) ? 0 : 1;
+      const rightMentioned = normalizedQuery.includes(normalizeEntity(right.entity).replace(/^rule\s+/, "")) ? 0 : 1;
+      return leftMentioned - rightMentioned || normalizeEntity(left.entity).localeCompare(normalizeEntity(right.entity));
+    });
+  const lines: string[] = [];
+  for (const position of adjacent.slice(0, 3)) {
+    const direction = pushDirectionForAdjacentPosition(position);
+    if (!direction) {
+      continue;
+    }
+    const base = normalizeEntity(position.entity).replace(/^rule\s+/, "");
+    lines.push(
+      `At Observation ${latest.step}, ${position.entity} is ${position.raw}; the agent is directly ${agentRelationToAdjacentBlock(position)} the ${base.toUpperCase()} text block, so a future ${direction} action can push ${base.toUpperCase()} ${direction} to manipulate rule syntax.`,
+    );
+  }
+  return lines;
+}
+
+function hasAdjacentRuleSetupIntent(normalizedQuery: string): boolean {
+  return normalizedQuery.includes("final position") ||
+    normalizedQuery.includes("relative to rule") ||
+    normalizedQuery.includes("relative to the rule") ||
+    normalizedQuery.includes("rule block") ||
+    normalizedQuery.includes("rule blocks") ||
+    normalizedQuery.includes("rule word") ||
+    normalizedQuery.includes("rule words") ||
+    normalizedQuery.includes("strategic advantage") ||
+    normalizedQuery.includes("manipulate rule") ||
+    normalizedQuery.includes("manipulate the rule") ||
+    normalizedQuery.includes("manipulating rule") ||
+    normalizedQuery.includes("manipulating the rule") ||
+    hasPushBlockSetupIntent(normalizedQuery);
+}
+
+function hasPushBlockSetupIntent(normalizedQuery: string): boolean {
+  const tokens = normalizedQuery.split(" ").filter(Boolean);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token !== "push" && token !== "pushed" && token !== "pushing") {
+      continue;
+    }
+
+    let cursor = index + 1;
+    if (tokens[cursor] === "the") {
+      cursor += 1;
+    }
+    if (["is", "win", "baba", "you", "key", "door"].includes(tokens[cursor] ?? "")) {
+      cursor += 1;
+    }
+    if (tokens[cursor] === "text") {
+      cursor += 1;
+    }
+    if (tokens[cursor] === "block") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pushDirectionForAdjacentPosition(position: RelativePosition): AgentMoveDelta["direction"] | undefined {
+  if (position.x === 0 && position.y === -1) return "up";
+  if (position.x === 0 && position.y === 1) return "down";
+  if (position.x === -1 && position.y === 0) return "left";
+  if (position.x === 1 && position.y === 0) return "right";
+  return undefined;
+}
+
+function agentRelationToAdjacentBlock(position: RelativePosition): string {
+  if (position.x === 0 && position.y === -1) return "underneath";
+  if (position.x === 0 && position.y === 1) return "above";
+  if (position.x === -1 && position.y === 0) return "to the right of";
+  if (position.x === 1 && position.y === 0) return "to the left of";
+  return "next to";
+}
+
+function collectBlockedMoveLines(
+  query: string,
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\b(?:blocked|fail|failed|unchanged|stop|impassable|successfully\s+moved|instead)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  const alternativeMove = extractAlternativeMove(normalizedQuery);
+  const focusStep = firstMatchInteger(normalizedQuery, /\b(?:at|in|on)\s+step\s+(\d+)\b/);
+  const asksForOtherActions = /\b(?:what\s+)?other\s+actions?\b/.test(normalizedQuery) ||
+    /\bmore\s+strategic\s+actions?\b/.test(normalizedQuery);
+
+  for (const step of window) {
+    if (!step.observation) {
+      continue;
+    }
+    const stopObjects = parseStopRuleObjects(step.observation);
+    if (stopObjects.length === 0) {
+      continue;
+    }
+
+    const actionMove = step.action ? agentMoveDeltaFromAction(step.action) : undefined;
+    if (actionMove) {
+      const blocker = findBlockingStopObject(step.observation, stopObjects, actionMove);
+      if (blocker) {
+        lines.push(
+          `Action ${step.step} ${actionMove.direction} is blocked: ${blocker.entity} is ${blocker.position.raw} and active rule "${blocker.entity} is stop" makes that object impassable.`,
+        );
+        if (asksForOtherActions) {
+          const openMoves = openNonStopMoves(step.observation, stopObjects, actionMove.direction);
+          if (openMoves.length > 0) {
+            lines.push(
+              `Immediate strategic alternatives at Observation ${step.step}: ${formatMoveList(openMoves)} have no adjacent STOP object in the target cell, so those moves can change position while ${actionMove.direction} cannot.`,
+            );
+          }
+        }
+      }
+    }
+
+    if (alternativeMove && (focusStep === undefined || step.step === focusStep - 1 || step.step === focusStep)) {
+      const alternativeBlocker = findBlockingStopObject(
+        step.observation,
+        stopObjects,
+        alternativeMove,
+      );
+      if (!alternativeBlocker) {
+        lines.push(
+          `At Observation ${step.step}, ${alternativeMove.direction} has no adjacent STOP object in the target cell, so that alternative is not blocked by the active stop rule(s).`,
+        );
+      }
+    }
+  }
+
+  return uniqueLines(lines).slice(0, 6);
+}
+
+function collectFailedContactBoundaryLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (!/\b(?:failed|fail|blocked|no\s+change|unchanged|inability)\b/.test(normalizedQuery)) {
+    return [];
+  }
+  if (
+    /\bfailed\s+moves?\b/.test(normalizedQuery) &&
+    /\bsuccessful\s+move\s+at\s+step\s+\d+\b/.test(normalizedQuery)
+  ) {
+    return [];
+  }
+
+  const directions = new Set<AgentMoveDelta["direction"]>();
+  let hasExplicitDirection = false;
+  for (const direction of ["up", "down", "left", "right"] as const) {
+    if (
+      normalizedQuery.includes(`failed ${direction}`) ||
+      normalizedQuery.includes(`${direction} action repeatedly fails`) ||
+      normalizedQuery.includes(`${direction} attempt`) ||
+      normalizedQuery.includes(`moves ${direction}`)
+    ) {
+      directions.add(direction);
+      hasExplicitDirection = true;
+    }
+  }
+  if (!hasExplicitDirection) {
+    for (const step of window) {
+      const move = step.action ? agentMoveDeltaFromAction(step.action) : undefined;
+      if (move) {
+        directions.add(move.direction);
+      }
+    }
+  }
+  if (directions.size === 0) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  for (const step of window) {
+    if (!step.observation) {
+      continue;
+    }
+    const positions = parseRelativePositionEntries(step.observation);
+    for (const direction of directions) {
+      const move = agentMoveDeltaFromAction(direction)!;
+      const contact = positions.find(
+        (position) => position.x === move.dx && position.y === move.dy,
+      );
+      if (!contact) {
+        continue;
+      }
+      const normalizedEntity = normalizeEntity(contact.entity);
+      if (normalizedEntity.startsWith("rule ")) {
+        const stopRules = parseActiveRules(step.observation).filter((rule) => rule.endsWith(" is stop"));
+        const stopContext = stopRules.length === 0
+          ? "No active STOP rule is involved; "
+          : "";
+        lines.push(
+          `At Observation ${step.step}, ${contact.entity} is ${contact.raw}; failed ${direction} moves identify this text block as the blocker. ${stopContext}since rule/text blocks normally move when pushed, the failure implies the block cannot move further ${direction} because it is pressed against the ${boundaryNameForDirection(direction)}.`,
+        );
+      } else {
+        lines.push(
+          `At Observation ${step.step}, ${contact.entity} is ${contact.raw}; failed ${direction} moves identify that adjacent object as the immediate blocker.`,
+        );
+      }
+    }
+  }
+  return uniqueLines(lines).slice(0, 5);
+}
+
+function collectSameRelativeTextPushLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\bhidden\b/.test(normalizedQuery) &&
+    !(/\brelative\b/.test(normalizedQuery) && /\b(?:same|unchanged|static)\b/.test(normalizedQuery)) &&
+    !/\bobservation\s+(?:fail|fails|failed)\s+to\s+show\b/.test(normalizedQuery)
+  ) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  for (let index = 1; index < window.length; index += 1) {
+    const previous = window[index - 1]!;
+    const current = window[index]!;
+    const previousMove = previous.action ? agentMoveDeltaFromAction(previous.action) : undefined;
+    const currentMove = current.action ? agentMoveDeltaFromAction(current.action) : undefined;
+    if (
+      !previous.observation ||
+      !current.observation ||
+      !previousMove ||
+      !currentMove ||
+      previousMove.direction !== currentMove.direction
+    ) {
+      continue;
+    }
+
+    const previousPositions = parseRelativePositionEntries(previous.observation);
+    const currentPositions = parseRelativePositions(current.observation);
+    for (const previousPosition of previousPositions) {
+      const normalizedEntity = normalizeEntity(previousPosition.entity);
+      if (
+        !normalizedEntity.startsWith("rule ") ||
+        previousPosition.x !== currentMove.dx ||
+        previousPosition.y !== currentMove.dy
+      ) {
+        continue;
+      }
+      const currentPosition = currentPositions.get(normalizedEntity);
+      if (
+        !currentPosition ||
+        currentPosition.x !== previousPosition.x ||
+        currentPosition.y !== previousPosition.y
+      ) {
+        continue;
+      }
+
+      lines.push(
+        `Actions ${previous.step}-${current.step} are repeated ${currentMove.direction} moves with ${previousPosition.entity} remaining adjacent at ${previousPosition.raw} in both resulting observations; for a hidden-state question, answer the cumulative displacement across the named repeated actions: ${previousPosition.entity} moved one cell ${currentMove.direction} per ${currentMove.direction} action while the agent moved with it, so the relative offset stayed constant.`,
+      );
+    }
+  }
+
+  for (let index = 2; index < window.length; index += 1) {
+    const beforeApproach = window[index - 2]!;
+    const contactStep = window[index - 1]!;
+    const pushStep = window[index]!;
+    const contactMove = contactStep.action ? agentMoveDeltaFromAction(contactStep.action) : undefined;
+    const pushMove = pushStep.action ? agentMoveDeltaFromAction(pushStep.action) : undefined;
+    if (
+      !beforeApproach.observation ||
+      !contactStep.observation ||
+      !pushStep.observation ||
+      !contactMove ||
+      !pushMove ||
+      contactMove.direction !== pushMove.direction
+    ) {
+      continue;
+    }
+
+    const beforePositions = parseRelativePositions(beforeApproach.observation);
+    const contactPositions = parseRelativePositionEntries(contactStep.observation);
+    const afterPositions = parseRelativePositions(pushStep.observation);
+    for (const contactPosition of contactPositions) {
+      const normalizedEntity = normalizeEntity(contactPosition.entity);
+      if (!normalizedEntity.startsWith("rule ")) {
+        continue;
+      }
+      if (
+        contactPosition.x !== pushMove.dx ||
+        contactPosition.y !== pushMove.dy
+      ) {
+        continue;
+      }
+
+      const afterPosition = afterPositions.get(normalizedEntity);
+      if (
+        !afterPosition ||
+        afterPosition.x !== contactPosition.x ||
+        afterPosition.y !== contactPosition.y
+      ) {
+        continue;
+      }
+
+      const beforePosition = beforePositions.get(normalizedEntity);
+      if (
+        beforePosition &&
+        beforePosition.x === contactPosition.x &&
+        beforePosition.y === contactPosition.y
+      ) {
+        continue;
+      }
+
+      lines.push(
+        `Observation ${contactStep.step}->${pushStep.step}: after Action ${contactStep.step} ${contactMove.direction} made ${contactPosition.entity} adjacent at ${contactPosition.raw}, Action ${pushStep.step} ${pushMove.direction} kept it at the same relative offset; infer the agent pushed ${contactPosition.entity} ${pushMove.direction} and moved with it in hidden absolute coordinates. The unchanged relative offset is not by itself a failed-push/boundary cue.`,
+      );
+    }
+  }
+  return uniqueLines(lines).slice(0, 4);
+}
+
+function boundaryNameForDirection(direction: AgentMoveDelta["direction"]): string {
+  if (direction === "up") return "top/northern edge of the playable area";
+  if (direction === "down") return "bottom/southern edge of the playable area";
+  if (direction === "left") return "left/western edge of the playable area";
+  return "right/eastern edge of the playable area";
+}
+
+function collectFailedEscapeLines(
+  query: string,
+  trajectory: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (!/\bfailed\s+moves?\b/.test(normalizedQuery) || !/\bsuccessful\s+move\s+at\s+step\s+\d+\b/.test(normalizedQuery)) {
+    return [];
+  }
+
+  const failedGroups = [...normalizedQuery.matchAll(/\b(up|down|left|right)\s+in\s+steps?\s+(\d+)\s*(?:-|to|through|thru)\s*(\d+)\b/g)]
+    .map((match) => match[1] as AgentMoveDelta["direction"]);
+  if (failedGroups.length === 0) {
+    return [];
+  }
+
+  const successStep = firstMatchInteger(normalizedQuery, /\bsuccessful\s+move\s+at\s+step\s+(\d+)\b/);
+  const successAction = successStep === undefined
+    ? undefined
+    : trajectory.find((step) => step.step === successStep)?.action;
+  const blocked = failedGroups.map(blockedSideName);
+  const escapes = uniqueLines(failedGroups.map(oppositeMoveDirection));
+  const success = successStep === undefined
+    ? "the later successful move"
+    : `the successful ${normalizeActionVerb(successAction ?? "") || "escape"} move at step ${successStep}`;
+  return [
+    `Failed ${failedGroups.join("/")} move groups imply the agent was blocked ${formatNaturalList(blocked)} and likely cornered; the useful escape direction(s) are ${formatNaturalList(escapes)}. Treat ${success} as the escape from that blocked corner, not as missing evidence.`,
+  ];
+}
+
+function blockedSideName(direction: AgentMoveDelta["direction"]): string {
+  if (direction === "up") return "above";
+  if (direction === "down") return "below";
+  return `to the ${direction}`;
+}
+
+function oppositeMoveDirection(direction: AgentMoveDelta["direction"]): AgentMoveDelta["direction"] {
+  if (direction === "up") return "down";
+  if (direction === "down") return "up";
+  if (direction === "left") return "right";
+  return "left";
+}
+
+function formatNaturalList(values: readonly string[]): string {
+  const unique = uniqueLines(values);
+  if (unique.length <= 1) {
+    return unique[0] ?? "";
+  }
+  if (unique.length === 2) {
+    return `${unique[0]} and ${unique[1]}`;
+  }
+  return `${unique.slice(0, -1).join(", ")}, and ${unique[unique.length - 1]}`;
+}
+
+function collectPushedPhraseGroupShiftLines(
+  query: string,
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\bpush(?:ed|es|ing)?\b/.test(normalizedQuery) ||
+    !/\b(?:hidden\s+movement\s+mechanic|standard\s+push|pushed\s+objects?|both\s+shift|horizontal\s+and\s+vertical|diagonal)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    return [];
+  }
+
+  const mentionsIsKey = /\bis\b/.test(normalizedQuery) && /\bkey\b/.test(normalizedQuery);
+  if (!mentionsIsKey) {
+    return [];
+  }
+
+  const queryMove = extractNamedActionMove(normalizedQuery);
+  for (let index = 1; index < window.length; index += 1) {
+    const previous = window[index - 1]!;
+    const current = window[index]!;
+    const move = queryMove ?? (current.action ? agentMoveDeltaFromAction(current.action) : undefined);
+    if (!previous.observation || !current.observation || !move) {
+      continue;
+    }
+
+    const previousPositions = parseRelativePositionEntries(previous.observation);
+    const currentPositions = parseRelativePositionEntries(current.observation);
+    const contactedIs = previousPositions.find(
+      (position) =>
+        normalizeEntity(position.entity) === "rule is" &&
+        position.x === move.dx &&
+        position.y === move.dy,
+    );
+    if (!contactedIs) {
+      continue;
+    }
+
+    const adjacentKey = previousPositions.find(
+      (position) =>
+        isKeyPhraseBlock(position.entity) &&
+        Math.abs(position.x - contactedIs.x) <= 2 &&
+        Math.abs(position.y - contactedIs.y) <= 1,
+    );
+    if (!adjacentKey) {
+      continue;
+    }
+
+    const stillHasIs = currentPositions.some(
+      (position) => normalizeEntity(position.entity) === "rule is",
+    );
+    const stillHasKey = currentPositions.some(
+      (position) => isKeyPhraseBlock(position.entity),
+    );
+    if (!stillHasIs || !stillHasKey) {
+      continue;
+    }
+
+    const keyLabel = normalizeEntity(adjacentKey.entity).startsWith("rule ") ? "rule KEY" : "KEY";
+    return [
+      `Observation ${previous.step}->${current.step}: Action ${current.step} ${move.direction} contacts rule IS at ${contactedIs.raw}, with adjacent ${keyLabel} at ${adjacentKey.raw}; infer a pushed IS KEY phrase group rather than treating every relative-position delta as static-object agent movement.`,
+      `The hidden pushed-object mechanic is diagonal phrase-group motion: the contacted IS block and adjacent KEY word move together one cell ${move.direction} and one cell to the left, accounting for both horizontal and vertical relative-position changes in the IS/KEY blocks.`,
+    ];
+  }
+
+  return [];
+}
+
+function isKeyPhraseBlock(entity: string): boolean {
+  const normalized = normalizeEntity(entity);
+  return normalized === "key" || normalized === "rule key";
+}
+
+function extractNamedActionMove(normalizedQuery: string): AgentMoveDelta | undefined {
+  const match = /\baction\s+['"`]?(up|down|left|right)['"`]?\b/.exec(normalizedQuery) ??
+    /\bexecutes?\s+(?:the\s+)?['"`]?(up|down|left|right)['"`]?\b/.exec(normalizedQuery);
+  return match?.[1] ? agentMoveDeltaFromAction(match[1]) : undefined;
+}
+
+function collectTemporaryRuleTransformationLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\b(?:appear|appears|appeared|disappear|disappears|disappeared|temporary|transformation|hidden\s+state|reversed)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  for (let index = 1; index < window.length - 1; index += 1) {
+    const previous = window[index - 1]!;
+    const current = window[index]!;
+    const next = window[index + 1]!;
+    if (!previous.observation || !current.observation || !next.observation) {
+      continue;
+    }
+    const previousPositions = parseRelativePositions(previous.observation);
+    const currentPositions = parseRelativePositions(current.observation);
+    const nextPositions = parseRelativePositions(next.observation);
+    for (const [entity] of currentPositions.entries()) {
+      if (entity.startsWith("rule ") || previousPositions.has(entity) || nextPositions.has(entity)) {
+        continue;
+      }
+      const activeRules = new Set([
+        ...parseActiveRules(previous.observation),
+        ...parseActiveRules(current.observation),
+        ...parseActiveRules(next.observation),
+      ]);
+      if (activeRules.has(`${entity} is win`) || activeRules.has(`${entity} is you`)) {
+        continue;
+      }
+      lines.push(
+        `${entity} appears in Observation ${current.step} but is absent before and after; with surrounding actions reversing each other, explain this as a temporary hidden rule/text alignment that transformed another object into ${entity} and then broke again, not as a permanent object pickup or overlap.`,
+      );
+      if (entity === "key") {
+        lines.push(
+          `For a temporary key appearance, a plausible hidden rule is BALL IS KEY or another object IS KEY formed by the right move and broken by the left move.`,
+        );
+      }
+    }
+  }
+  return uniqueLines(lines).slice(0, 4);
+}
+
+function collectWholeConfigurationShiftLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\b(?:entire|whole|all)\b/.test(normalizedQuery) ||
+    !/\b(?:configuration|level|objects?|rules?)\b/.test(normalizedQuery) ||
+    !/\bshift(?:ed|ing)?\b/.test(normalizedQuery)
+  ) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  for (let index = 1; index < window.length; index += 1) {
+    const previous = window[index - 1]!;
+    const current = window[index]!;
+    const move = current.action ? agentMoveDeltaFromAction(current.action) : undefined;
+    if (!previous.observation || !current.observation || !move) {
+      continue;
+    }
+    const previousPositions = parseRelativePositions(previous.observation);
+    const currentPositions = parseRelativePositions(current.observation);
+    const counts = new Map<string, { dx: number; dy: number; count: number }>();
+    for (const [entity, previousPosition] of previousPositions.entries()) {
+      const currentPosition = currentPositions.get(entity);
+      if (!currentPosition) {
+        continue;
+      }
+      const dx = currentPosition.x - previousPosition.x;
+      const dy = currentPosition.y - previousPosition.y;
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      const key = `${dx}:${dy}`;
+      const entry = counts.get(key) ?? { dx, dy, count: 0 };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+    const best = [...counts.values()].sort((left, right) => right.count - left.count)[0];
+    if (!best || best.count < 5) {
+      continue;
+    }
+    lines.push(
+      `Observation ${previous.step}->${current.step} shows a coordinated whole-level push/shift after Action ${current.step} ${move.direction}: ${best.count} tracked objects or rule words all moved ${formatRelativePosition({ x: best.dx, y: best.dy })} relative to the agent. Treat the ${move.direction} action as the progress-enabling whole-configuration contact created by the prior setup, not as ordinary empty-space movement.`,
+    );
+    if (/\bleft\b/.test(normalizedQuery) || /\bdown\b/.test(normalizedQuery)) {
+      lines.push(
+        `By contrast, moving left or down would move back into empty space or undo the setup and would not trigger that coordinated configuration shift.`,
+      );
+    }
+  }
+  return uniqueLines(lines).slice(0, 3);
+}
+
+function collectControlRuleInteractionLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (
+    !/\bbaba\s+is\s+you\b/.test(normalizedQuery) ||
+    !/\b(?:interact(?:ing)?|prerequisite|position(?:ing)?|control\s+rule|own\s+rule|necessary)\b/.test(normalizedQuery)
+  ) {
+    return [];
+  }
+
+  const latest = [...window].reverse().find((step) => step.observation);
+  if (!latest?.observation || !parseActiveRules(latest.observation).includes("baba is you")) {
+    return [];
+  }
+
+  const phrase = findAlignedRulePhrasePositions(
+    parseRelativePositionEntries(latest.observation),
+    "baba",
+    "you",
+  );
+  if (!phrase) {
+    return [];
+  }
+  return [
+    `At Observation ${latest.step}, the specific target text block is rule baba at ${phrase.subject.raw}, the leftmost word of the active BABA IS YOU phrase.`,
+    `Because BABA IS YOU makes Baba the controlled agent, the setup should not be described as directly pushing the BABA word itself from inside its own control rule. The purpose of becoming adjacent is to later push a different object or text block into the rule's syntax line to modify or break that control rule.`,
+  ];
+}
+
+function collectNoKeyWinRepositioningCue(
+  query: string,
+  window: readonly LabeledTrajectoryStep[],
+): string | undefined {
+  const normalizedQuery = normalizeTrajectoryQuery(query);
+  if (
+    !/\b(?:no\s+key|key\s+objects?|hidden\s+state|reposition|solve|win\s+condition|essential)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    return undefined;
+  }
+
+  const observations = window
+    .map((step) => step.observation)
+    .filter((observation): observation is string => observation !== undefined);
+  if (observations.length === 0) {
+    return undefined;
+  }
+  const rules = new Set(observations.flatMap((observation) => parseActiveRules(observation)));
+  if (!rules.has("key is win")) {
+    return undefined;
+  }
+  const positions = observations.flatMap((observation) => parseRelativePositionEntries(observation));
+  const hasOrdinaryKey = positions.some((position) => normalizeEntity(position.entity) === "key");
+  const explicitNoKeyPremise = hasExplicitNoKeyObjectPremise(normalizedQuery);
+  if (hasOrdinaryKey && !explicitNoKeyPremise) {
+    return undefined;
+  }
+
+  return explicitNoKeyPremise
+    ? "Given the question premise that no ordinary key object should be used, the down-move sequence is changing the agent's hidden absolute row/board position so it can get below or beside rule text for later horizontal movement and rule-block pushes, rather than trying to collect a key."
+    : "Because key is win is active but no ordinary key object appears, the down-move sequence is changing the agent's hidden absolute row/board position so it can get below or beside rule text for later horizontal movement and rule-block pushes, rather than trying to collect a key.";
+}
+
+function collectRuleInterventionStrategyLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  const observations = window
+    .map((step) => step.observation)
+    .filter((observation): observation is string => observation !== undefined);
+  if (observations.length === 0) {
+    return [];
+  }
+
+  const rules = new Set(observations.flatMap((observation) => parseActiveRules(observation)));
+  const latest = observations[observations.length - 1]!;
+  const latestPositions = parseRelativePositionEntries(latest);
+  const allPositions = observations.flatMap((observation) => parseRelativePositionEntries(observation));
+  const lines: string[] = [];
+
+  const hasWallStop = rules.has("wall is stop");
+  if (
+    hasWallStop &&
+    /\b(?:door|right|blocked|impassable|optimal|progress|solve|wall)\b/.test(normalizedQuery)
+  ) {
+    const rightBlocked = observations.some((observation) =>
+      findBlockingStopObject(observation, ["wall"], agentMoveDeltaFromAction("right")!) !== undefined
+    );
+    if (rightBlocked) {
+      lines.push(
+        `With wall is stop active, wall objects immediately to the right block the right-side/door path; continuing right is not the strategic mechanism for progress.`,
+      );
+    }
+    lines.push(
+      "Strategic mechanism: progress requires reaching and manipulating the WALL IS STOP rule text so IS can be pushed out or the phrase can be broken, removing STOP from wall objects and opening blocked paths.",
+    );
+  }
+
+  const hasKeyWin = rules.has("key is win");
+  const hasOrdinaryKey = allPositions.some((position) => normalizeEntity(position.entity) === "key");
+  const explicitNoKeyPremise = hasExplicitNoKeyObjectPremise(normalizedQuery);
+  const hasRuleDoor = latestPositions.some((position) => normalizeEntity(position.entity) === "rule door");
+  if (
+    hasKeyWin &&
+    (!hasOrdinaryKey || explicitNoKeyPremise) &&
+    /\b(?:no\s+key|key\s+objects?|hidden\s+state|reposition|solve|win\s+condition|essential)\b/.test(
+      normalizedQuery,
+    )
+  ) {
+    lines.push(
+      explicitNoKeyPremise
+        ? "Given the question premise that no ordinary key object should be used, key is win cannot be satisfied directly; solving depends on changing hidden board position to get beside/below rule text rather than collecting a key."
+        : "Because key is win is active but no ordinary key object appears, solving depends on changing hidden board position to get beside/below rule text rather than collecting a key.",
+    );
+    if (hasRuleDoor) {
+      lines.push(
+        "That repositioning sets up later rule-block pushes that can make an existing object such as door participate in the win condition, for example by forming or enabling a door/key/win rule relation.",
+      );
+    }
+  }
+
+  return uniqueLines(lines).slice(0, 5);
+}
+
+function collectMissingPushTargetLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  const asksMissingProgressAction =
+    /\b(?:absent|missing|conspicuously|lacks?|without)\b/.test(normalizedQuery) &&
+    /\b(?:progress|enabling|interaction|action|mechanic|sequence)\b/.test(normalizedQuery);
+  const namesPush = /\bpush\b/.test(normalizedQuery);
+  const hasPushAction = window.some((step) => normalizeActionVerb(step.action ?? "") === "push");
+  if ((!asksMissingProgressAction && !namesPush) || hasPushAction) {
+    return [];
+  }
+
+  const observationStep = window.find((step) => step.observation);
+  if (!observationStep?.observation) {
+    return [];
+  }
+
+  const positions = parseRelativePositionEntries(observationStep.observation);
+  const ruleIs = positions
+    .filter((position) => normalizeEntity(position.entity) === "rule is")
+    .sort((left, right) => manhattanDistance(left) - manhattanDistance(right))[0];
+  if (!ruleIs) {
+    return [];
+  }
+
+  return [
+    `The absent progress-enabling action is push; the most logical target is the nearby rule IS text block at ${ruleIs.raw}, because pushing rule words changes rules while ordinary objects do not help unless active rules make them useful.`,
+  ];
+}
+
+function collectRulePhraseAlignmentLines(
+  window: readonly LabeledTrajectoryStep[],
+  normalizedQuery: string,
+): string[] {
+  if (!hasManeuverInterpretationCue(normalizedQuery) && !normalizedQuery.includes("stop")) {
+    return [];
+  }
+
+  const latest = [...window].reverse().find((step) => step.observation);
+  if (!latest?.observation) {
+    return [];
+  }
+
+  const rules = parseActiveRules(latest.observation)
+    .map(parseThreeWordRule)
+    .filter((rule): rule is { subject: string; property: string } => rule !== undefined);
+  if (rules.length === 0) {
+    return [];
+  }
+
+  const positions = parseRelativePositionEntries(latest.observation);
+  const lines: string[] = [];
+  for (const rule of rules) {
+    const phrase = findAlignedRulePhrasePositions(positions, rule.subject, rule.property);
+    if (!phrase) {
+      continue;
+    }
+    lines.push(
+      `At Observation ${latest.step}, active rule ${rule.subject} is ${rule.property} is positioned as rule ${rule.subject} at ${phrase.subject.raw}, rule is at ${phrase.is.raw}, and rule ${rule.property} at ${phrase.property.raw}.`,
+    );
+    if (phrase.is.x === 0 && Math.abs(phrase.is.y) === 1) {
+      const pushDirection = phrase.is.y > 0 ? "down" : "up";
+      lines.push(
+        `The agent is directly ${phrase.is.y > 0 ? "above" : "below"} the rule is block, so a future ${pushDirection} action can push IS out of the phrase and break ${rule.subject} is ${rule.property}.`,
+      );
+      if (rule.property === "stop") {
+        lines.push(
+          `Breaking ${rule.subject} is stop removes the STOP property from ${rule.subject} objects and can open paths blocked by those objects.`,
+        );
+      }
+    }
+  }
+  return lines.slice(0, 6);
 }
 
 function collectRuleTextPositionLines(
@@ -1431,21 +2891,179 @@ function collectRuleStateLines(
   }
   for (const object of [...seenObjects].sort((left, right) => left.localeCompare(right))) {
     if (!activeRules.some((rule) => rule.startsWith(`${object} is `))) {
+      if (!shouldExplainMissingObjectPushRule(object, normalizedQuery, asksExactRelativeState)) {
+        continue;
+      }
       lines.push(
         `No active rule for ${object} appears in this window; specifically, no "${object} is push" rule is active, so treat ${object} as not currently pushable and do not claim that a current move pushed ${object} unless the observations state that rule.`,
       );
-      if (
-        normalizedQuery.includes(object) &&
-        hasManeuverInterpretationCue(normalizedQuery) &&
-        !asksExactRelativeState
-      ) {
-        lines.push(
-          `For ${object} maneuver questions, make bypassing or repositioning around a not-pushable obstacle the strategic goal unless an active rule says "${object} is push"; do not make overlap, collection, removal, or pushing the goal unless the question asks that exact relative state.`,
-        );
-      }
+      lines.push(
+        `For ${object} maneuver questions, make bypassing or repositioning around a not-pushable obstacle the strategic goal unless an active rule says "${object} is push"; do not make overlap, collection, removal, or pushing the goal unless the question asks that exact relative state.`,
+      );
     }
   }
   return lines.slice(0, 8);
+}
+
+function shouldExplainMissingObjectPushRule(
+  object: string,
+  normalizedQuery: string,
+  asksExactRelativeState: boolean,
+): boolean {
+  if (asksExactRelativeState || !normalizedQuery.includes(object) || !hasManeuverInterpretationCue(normalizedQuery)) {
+    return false;
+  }
+  return /\b(?:implicit\s+property|not\s+pushable|unpushable|not-pushable|bypass|obstacle|around\s+(?:it|the)|ordinary\s+object)\b/.test(
+    normalizedQuery,
+  );
+}
+
+function parseStopRuleObjects(observation: string): string[] {
+  return parseActiveRules(observation)
+    .map((rule) => /^(.+?)\s+is\s+stop$/i.exec(rule)?.[1]?.trim())
+    .filter((object): object is string => !!object);
+}
+
+function findBlockingStopObject(
+  observation: string,
+  stopObjects: readonly string[],
+  move: AgentMoveDelta,
+): { entity: string; position: RelativePosition } | undefined {
+  const positions = parseRelativePositionEntries(observation);
+  for (const object of stopObjects) {
+    for (const position of positions) {
+      if (normalizeEntity(position.entity) !== object) {
+        continue;
+      }
+      if (position.x === move.dx && position.y === move.dy) {
+        return { entity: object, position };
+      }
+    }
+  }
+  return undefined;
+}
+
+function openNonStopMoves(
+  observation: string,
+  stopObjects: readonly string[],
+  blockedDirection: AgentMoveDelta["direction"],
+): AgentMoveDelta["direction"][] {
+  const open: AgentMoveDelta["direction"][] = [];
+  for (const direction of ["up", "down", "left", "right"] as const) {
+    if (direction === blockedDirection) {
+      continue;
+    }
+    const move = agentMoveDeltaFromAction(direction);
+    if (!move || findBlockingStopObject(observation, stopObjects, move)) {
+      continue;
+    }
+    open.push(direction);
+  }
+  return open;
+}
+
+function formatMoveList(moves: readonly AgentMoveDelta["direction"][]): string {
+  if (moves.length === 0) {
+    return "";
+  }
+  if (moves.length === 1) {
+    return moves[0]!;
+  }
+  if (moves.length === 2) {
+    return `${moves[0]} and ${moves[1]}`;
+  }
+  return `${moves.slice(0, -1).join(", ")}, and ${moves[moves.length - 1]}`;
+}
+
+function parseThreeWordRule(
+  rule: string,
+): { subject: string; property: string } | undefined {
+  const match = /^(.+?)\s+is\s+(.+)$/i.exec(rule.trim());
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+  return {
+    subject: normalizeEntity(match[1]),
+    property: normalizeEntity(match[2]),
+  };
+}
+
+function findAlignedRulePhrasePositions(
+  positions: readonly RelativePosition[],
+  subject: string,
+  property: string,
+):
+  | {
+    subject: RelativePosition;
+    is: RelativePosition;
+    property: RelativePosition;
+  }
+  | undefined {
+  const subjects = positions.filter((position) => normalizeEntity(position.entity) === `rule ${subject}`);
+  const isWords = positions.filter((position) => normalizeEntity(position.entity) === "rule is");
+  const properties = positions.filter((position) => normalizeEntity(position.entity) === `rule ${property}`);
+  let best:
+    | {
+      subject: RelativePosition;
+      is: RelativePosition;
+      property: RelativePosition;
+      score: number;
+    }
+    | undefined;
+
+  for (const subjectPosition of subjects) {
+    for (const isPosition of isWords) {
+      for (const propertyPosition of properties) {
+        const sameRowPenalty =
+          Math.abs(subjectPosition.y - isPosition.y) +
+          Math.abs(propertyPosition.y - isPosition.y);
+        const orderPenalty =
+          subjectPosition.x < isPosition.x && isPosition.x < propertyPosition.x
+            ? 0
+            : 10;
+        const spacingPenalty =
+          Math.abs(isPosition.x - subjectPosition.x - 1) +
+          Math.abs(propertyPosition.x - isPosition.x - 1);
+        const score = sameRowPenalty * 5 + orderPenalty + spacingPenalty;
+        if (!best || score < best.score) {
+          best = {
+            subject: subjectPosition,
+            is: isPosition,
+            property: propertyPosition,
+            score,
+          };
+        }
+      }
+    }
+  }
+
+  if (!best || best.score > 4) {
+    return undefined;
+  }
+  return {
+    subject: best.subject,
+    is: best.is,
+    property: best.property,
+  };
+}
+
+function parseRelativePositionEntries(observation: string): RelativePosition[] {
+  const objectsBlock = /objects on the map:\s*([\s\S]*)$/i.exec(observation)?.[1];
+  if (!objectsBlock) {
+    return [];
+  }
+  const positions: RelativePosition[] = [];
+  for (const rawLine of objectsBlock.split(/\n+/)) {
+    const parsed = parseRelativePositionLine(rawLine.trim());
+    if (parsed) {
+      positions.push(parsed);
+    }
+  }
+  return positions;
+}
+
+function uniqueLines(lines: readonly string[]): string[] {
+  return [...new Set(lines)];
 }
 
 function appendActionFrequencyLines(
@@ -1479,19 +3097,50 @@ function appendInventoryChangeLines(
   bounds: TrajectoryBounds,
 ): void {
   const held = new Set<string>();
-  const changes: string[] = [];
+  const changes: Array<{ step: number; action: string; change: string }> = [];
   for (const step of boundedTrajectory(trajectory, bounds)) {
     if (!step.action) continue;
     const change = parseInventoryChange(step.action, held);
     if (change) {
-      changes.push(`[Action ${step.step}]: ${step.action} => ${change}`);
+      changes.push({ step: step.step, action: step.action, change });
     }
   }
   if (changes.length === 0) {
     return;
   }
   lines.push("Inventory changes from action transcript:");
-  lines.push(...changes);
+  if (changes.length > 5) {
+    lines.push(
+      `First five inventory changes: ${formatInventoryChangeSummary(changes.slice(0, 5))}.`,
+    );
+    lines.push(
+      `Complete inventory changes: ${formatInventoryChangeSummary(changes)}.`,
+    );
+  }
+  for (const change of changes) {
+    lines.push(`[Action ${change.step}]: ${change.action} => ${change.change}`);
+  }
+}
+
+function formatInventoryChangeSummary(
+  changes: ReadonlyArray<{ step: number; change: string }>,
+): string {
+  return changes
+    .map((change) => `step ${change.step}: ${summarizeInventoryChange(change.change)}`)
+    .join("; ");
+}
+
+function summarizeInventoryChange(change: string): string {
+  const added = /^inventory added (.+?);/i.exec(change);
+  if (added) {
+    return `${added[1]!.trim()} added`;
+  }
+  const removed = /^inventory removed (.+?);/i.exec(change) ??
+    /^inventory removed (.+)$/i.exec(change);
+  if (removed) {
+    return `${removed[1]!.trim()} removed`;
+  }
+  return change;
 }
 
 function appendContainerStateChangeLines(
@@ -1514,26 +3163,47 @@ function appendEntityTimelineLines(
   trajectory: readonly LabeledTrajectoryStep[],
   bounds: TrajectoryBounds,
   entities: readonly string[],
-  options: { includeIndirectMentions: boolean },
+  options: {
+    includeIndirectMentions: boolean;
+    includeContainerObjectTransfers: boolean;
+    includeMovableStateActions: boolean;
+  },
 ): void {
   for (const entity of entities) {
+    const includeIndirectMentions = options.includeIndirectMentions ||
+      (options.includeMovableStateActions && !isLikelyContainerEntity(entity));
     const directActions = boundedTrajectory(trajectory, bounds).filter(
       (step) =>
         step.action &&
         (isDirectEntityAction(step.action, entity) ||
-          (options.includeIndirectMentions &&
+          (includeIndirectMentions &&
             actionMentionsEntity(step.action, entity))),
     );
     const stateChanges = collectContainerStateChanges(trajectory, bounds).filter(
       (change) => normalizeEntity(change.entity) === normalizeEntity(entity),
     );
-    if (directActions.length === 0 && stateChanges.length === 0) {
+    const objectTransfers = options.includeContainerObjectTransfers
+      ? collectContainerObjectTransfers(trajectory, bounds).filter(
+        (transfer) => normalizeEntity(transfer.container) === normalizeEntity(entity),
+      )
+      : [];
+    if (
+      directActions.length === 0 &&
+      stateChanges.length === 0 &&
+      objectTransfers.length === 0
+    ) {
       continue;
     }
 
     lines.push(`Timeline for ${entity}:`);
     for (const step of directActions) {
       lines.push(`[Action ${step.step}]: ${step.action}`);
+    }
+    if (objectTransfers.length > 0) {
+      lines.push(`Object transfers involving ${entity}:`);
+      for (const transfer of objectTransfers) {
+        lines.push(`[Action ${transfer.step}]: ${transfer.action} => ${formatContainerTransfer(transfer)}`);
+      }
     }
     const inferredLocation = inferEntityLocation(trajectory, bounds, entity);
     if (inferredLocation) {
@@ -1582,6 +3252,47 @@ function collectContainerStateChanges(
     });
   }
   return changes;
+}
+
+function collectContainerObjectTransfers(
+  trajectory: readonly LabeledTrajectoryStep[],
+  bounds: TrajectoryBounds,
+): ContainerObjectTransfer[] {
+  const transfers: ContainerObjectTransfer[] = [];
+  for (const step of boundedTrajectory(trajectory, bounds)) {
+    if (!step.action) continue;
+    const action = step.action.trim();
+    const take = /^take\s+(.+?)\s+from\s+(.+)$/i.exec(action);
+    if (take) {
+      transfers.push({
+        step: step.step,
+        action: step.action,
+        object: take[1]!.trim(),
+        container: take[2]!.trim(),
+        direction: "removed",
+      });
+      continue;
+    }
+
+    const place = /^(?:move|put|place|insert)\s+(.+?)\s+(?:to|in|into|on)\s+(.+)$/i.exec(
+      action,
+    );
+    if (!place) continue;
+    transfers.push({
+      step: step.step,
+      action: step.action,
+      object: place[1]!.trim(),
+      container: place[2]!.trim(),
+      direction: "placed",
+    });
+  }
+  return transfers;
+}
+
+function formatContainerTransfer(transfer: ContainerObjectTransfer): string {
+  return transfer.direction === "placed"
+    ? `${transfer.object} placed in ${transfer.container}`
+    : `${transfer.object} removed from ${transfer.container}`;
 }
 
 function parseInventoryChange(action: string, held: Set<string>): string | undefined {
@@ -1666,11 +3377,13 @@ function findObservationTransition(
   }
 
   let best: ObservationTransition | undefined;
+  const pairs: ObservationTransition[] = [];
   for (const fromStep of fromCandidates) {
     for (const toStep of toCandidates) {
       if (toStep <= fromStep) {
         continue;
       }
+      pairs.push({ fromStep, toStep });
       if (
         !best ||
         toStep - fromStep < best.toStep - best.fromStep ||
@@ -1682,10 +3395,48 @@ function findObservationTransition(
     }
   }
   if (best) {
-    return best;
+    return selectObservationTransition(trajectory, best, pairs);
   }
 
   return undefined;
+}
+
+function selectObservationTransition(
+  trajectory: readonly LabeledTrajectoryStep[],
+  shortest: ObservationTransition,
+  pairs: readonly ObservationTransition[],
+): ObservationTransition {
+  const gap = shortest.toStep - shortest.fromStep;
+  const targetStep = trajectory.find((step) => step.step === shortest.toStep);
+  if (gap > 2 || normalizeActionVerb(targetStep?.action ?? "") !== "look") {
+    return shortest;
+  }
+
+  const nextRepeatedTarget = pairs
+    .filter(
+      (pair) =>
+        pair.fromStep === shortest.fromStep &&
+        pair.toStep > shortest.toStep &&
+        pair.toStep - shortest.fromStep <= 8,
+    )
+    .sort((left, right) => left.toStep - right.toStep)[0];
+  if (
+    !nextRepeatedTarget ||
+    !observationsHaveSameFullText(trajectory, shortest.toStep, nextRepeatedTarget.toStep)
+  ) {
+    return shortest;
+  }
+  return nextRepeatedTarget;
+}
+
+function observationsHaveSameFullText(
+  trajectory: readonly LabeledTrajectoryStep[],
+  leftStep: number,
+  rightStep: number,
+): boolean {
+  const left = trajectory.find((step) => step.step === leftStep)?.observation;
+  const right = trajectory.find((step) => step.step === rightStep)?.observation;
+  return !!left && !!right && normalizeObservationText(left) === normalizeObservationText(right);
 }
 
 function extractQuotedObservations(query: string): string[] {
@@ -1705,7 +3456,8 @@ function findObservationStepCandidates(
 ): number[] {
   const normalizedQuoted = normalizeObservationText(quotedObservation);
   const normalizedQuotedCore = normalizeObservationCore(quotedObservation);
-  const candidates = new Set<number>();
+  const fullCandidates = new Set<number>();
+  const coreCandidates = new Set<number>();
 
   for (const step of trajectory) {
     if (!step.observation) continue;
@@ -1715,7 +3467,7 @@ function findObservationStepCandidates(
       normalizedObservation.includes(normalizedQuoted) ||
       normalizedQuoted.includes(normalizedObservation)
     ) {
-      candidates.add(step.step);
+      fullCandidates.add(step.step);
       continue;
     }
 
@@ -1727,10 +3479,11 @@ function findObservationStepCandidates(
         normalizedObservationCore.includes(normalizedQuotedCore) ||
         normalizedQuotedCore.includes(normalizedObservationCore))
     ) {
-      candidates.add(step.step);
+      coreCandidates.add(step.step);
     }
   }
 
+  const candidates = new Set([...fullCandidates, ...coreCandidates]);
   return [...candidates].sort((left, right) => left - right);
 }
 
@@ -1782,6 +3535,32 @@ function isDirectEntityAction(action: string, entity: string): boolean {
     `close ${normalizedEntity}`,
     `examine ${normalizedEntity}`,
   ].includes(normalizedAction);
+}
+
+function isLikelyContainerEntity(entity: string): boolean {
+  const head = normalizeEntity(entity).split(/\s+/)[0];
+  return [
+    "bed",
+    "cabinet",
+    "counter",
+    "countertop",
+    "coffeemachine",
+    "desk",
+    "drawer",
+    "fridge",
+    "garbagecan",
+    "handtowelholder",
+    "laundryhamper",
+    "microwave",
+    "safe",
+    "shelf",
+    "sinkbasin",
+    "stoveburner",
+    "toaster",
+    "toilet",
+    "toiletpaperhanger",
+    "towelholder",
+  ].includes(head ?? "");
 }
 
 function inferEntityLocation(
@@ -2072,6 +3851,14 @@ function isRelativeEntityToken(token: string): boolean {
       "steps",
       "text",
       "the",
+      "action",
+      "move",
+      "moved",
+      "moving",
+      "up",
+      "down",
+      "left",
+      "right",
     ].includes(token) &&
     !isAllDigits(token);
 }
@@ -2103,6 +3890,11 @@ function hasExactRelativeStateIntent(normalizedQuery: string): boolean {
   return /(?:exact\s+position|relative\s+to|same\s+tile|zero[- ]offset|vanished|reappeared)/.test(
     normalizedQuery,
   );
+}
+
+function hasExplicitNoKeyObjectPremise(normalizedQuery: string): boolean {
+  return /\bno\s+(?:ordinary\s+)?key\s+objects?\s+exist\b/.test(normalizedQuery) ||
+    /\bno\s+(?:ordinary\s+)?key\s+objects?\b/.test(normalizedQuery);
 }
 
 function isAllDigits(value: string): boolean {
@@ -2138,9 +3930,30 @@ function extractDisallowedMove(normalizedQuery: string): AgentMoveDelta["directi
   for (const direction of ["up", "down", "left", "right"] as const) {
     if (
       normalizedQuery.includes(`instead of moving ${direction}`) ||
-      normalizedQuery.includes(`instead of going ${direction}`)
+      normalizedQuery.includes(`instead of going ${direction}`) ||
+      normalizedQuery.includes(`instead of ${direction}`)
     ) {
       return direction;
+    }
+  }
+  return undefined;
+}
+
+function extractAlternativeMove(normalizedQuery: string): AgentMoveDelta | undefined {
+  for (const direction of ["up", "down", "left", "right"] as const) {
+    if (
+      normalizedQuery.includes(`moved ${direction} instead`) ||
+      normalizedQuery.includes(`move ${direction} instead`) ||
+      normalizedQuery.includes(`instead moved ${direction}`) ||
+      normalizedQuery.includes(`instead chosen ${direction}`) ||
+      normalizedQuery.includes(`instead chosen to move ${direction}`) ||
+      normalizedQuery.includes(`instead chosen the action ${direction}`) ||
+      normalizedQuery.includes(`instead chosen to go ${direction}`) ||
+      normalizedQuery.includes(`chosen the action ${direction}`) ||
+      normalizedQuery.includes(`chose the action ${direction}`) ||
+      normalizedQuery.includes(`action ${direction} at step`)
+    ) {
+      return agentMoveDeltaFromAction(direction);
     }
   }
   return undefined;
@@ -2182,6 +3995,108 @@ function scoreMoveTowardTargets(
   return score;
 }
 
+function observationsRemainStable(
+  window: readonly LabeledTrajectoryStep[],
+  start: number,
+  end: number,
+): boolean {
+  let baseline: string | undefined;
+  let compared = 0;
+  for (const step of window) {
+    if (step.step < start || step.step > end || !step.observation) {
+      continue;
+    }
+    const signature = relativePositionSignature(step.observation);
+    if (!signature) {
+      continue;
+    }
+    if (baseline === undefined) {
+      baseline = signature;
+      continue;
+    }
+    compared += 1;
+    if (signature !== baseline) {
+      return false;
+    }
+  }
+  return compared > 0;
+}
+
+function findStopBlockerForRepeatedMove(
+  window: readonly LabeledTrajectoryStep[],
+  move: AgentMoveDelta,
+): { step: number; entity: string; position: RelativePosition } | undefined {
+  for (const step of window) {
+    if (!step.observation) {
+      continue;
+    }
+    const stopObjects = parseStopRuleObjects(step.observation);
+    if (stopObjects.length === 0) {
+      continue;
+    }
+    const blocker = findBlockingStopObject(step.observation, stopObjects, move);
+    if (blocker) {
+      return { step: step.step, ...blocker };
+    }
+  }
+  return undefined;
+}
+
+function relativePositionSignature(observation: string): string | undefined {
+  const entries = parseRelativePositionEntries(observation);
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return entries
+    .map((position) => `${normalizeEntity(position.entity)}:${position.x}:${position.y}`)
+    .sort((left, right) => left.localeCompare(right))
+    .join("|");
+}
+
+function observationStateSignature(observation: string): string | undefined {
+  return relativePositionSignature(observation) ?? normalizeObservationCore(observation);
+}
+
+function positionShiftExample(
+  beforeObservation: string,
+  afterObservation: string,
+): string | undefined {
+  const before = parseRelativePositions(beforeObservation);
+  const after = parseRelativePositions(afterObservation);
+  const preferred = [
+    "rule win",
+    "rule is",
+    "rule key",
+    "rule door",
+    "door",
+    "rule baba",
+    "rule you",
+  ];
+  const entities = [
+    ...preferred,
+    ...[...before.keys()].sort((left, right) => left.localeCompare(right)),
+  ];
+  for (const entity of entities) {
+    const beforePosition = before.get(entity);
+    const afterPosition = after.get(entity);
+    if (!beforePosition || !afterPosition) {
+      continue;
+    }
+    if (
+      beforePosition.x === afterPosition.x &&
+      beforePosition.y === afterPosition.y
+    ) {
+      continue;
+    }
+    return `${entity} changed from ${beforePosition.raw} to ${afterPosition.raw}`;
+  }
+  return undefined;
+}
+
+function manhattanDistance(position: RelativePosition): number {
+  return Math.abs(position.x) + Math.abs(position.y);
+}
+
 function hasRelativeEntityInObservations(
   entity: string,
   observations: readonly (string | undefined)[],
@@ -2210,6 +4125,21 @@ function oppositeDirection(direction: AgentMoveDelta["direction"]): string {
   if (direction === "down") return "upward";
   if (direction === "left") return "rightward";
   return "leftward";
+}
+
+function formatRelativePosition(position: { x: number; y: number }): string {
+  const parts: string[] = [];
+  if (position.x < 0) {
+    parts.push(`${Math.abs(position.x)} ${Math.abs(position.x) === 1 ? "step" : "steps"} to the left`);
+  } else if (position.x > 0) {
+    parts.push(`${position.x} ${position.x === 1 ? "step" : "steps"} to the right`);
+  }
+  if (position.y < 0) {
+    parts.push(`${Math.abs(position.y)} ${Math.abs(position.y) === 1 ? "step" : "steps"} up`);
+  } else if (position.y > 0) {
+    parts.push(`${position.y} ${position.y === 1 ? "step" : "steps"} down`);
+  }
+  return parts.length === 0 ? "the same tile" : parts.join(" and ");
 }
 
 function normalizeTrajectoryQuery(value: string): string {

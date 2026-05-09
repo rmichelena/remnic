@@ -16,6 +16,8 @@ import { buildBenchBaselineRemnicConfig } from "./adapters/remnic-adapter.js";
 import {
   ASSISTANT_AGENT_CONFIG_KEY,
   ASSISTANT_JUDGE_CONFIG_KEY,
+  buildAssistantResponderPrompt,
+  finalizeAssistantOutput,
 } from "./benchmarks/remnic/_assistant-common/default-agent.js";
 import type { AssistantAgent } from "./benchmarks/remnic/_assistant-common/types.js";
 import {
@@ -491,6 +493,12 @@ function buildInternalRemnicConfigOverrides(
     ...thinkingOverrides,
     modelSource: "gateway",
     localLlmEnabled: false,
+    ...(config.retryOptions?.timeoutMs
+      ? {
+          localLlmTimeoutMs: config.retryOptions.timeoutMs,
+          localLlmFastTimeoutMs: config.retryOptions.timeoutMs,
+        }
+      : {}),
     gatewayConfig: buildInternalGatewayConfig(config, options),
     gatewayAgentId: INTERNAL_GATEWAY_AGENT_ID,
     fastGatewayAgentId: INTERNAL_GATEWAY_AGENT_ID,
@@ -698,13 +706,16 @@ function withAssistantHooks(
   return next;
 }
 
-function createAssistantAgentFromResponder(
+export function createAssistantAgentFromResponder(
   responder: BenchResponder,
 ): AssistantAgent {
   return {
     async respond(request) {
-      const response = await responder.respond(request.prompt, request.memoryView);
-      return response.text;
+      const response = await responder.respond(
+        buildAssistantResponderPrompt(request.prompt),
+        request.memoryView,
+      );
+      return finalizeAssistantOutput(request, response.text);
     },
   };
 }

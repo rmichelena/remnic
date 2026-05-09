@@ -275,6 +275,63 @@ test("buildTrajectoryAnalysisRecallSection preserves before-step entity history"
   assert.doesNotMatch(section, /move cd 3 to safe 1/);
 });
 
+test("buildTrajectoryAnalysisRecallSection summarizes container object transfers for state questions", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [8, "open safe 1", "safe 1 is open"],
+      [9, "close safe 1", "safe 1 is closed"],
+      [23, "open safe 1", "safe 1 is open"],
+      [24, "move cd 3 to safe 1", "cd 3 is in safe 1"],
+      [83, "close safe 1", "safe 1 is closed"],
+      [84, "examine safe 1", "safe 1 is closed"],
+      [85, "open safe 1", "safe 1 is open"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "How did the state of safe 1 change throughout the trajectory, including what objects were placed in or removed from it?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Action 8.*open safe 1/);
+  assert.match(section, /Object transfers involving safe 1/);
+  assert.match(section, /Action 24.*move cd 3 to safe 1.*cd 3 placed in safe 1/);
+  assert.match(section, /Latest safe 1 state at step 85: open/);
+});
+
+test("buildTrajectoryAnalysisRecallSection keeps broad container history focused on state changes", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [8, "open safe 1", "safe 1 is open"],
+      [9, "close safe 1", "safe 1 is closed"],
+      [12, "open drawer 1", "drawer 1 is open"],
+      [13, "close drawer 1", "drawer 1 is closed"],
+      [20, "take cd 3 from drawer 4", "carrying cd 3"],
+      [23, "open safe 1", "safe 1 is open"],
+      [24, "move cd 3 to safe 1", "cd 3 is in safe 1"],
+      [80, "take cd 2 from desk 2", "carrying cd 2"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Until step 80, which containers has the agent interacted with and what state changes occurred?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Container open\/close state changes/);
+  assert.match(section, /Action 8.*open safe 1/);
+  assert.match(section, /Action 12.*open drawer 1/);
+  assert.doesNotMatch(section, /Object transfers/);
+  assert.doesNotMatch(section, /move cd 3 to safe 1/);
+  assert.doesNotMatch(section, /take cd 2 from desk 2/);
+});
+
 test("buildTrajectoryAnalysisRecallSection summarizes inventory and frequency", async () => {
   const engine = new FakeCueEngine({
     ama: makeTrajectoryMessages([
@@ -296,6 +353,24 @@ test("buildTrajectoryAnalysisRecallSection summarizes inventory and frequency", 
   assert.match(inventorySection, /inventory added cd 3/);
   assert.match(inventorySection, /inventory removed cd 3/);
   assert.match(inventorySection, /inventory added cd 2/);
+
+  const longInventorySection = await buildTrajectoryAnalysisRecallSection({
+    engine: new FakeCueEngine({
+      ama: makeTrajectoryMessages([
+        [1, "take apple 1 from desk 1", "carrying apple"],
+        [2, "move apple 1 to safe 1", "apple in safe"],
+        [3, "take mug 1 from desk 1", "carrying mug"],
+        [4, "move mug 1 to shelf 1", "mug on shelf"],
+        [5, "take pen 1 from drawer 1", "carrying pen"],
+        [6, "move pen 1 to drawer 2", "pen in drawer"],
+      ]),
+    }),
+    sessionId: "ama",
+    query: "What changes occurred to the inventory throughout the trajectory?",
+    maxChars: 4000,
+  });
+  assert.match(longInventorySection, /First five inventory changes: step 1: apple 1 added/);
+  assert.match(longInventorySection, /Complete inventory changes: .*step 6: pen 1 removed/);
 
   const frequencySection = await buildTrajectoryAnalysisRecallSection({
     engine,
@@ -344,8 +419,15 @@ test("buildTrajectoryAnalysisRecallSection resolves quoted observation transitio
     query: `What sequence of actions would transform the state between the observation: "${sourceObservation}" and the observation: "${targetObservation}"?`,
     maxChars: 5000,
   });
+  assert.match(transitionSection, /Matched quoted observations: Observation 70 -> Observation 71/);
+  assert.match(
+    transitionSection,
+    /Action sequence that transforms the quoted observations:.*step 71: go to drawer 4/,
+  );
   assert.match(transitionSection, /Action 71.*go to drawer 4/);
-  assert.doesNotMatch(transitionSection, /Action 72/);
+  assert.doesNotMatch(transitionSection, /Action 72.*look/);
+  assert.doesNotMatch(transitionSection, /Action 73.*go to shelf 2/);
+  assert.doesNotMatch(transitionSection, /Action 74.*go to drawer 4/);
   assert.doesNotMatch(transitionSection, /Action 80/);
 
   const locationSection = await buildTrajectoryAnalysisRecallSection({
@@ -356,6 +438,182 @@ test("buildTrajectoryAnalysisRecallSection resolves quoted observation transitio
   });
   assert.match(locationSection, /cd 2 location at step 115: inventory/);
   assert.match(locationSection, /cd 3 location at step 115: safe 1/);
+});
+
+test("buildTrajectoryAnalysisRecallSection handles repeated quoted target observations", async () => {
+  const sourceObservation = [
+    "You pick up the toiletpaper 1 from the countertop 1.",
+    "",
+    "The current available actions are: go to cabinet 1, look.",
+  ].join("\n");
+  const targetObservation = [
+    "You are facing the cabinet 1. Next to it, you see nothing.",
+    "",
+    "The current available actions are: close cabinet 1, examine cabinet 1, examine toiletpaper 1, go to handtowelholder 1, look, move toiletpaper 1 to cabinet 1.",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [72, "take toiletpaper 1 from countertop 1", sourceObservation],
+      [73, "go to cabinet 1", "You arrive at cabinet 1."],
+      [74, "look", targetObservation],
+      [75, "go to handtowelholder 1", "You arrive at handtowelholder 1."],
+      [76, "go to cabinet 1", "You arrive at cabinet 1."],
+      [77, "look", targetObservation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query: `What sequence of actions would transform the state between the observation: "${sourceObservation}" and the observation: "${targetObservation}"?`,
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Matched quoted observations: Observation 72 -> Observation 77/);
+  assert.match(section, /step 75: go to handtowelholder 1/);
+  assert.match(section, /step 76: go to cabinet 1/);
+  assert.match(section, /step 77: look/);
+});
+
+test("buildTrajectoryAnalysisRecallSection keeps immediate non-look target transitions narrow", async () => {
+  const sourceObservation = [
+    "You arrive at garbagecan 1. On the garbagecan 1, you see nothing.",
+    "",
+    "The current available actions are: go to drawer 4, look.",
+  ].join("\n");
+  const targetObservation = [
+    "You arrive at drawer 4. The drawer 4 is open. In it, you see a creditcard 1.",
+    "",
+    "The current available actions are: go to safe 1, look.",
+  ].join("\n");
+  const repeatedTargetObservation = [
+    "You arrive at drawer 4. The drawer 4 is open. In it, you see a creditcard 1.",
+    "",
+    "The current available actions are: examine shelf 2, take pencil 2 from shelf 2.",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [70, "go to garbagecan 1", sourceObservation],
+      [71, "go to drawer 4", targetObservation],
+      [72, "look", "You are facing drawer 4."],
+      [73, "go to safe 1", "You arrive at safe 1."],
+      [74, "go to drawer 4", repeatedTargetObservation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query: `What sequence of actions would transform the state between the observation: "${sourceObservation}" and the observation: "${targetObservation}"?`,
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Matched quoted observations: Observation 70 -> Observation 71/);
+  assert.match(section, /step 71: go to drawer 4/);
+  assert.doesNotMatch(section, /step 72: look/);
+  assert.doesNotMatch(section, /step 74: go to drawer 4/);
+});
+
+test("buildTrajectoryAnalysisRecallSection prefers nearest core observation transition", async () => {
+  const sourceObservation = [
+    "You arrive at garbagecan 1. On the garbagecan 1, you see nothing.",
+    "",
+    "The current available actions are: go to drawer 4, look.",
+  ].join("\n");
+  const immediateTargetObservation = [
+    "You arrive at drawer 4. The drawer 4 is open. In it, you see a creditcard 1.",
+    "",
+    "The current available actions are: examine garbagecan 1, look.",
+  ].join("\n");
+  const laterTargetObservation = [
+    "You arrive at drawer 4. The drawer 4 is open. In it, you see a creditcard 1.",
+    "",
+    "The current available actions are: examine shelf 2, take pencil 2 from shelf 2.",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [70, "go to garbagecan 1", sourceObservation],
+      [71, "go to drawer 4", immediateTargetObservation],
+      [72, "look", "You are facing drawer 4."],
+      [73, "go to safe 1", "You arrive at safe 1."],
+      [74, "go to drawer 4", "You arrive at drawer 4."],
+      [75, "look", "You are facing drawer 4."],
+      [76, "go to shelf 2", "You arrive at shelf 2."],
+      [77, "go to drawer 4", laterTargetObservation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query: `What sequence of actions would transform the state between the observation: "${sourceObservation}" and the observation: "${laterTargetObservation}"?`,
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Matched quoted observations: Observation 70 -> Observation 71/);
+  assert.match(section, /step 71: go to drawer 4/);
+  assert.doesNotMatch(section, /step 77: go to drawer 4/);
+});
+
+test("buildTrajectoryAnalysisRecallSection includes resulting observations for explicit action sequences", async () => {
+  const startObservation = [
+    "You are facing the toilet 1. Next to it, you see nothing.",
+    "",
+    "The current available actions are: go to countertop 1, look, inventory.",
+  ].join("\n");
+  const finalObservation = [
+    "You arrive at cabinet 1. The cabinet 1 is open. In it, you see a candle 2, a cloth 1, and a toiletpaper 3.",
+    "",
+    "The current available actions are: examine handtowelholder 1, examine toiletpaper 1, go to countertop 1, look.",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [70, "look", startObservation],
+      [71, "go to countertop 1", "You arrive at countertop 1."],
+      [72, "take toiletpaper 1 from countertop 1", "You pick up the toiletpaper 1 from the countertop 1."],
+      [73, "go to cabinet 1", "You arrive at cabinet 1."],
+      [74, "look", "You are facing the cabinet 1."],
+      [75, "go to handtowelholder 1", "You arrive at handtowelholder 1."],
+      [76, "go to cabinet 1", finalObservation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query: `When the agent is at the state with observation: "${startObservation}", performs the following sequence of actions: step 70: look; step 71: go to countertop 1; step 72: take toiletpaper 1 from countertop 1; step 73: go to cabinet 1; step 74: look; step 75: go to handtowelholder 1; step 76: go to cabinet 1, what will be the resulting state? Please provide the full observation.`,
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Referenced action sequence and observations/);
+  assert.match(section, /Resulting observation after Action 76: You arrive at cabinet 1/);
+  assert.match(section, /examine handtowelholder 1, examine toiletpaper 1/);
+});
+
+test("buildTrajectoryAnalysisRecallSection includes movable object state timelines", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [2, "go to toilet 1", "You arrive at toilet 1. On it, you see a toiletpaper 3."],
+      [3, "take toiletpaper 3 from toilet 1", "You pick up the toiletpaper 3 from the toilet 1."],
+      [4, "go to cabinet 1", "You arrive at cabinet 1. The cabinet 1 is closed."],
+      [5, "open cabinet 1", "You open the cabinet 1."],
+      [6, "move toiletpaper 3 to cabinet 1", "You move the toiletpaper 3 to the cabinet 1."],
+      [77, "look", "You are facing the cabinet 1."],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "What is the state of toiletpaper 3 at step 77? When did this change occur and what were the prior whole changes history?",
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Timeline for toiletpaper 3/);
+  assert.match(section, /Action 3.*take toiletpaper 3 from toilet 1/);
+  assert.match(section, /Action 6.*move toiletpaper 3 to cabinet 1/);
+  assert.match(section, /Inferred toiletpaper 3 location at step 77: cabinet 1/);
 });
 
 test("buildTrajectoryAnalysisRecallSection keeps disjoint explicit references discrete", async () => {
@@ -571,6 +829,816 @@ test("buildTrajectoryAnalysisRecallSection recommends alternative moves toward w
   assert.match(section, /rule win at 1 step to the left and 1 step up/);
   assert.match(section, /left is the alternative/);
   assert.match(section, /IS\/WIN rule text/);
+});
+
+test("buildTrajectoryAnalysisRecallSection computes counterfactual relative positions from the prior observation", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        46,
+        "down",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `door` 3 step to the left",
+          "rule `is` 4 step to the left and 3 step up",
+          "rule `win` 3 step to the left and 3 step up",
+        ].join("\n"),
+      ],
+      [
+        47,
+        "left",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `door` 2 step to the left",
+          "rule `is` 3 step to the left and 3 step up",
+          "rule `win` 2 step to the left and 3 step up",
+        ].join("\n"),
+      ],
+      [
+        48,
+        "up",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `door` 2 step to the left and 1 step down",
+          "rule `is` 3 step to the left and 2 step up",
+          "rule `win` 2 step to the left and 2 step up",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In steps 47 and 48, the agent executes `left` then `up`. If at step 47, the agent had moved `right` instead of `left`, what would the new relative position of the `DOOR` text block be, and why would this be counterproductive to the goal of forming a new rule?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Counterfactual action cues/);
+  assert.match(section, /Question target cue: because the query asks for a text\/word block/);
+  assert.match(section, /use Observation 46/);
+  assert.match(section, /static rule door would shift from 3 step to the left to 4 steps to the left/);
+  assert.doesNotMatch(section, /static door would shift/);
+});
+
+test("buildTrajectoryAnalysisRecallSection calls out the first non-canceling move after a loop", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        19,
+        "right",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `baba` 3 step to the left and 4 steps down",
+        ].join("\n"),
+      ],
+      [20, "right", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `baba` 4 step to the left and 4 steps down"],
+      [21, "left", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `baba` 3 step to the left and 4 steps down"],
+      [22, "right", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `baba` 4 step to the left and 4 steps down"],
+      [23, "left", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `baba` 3 step to the left and 4 steps down"],
+      [24, "down", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `baba` 3 step to the left and 3 steps down"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "What was the strategic importance of the down action at step 24 compared to the four preceding right/left actions (steps 20-23)?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Action movement summary cues/);
+  assert.match(section, /right, left, right, left, down/);
+  assert.match(section, /hidden absolute position by 1 down/);
+  assert.match(section, /first non-canceling movement after the prior loop/);
+});
+
+test("buildTrajectoryAnalysisRecallSection identifies stop-rule blockers and open alternatives", async () => {
+  const observation = [
+    "Active rules:",
+    "wall is stop",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "wall 1 step to the right",
+    "rule `wall` 3 step to the left",
+    "rule `is` 2 step to the left",
+    "rule `stop` 1 step to the left",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [3, "right", observation],
+      [4, "right", observation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "If the agent had instead chosen the action up at step 4, would it have successfully moved, given wall is stop and repeated right failures?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Blocked-move cues/);
+  assert.match(section, /Action 3 right is blocked/);
+  assert.match(section, /wall is 1 step to the right/);
+  assert.match(section, /up has no adjacent STOP object/);
+});
+
+test("buildTrajectoryAnalysisRecallSection detects direct alignment above the IS word in an active stop rule", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        15,
+        "left",
+        [
+          "Active rules:",
+          "wall is stop",
+          "key is win",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `wall` 1 step to the left and 1 step down",
+          "rule `is` 1 step down",
+          "rule `stop` 1 step to the right and 1 step down",
+          "rule `baba` 1 step to the left and 6 steps down",
+          "rule `is` 6 steps down",
+          "rule `you` 1 step to the right and 6 steps down",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Considering the sequence of movements from step 12 to step 15, what positional relationship does the agent establish with the words of the wall is stop rule, and why is this strategically critical?",
+    maxChars: 4000,
+  });
+
+  assert.match(section, /Rule-phrase alignment cues/);
+  assert.match(section, /active rule wall is stop is positioned/);
+  assert.match(section, /agent is directly above the rule is block/);
+  assert.match(section, /future down action can push IS out of the phrase/);
+  assert.match(section, /removes the STOP property from wall objects/);
+});
+
+test("buildTrajectoryAnalysisRecallSection treats stable repeated stop moves as blocked attempts", async () => {
+  const observation = [
+    "Active rules:",
+    "wall is stop",
+    "ball is win",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "wall 1 step to the right",
+    "door 3 steps to the right",
+    "rule `wall` 4 step to the left and 1 step up",
+    "rule `is` 3 step to the left and 1 step up",
+    "rule `stop` 2 step to the left and 1 step up",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [17, "right", observation],
+      [18, "right", observation],
+      [19, "right", observation],
+      [20, "right", observation],
+      [21, "right", observation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Between steps 17 and 21, the agent repeatedly attempts to move right but its position remains unchanged. Given wall is stop, why was this action guaranteed to fail, and what other actions would have been more strategic for making progress?",
+    maxChars: 5000,
+  });
+
+  assert.match(section, /blocked\/no-progress attempts/);
+  assert.match(section, /Action 17 right is blocked/);
+  assert.match(section, /wall is 1 step to the right/);
+  assert.doesNotMatch(section, /hidden absolute position by 5 right/);
+});
+
+test("buildTrajectoryAnalysisRecallSection treats no-change stop attempts as blocked, not hidden movement", async () => {
+  const observation = [
+    "Active rules:",
+    "ball is win",
+    "wall is stop",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "wall 1 step to the right",
+    "rule `wall` 4 step to the left and 1 step up",
+    "rule `is` 3 step to the left and 1 step up",
+    "rule `stop` 2 step to the left and 1 step up",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [84, "right", observation],
+      [85, "right", observation],
+      [86, "right", observation],
+      [87, "right", observation],
+      [88, "right", observation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Between steps 84 and 88, the agent consistently performed the `right` action, but the game state did not change at all. Were any of these actions relevant to making progress toward the goal? Explain why or why not, using the active rules and object positions from the observation.",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /blocked\/no-progress attempts/);
+  assert.match(section, /wall is 1 step to the right/);
+  assert.match(section, /wall is stop/);
+  assert.doesNotMatch(section, /hidden absolute position by 5 right/);
+});
+
+test("buildTrajectoryAnalysisRecallSection names nearby IS as the missing push target", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        19,
+        "right",
+        [
+          "Active rules:",
+          "baba is you",
+          "ball is win",
+          "",
+          "Objects on the map:",
+          "key 1 step to the right",
+          "rule `is` 2 step to the left",
+          "rule `ball` 3 step to the left",
+          "rule `win` 4 step to the left",
+        ].join("\n"),
+      ],
+      [20, "left", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nkey 1 step to the right\nrule `is` 2 step to the left"],
+      [21, "right", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nkey 1 step to the right\nrule `is` 2 step to the left"],
+      [22, "down", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nkey 1 step to the right\nrule `is` 2 step to the left"],
+      [23, "up", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nkey 1 step to the right\nrule `is` 2 step to the left"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Between steps 19 and 23, the agent executes opposing moves that result in no net change. What crucial, progress-enabling action is conspicuously absent from this sequence, and which nearby object is the most logical target for such an action?",
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Missing-interaction cues/);
+  assert.match(section, /absent progress-enabling action is push/);
+  assert.match(section, /nearby rule IS text block at 2 step to the left/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains wall-stop rule intervention strategy", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        8,
+        "up",
+        [
+          "Active rules:",
+          "key is win",
+          "wall is stop",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "wall 1 step to the right",
+          "door 4 steps to the right and 2 step up",
+          "rule `wall` 4 step to the left and 3 step up",
+          "rule `is` 3 step to the left and 3 step up",
+          "rule `stop` 2 step to the left and 3 step up",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "At Step 8, after moving right three times, the agent is positioned below the WALL IS STOP rule text and chooses to move up. Given that a physical wall blocks access to the door on the right, why was moving up the optimal action for making progress, as opposed to continuing to move right?",
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Rule-intervention strategy cues/);
+  assert.match(section, /wall objects immediately to the right block the right-side\/door path/);
+  assert.match(section, /manipulating the WALL IS STOP rule text/);
+  assert.match(section, /removing STOP from wall objects/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains no-key win-condition repositioning", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        25,
+        "down",
+        [
+          "Active rules:",
+          "key is win",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "door 3 steps to the right and 1 step down",
+          "rule `door` 5 steps to the right and 1 step down",
+          "rule `key` 3 steps to the right and 5 step up",
+          "rule `is` 4 steps to the right and 5 step up",
+          "rule `win` 5 steps to the right and 5 step up",
+          "key 2 steps to the right and 5 steps down",
+        ].join("\n"),
+      ],
+      [
+        29,
+        "down",
+        [
+          "Active rules:",
+          "key is win",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "door 3 steps to the right and 3 step up",
+          "rule `door` 5 steps to the right and 3 step up",
+          "rule `key` 3 steps to the right and 5 step up",
+          "rule `is` 4 steps to the right and 5 step up",
+          "rule `win` 5 steps to the right and 5 step up",
+          "key 2 steps to the right and 1 step down",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "From step 25 to 29, the agent moves down five consecutive times, seemingly increasing its distance from all the rule blocks. Given the win condition is key is win but no key objects exist, what critical hidden state is the agent changing, and why is this repositioning maneuver essential for eventually solving the puzzle?",
+    maxChars: 5000,
+  });
+
+  assert.match(section, /Rule-intervention strategy cues/);
+  assert.match(section, /Given the question premise that no ordinary key object should be used/);
+  assert.match(section, /changing hidden board position/);
+  assert.match(section, /make an existing object such as door participate in the win condition/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains counterfactual contact pushes", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        43,
+        "right",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "key 1 step to the right and 1 step down",
+          "rule `is` 1 step to the left and 1 step down",
+          "rule `wall` 2 step to the left and 1 step up",
+          "rule `stop` 1 step to the left and 1 step up",
+        ].join("\n"),
+      ],
+      [
+        44,
+        "left",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "key 1 step down",
+          "rule `is` 3 step to the left and 1 step down",
+          "rule `wall` 3 step to the left and 1 step up",
+          "rule `stop` 2 step to the left and 1 step up",
+        ].join("\n"),
+      ],
+      [
+        45,
+        "left",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "key 1 step to the right and 1 step down",
+          "rule `is` 1 step to the left and 1 step down",
+          "rule `wall` 2 step to the left and 1 step up",
+          "rule `stop` 1 step to the left and 1 step up",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In the transition from step 44 to 45, the agent chose the action left, moving away from the key. Based on the object layout in step 44, what would have happened if the agent had moved down instead, and why would this alternative action have been more strategic for forming the rule WALL IS STOP?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Counterfactual contact cues/);
+  assert.match(section, /key is 1 step down/);
+  assert.match(section, /push it one cell down/);
+  assert.match(section, /Do not describe this as merely stepping onto or overlapping the block/);
+  assert.match(section, /same horizontal row/);
+  assert.match(section, /3 steps to the left/);
+  assert.match(section, /alignment with WALL and STOP/);
+  assert.doesNotMatch(section, /treat key as not currently pushable/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains adjacent rule-block setup", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [7, "up", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `win` 1 step to the right and 1 step up\nrule `is` 1 step up"],
+      [8, "right", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `win` 1 step up\nrule `is` 1 step to the left and 1 step up"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "The actions from step 4 to step 8 consist of a multi-step maneuver. By analyzing the agent's final position relative to the rule blocks in the step 8 observation, what crucial strategic advantage does the final right action secure?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Adjacent rule-block setup cues/);
+  assert.match(section, /rule win is 1 step up/);
+  assert.match(section, /directly underneath the WIN text block/);
+  assert.match(section, /future up action can push WIN up/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains temporary rule transformations", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [19, "right", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `ball` 5 steps to the right"],
+      [20, "left", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nkey 1 step to the right\nrule `ball` 5 steps to the right"],
+      [21, "down", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `ball` 5 steps to the right"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "The agent's right action at step 19 causes a key to appear in the observation at step 20. The subsequent left action at step 20 causes the key to disappear. What hidden state change most likely occurred?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Temporary transformation cues/);
+  assert.match(section, /key appears in Observation 20 but is absent before and after/);
+  assert.match(section, /temporary hidden rule\/text alignment/);
+  assert.match(section, /BALL IS KEY/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains pushed phrase groups as diagonal movement", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        9,
+        "right",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "wall 3 steps to the right and 4 steps down",
+          "rule `is` 1 step down",
+          "key 1 step to the right and 1 step down",
+        ].join("\n"),
+      ],
+      [
+        10,
+        "right",
+        [
+          "Active rules:",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "wall 2 steps to the right and 4 steps down",
+          "rule `is` 1 step to the left and 1 step down",
+          "key 1 step down",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In the transition from Step 9 to Step 10, the agent executes the action 'down', pushing the 'is' block. A standard push would only change the block's vertical position. However, the 'is' and 'key' blocks both shift their relative horizontal and vertical positions. Based on this outcome, what hidden movement mechanic affecting pushed objects can be inferred?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Pushed phrase-group shift cues/);
+  assert.match(section, /contacts rule IS at 1 step down/);
+  assert.match(section, /adjacent KEY at 1 step to the right and 1 step down/);
+  assert.match(section, /one cell down and one cell to the left/);
+  assert.doesNotMatch(section, /this implies the agent moved right relative to a static object/);
+});
+
+test("buildTrajectoryAnalysisRecallSection calls out self-reversing progress noise", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [19, "right", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `win` 7 steps to the right"],
+      [20, "left", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `win` 8 steps to the right"],
+      [21, "down", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `win` 8 steps to the right and 1 step up"],
+      [22, "up", "Active rules:\nbaba is you\nball is win\n\nObjects on the map:\nrule `win` 8 steps to the right"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Between step 19 and step 23, the agent performs a sequence of four movements: `right`, `left`, `down`, and `up`. Which of these actions were relevant for making progress towards the goal of touching a `win` object, and why?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Self-reversing sequence cues/);
+  assert.match(section, /net displacement 0/);
+  assert.match(section, /self-reversing exploratory noise/);
+  assert.match(section, /none of the named actions made lasting progress/);
+  assert.doesNotMatch(section, /Relative-position movement cues/);
+});
+
+test("buildTrajectoryAnalysisRecallSection infers failed text pushes reveal boundaries", async () => {
+  const observation = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `is` 1 step up",
+    "rule `win` 1 step to the right and 1 step up",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [23, "left", observation],
+      [24, "up", observation],
+      [25, "up", observation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "At Step 24 and 25, the agent's up action repeatedly fails, causing no change in the game state. Based on the object configuration shown in Step 23, what specific object is blocking the agent, and what critical information about the level's layout can be inferred from the agent's inability to push it?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Failed-push boundary cues/);
+  assert.match(section, /rule is is 1 step up/);
+  assert.match(section, /No active STOP rule is involved/);
+  assert.match(section, /pressed against the top\/northern edge of the playable area/);
+});
+
+test("buildTrajectoryAnalysisRecallSection treats same-relative text pushes as hidden movement", async () => {
+  const beforeContact = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `door` 2 steps to the left",
+  ].join("\n");
+  const adjacentDoor = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `door` 1 step to the left",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [10, "left", beforeContact],
+      [11, "left", adjacentDoor],
+      [12, "left", adjacentDoor],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "At step 12, the observation still showed the `door` text block in the same relative position after a left move. What hidden state change occurred, and why is this not a failed push?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Same-relative text-push cues/);
+  assert.match(section, /cumulative displacement across the named repeated actions/);
+  assert.match(section, /rule door moved one cell left per left action/);
+  assert.match(section, /Action 12 left kept it at the same relative offset/);
+  assert.match(section, /pushed rule door left and moved with it in hidden absolute coordinates/);
+  assert.doesNotMatch(section, /Failed-push boundary cues/);
+});
+
+test("buildTrajectoryAnalysisRecallSection recognizes instead-moved alternatives around stop blockers", async () => {
+  const observation = [
+    "Active rules:",
+    "wall is stop",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "wall 1 step to the right",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [6, "right", observation],
+      [7, "right", observation],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In steps 6 through 10, the agent repeatedly moves right but is blocked. If the agent at step 6 had instead moved left, would it have successfully changed its position?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Blocked-move cues/);
+  assert.match(section, /Action 6 right is blocked/);
+  assert.match(section, /left has no adjacent STOP object/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains whole-configuration shifts", async () => {
+  const before = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `is` 1 step up",
+    "rule `win` 1 step to the right and 1 step up",
+    "rule `key` 3 steps to the right and 1 step up",
+    "rule `door` 1 step to the left",
+    "door 1 step to the left and 1 step down",
+    "rule `you` 1 step to the right and 4 steps down",
+  ].join("\n");
+  const after = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `is` 1 step to the left and 1 step up",
+    "rule `win` 1 step up",
+    "rule `key` 2 steps to the right and 1 step up",
+    "rule `door` 2 step to the left",
+    "door 2 step to the left and 1 step down",
+    "rule `you` 4 steps down",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [7, "up", before],
+      [8, "right", after],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In steps 4-7, the agent makes four consecutive moves without altering the positions of any objects. Then, at step 8, its right action causes the entire level configuration to shift. Why was moving right optimal, and what would moving left or down do instead?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Whole-configuration shift cues/);
+  assert.match(section, /coordinated whole-level push\/shift/);
+  assert.match(section, /6 tracked objects or rule words all moved 1 step to the left/);
+  assert.match(section, /moving left or down would move back into empty space or undo the setup/);
+});
+
+test("buildTrajectoryAnalysisRecallSection infers blocked-corner escape directions", async () => {
+  const observation = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `is` 1 step up",
+    "rule `win` 1 step to the right and 1 step up",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [11, "left", observation],
+      [12, "left", observation],
+      [13, "up", observation],
+      [14, "up", observation],
+      [15, "right", "Active rules:\nbaba is you\n\nObjects on the map:\nrule `win` 1 step up"],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Question: What can be inferred from the agent's failed moves (left in steps 11-12, up in steps 13-14) before the successful move at step 15?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Failed-move escape cues/);
+  assert.match(section, /blocked to the left and above/);
+  assert.match(section, /useful escape direction\(s\) are right and down/);
+  assert.match(section, /successful right move at step 15/);
+  assert.doesNotMatch(section, /Failed-push boundary cues/);
+});
+
+test("buildTrajectoryAnalysisRecallSection identifies the only effective action inside a span", async () => {
+  const baseline = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `win` 1 step to the right and 1 step up",
+    "rule `door` 1 step to the left",
+  ].join("\n");
+  const changed = [
+    "Active rules:",
+    "baba is you",
+    "",
+    "Objects on the map:",
+    "rule `win` 1 step up",
+    "rule `door` 2 step to the left",
+  ].join("\n");
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [11, "left", baseline],
+      [12, "left", baseline],
+      [13, "up", baseline],
+      [14, "up", baseline],
+      [15, "right", changed],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "In the sequence from step 11 to step 15, only one action caused a change in the game state. Which specific action was relevant, and what evidence proves the other four were ineffective?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Only-effective action cues/);
+  assert.match(section, /Observations 11-14 have the same object-relative signature/);
+  assert.match(section, /Action 15 right is the only progress-making action/);
+  assert.match(section, /rule win changed from 1 step to the right and 1 step up to 1 step up/);
+  assert.doesNotMatch(section, /Action movement summary cues/);
+});
+
+test("buildTrajectoryAnalysisRecallSection explains active control-rule interaction setup", async () => {
+  const engine = new FakeCueEngine({
+    ama: makeTrajectoryMessages([
+      [
+        29,
+        "down",
+        [
+          "Active rules:",
+          "key is win",
+          "baba is you",
+          "",
+          "Objects on the map:",
+          "rule `baba` 5 step to the left and 1 step down",
+          "rule `is` 4 step to the left and 1 step down",
+          "rule `you` 3 step to the left and 1 step down",
+        ].join("\n"),
+      ],
+    ]),
+  });
+
+  const section = await buildTrajectoryAnalysisRecallSection({
+    engine,
+    sessionId: "ama",
+    query:
+      "Between steps 25 and 29, the agent repeatedly moves down. What specific text block is the agent moving to position itself next to, and why is this multi-step approach a necessary prerequisite for interacting with the `baba is you` rule?",
+    maxChars: 6000,
+  });
+
+  assert.match(section, /Control-rule interaction cues/);
+  assert.match(section, /specific target text block is rule baba/);
+  assert.match(section, /BABA IS YOU makes Baba the controlled agent/);
+  assert.match(section, /push a different object or text block into the rule's syntax line/);
 });
 
 test("buildTrajectoryAnalysisRecallSection surfaces inactive object rules", async () => {

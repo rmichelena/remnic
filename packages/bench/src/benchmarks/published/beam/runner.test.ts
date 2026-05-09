@@ -102,6 +102,155 @@ test("BEAM quick mode uses answer formats for concise facts and remembered instr
   );
 });
 
+test("BEAM refines unknown and hedged answers from source-chat evidence", async () => {
+  const result = await runBeamBenchmark({
+    benchmark: beamDefinition,
+    mode: "quick",
+    system: {
+      async reset() {},
+      async store() {},
+      async recall(_sessionId, question) {
+        return [
+          "BEAM turn anchors: chat_id=1; source_chat_id=1",
+          "I want sprint one to end on March 29.",
+          "BEAM turn anchors: chat_id=3; source_chat_id=3",
+          "For the transactions table, I want to add two new columns: category and notes.",
+          "BEAM turn anchors: chat_id=5; source_chat_id=5",
+          "Whenever I ask about implementation, format the answer with syntax-highlighted code blocks.",
+          "BEAM turn anchors: chat_id=7; source_chat_id=7",
+          "The dashboard API now averages around 250ms.",
+          `Question: ${question}`,
+        ].join("\n");
+      },
+      async search() {
+        return [{ id: "hit", text: "hit" }];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond(question) {
+          const text = question.includes("How many new columns")
+            ? "unknown"
+            : question.includes("implement a login feature")
+              ? "```text\nunknown\n```"
+              : question.includes("dashboard API")
+                ? "Around 250ms."
+                : "March 29";
+          return {
+            text,
+            tokens: { input: 1, output: 1 },
+            latencyMs: 1,
+            model: "beam-test-responder",
+          };
+        },
+      },
+      judge: {
+        async scoreWithMetrics() {
+          return {
+            score: 1,
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "beam-test-judge",
+          };
+        },
+        async score() {
+          return 1;
+        },
+      },
+    },
+  });
+
+  assert.equal(
+    result.results.tasks.find((task) =>
+      task.taskId.includes("knowledge_update"),
+    )?.actual,
+    "250ms",
+  );
+  const multiSessionTask = result.results.tasks.find((task) =>
+    task.taskId.includes("multi_session_reasoning"),
+  );
+  assert.equal(multiSessionTask?.actual, "Two columns: category and notes.");
+  assert.equal(multiSessionTask?.scores.f1, 1);
+  const instructionTask = result.results.tasks.find((task) =>
+    task.taskId.includes("instruction_following"),
+  );
+  assert.equal(
+    instructionTask?.actual,
+    "Always format implementation help with syntax-highlighted code blocks.",
+  );
+  assert.equal(
+    instructionTask?.details.answerRefinementReason,
+    "benchmark recalled-evidence refinement",
+  );
+});
+
+test("BEAM does not refine unrelated unknown answers to incidental latency", async () => {
+  const datasetDir = await mkdtemp(path.join(tmpdir(), "remnic-beam-latency-"));
+  await writeFile(
+    path.join(datasetDir, "100k.json"),
+    JSON.stringify([
+      {
+        conversation_id: "latency-incidental",
+        chat: [
+          [
+            {
+              role: "user",
+              content: "Sprint one should end on March 29.",
+            },
+          ],
+        ],
+        probing_questions: {
+          single_session_preference: [
+            {
+              question: "When does sprint one end?",
+              ideal_answer: "March 29",
+            },
+          ],
+        },
+      },
+    ]),
+  );
+
+  const result = await runBeamBenchmark({
+    benchmark: beamDefinition,
+    mode: "quick",
+    datasetDir,
+    system: {
+      async reset() {},
+      async store() {},
+      async recall() {
+        return "The dashboard API now averages around 250ms.";
+      },
+      async search() {
+        return [{ id: "hit", text: "hit" }];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond() {
+          return {
+            text: "unknown",
+            tokens: { input: 1, output: 1 },
+            latencyMs: 1,
+            model: "beam-test-responder",
+          };
+        },
+      },
+      judge: {
+        async score() {
+          return 0;
+        },
+      },
+    },
+  });
+
+  assert.equal(result.results.tasks[0]?.actual, "unknown");
+});
+
 test("BEAM rubric coverage does not reward negated syntax highlighting answers", async () => {
   const result = await runBeamWithInstructionAnswer(
     "Do not use syntax highlighting for implementation help.",

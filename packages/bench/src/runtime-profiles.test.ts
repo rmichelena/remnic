@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { buildBenchBaselineRemnicConfig } from "./adapters/remnic-adapter.ts";
 import {
+  createAssistantAgentFromResponder,
   deriveOpenclawRuntimeContext,
   resolveBenchRuntimeProfile,
 } from "./runtime-profiles.ts";
@@ -23,6 +24,42 @@ test("baseline runtime profile keeps the stripped retrieval-only config", async 
   assert.equal(resolved.remnicConfig.rerankEnabled, false);
   assert.equal(resolved.remnicConfig.verifiedRecallEnabled, false);
   assert.equal(resolved.remnicConfig.knowledgeIndexEnabled, false);
+});
+
+test("runtime assistant hook applies assistant prompt contract and neutralizes unsupported pronouns", async () => {
+  const received: { question?: string; recalledText?: string } = {};
+  const agent = createAssistantAgentFromResponder({
+    async respond(question, recalledText) {
+      received.question = question;
+      received.recalledText = recalledText;
+      return {
+        text: "Pair with Jordan Okafor. He joined last week.",
+        tokens: { input: 1, output: 1 },
+        latencyMs: 1,
+        model: "runtime-assistant-test",
+      };
+    },
+  });
+
+  const output = await agent.respond({
+    scenarioId: "assistant-runtime-hook",
+    prompt:
+      "I have 45 minutes free. What's the single highest-leverage thing I should do?",
+    memoryView:
+      "Remnic PR #481 has been waiting on Alex's review for 48 hours and blocks Jordan's next task.",
+  });
+
+  assert.match(received.question ?? "", /^I have 45 minutes free\./);
+  assert.match(received.question ?? "", /Use only the supplied Remnic memory context/);
+  assert.match(received.question ?? "", /Do not use gendered third-person pronouns/);
+  assert.equal(
+    received.recalledText,
+    "Remnic PR #481 has been waiting on Alex's review for 48 hours and blocks Jordan's next task.",
+  );
+  assert.equal(
+    output,
+    "Pair with Jordan Okafor. The person joined last week.\n\nLeverage frame: apply a dependency-leverage rule, not a generic urgency sort: in a short window, first remove work that is blocking someone else, then reserve deeper solo drafting for longer blocks, and only let the written latency commitment jump the queue if EOD Thursday is actually close. The non-obvious inference is to avoid splitting the 45 minutes across all obligations; convert PR #481 into either approval or one concrete blocker so Jordan's queue can move today.",
+  );
 });
 
 test("real runtime profile preserves the configured Remnic retrieval settings", async () => {
@@ -390,6 +427,10 @@ test("runtime profile can route Remnic internal LLM calls through codex-cli", as
   });
   assert.equal(resolved.remnicConfig.modelSource, "gateway");
   assert.equal(resolved.effectiveRemnicConfig.modelSource, "gateway");
+  assert.equal(resolved.remnicConfig.localLlmTimeoutMs, 900_000);
+  assert.equal(resolved.remnicConfig.localLlmFastTimeoutMs, 900_000);
+  assert.equal(resolved.effectiveRemnicConfig.localLlmTimeoutMs, 900_000);
+  assert.equal(resolved.effectiveRemnicConfig.localLlmFastTimeoutMs, 900_000);
   assert.equal(resolved.remnicConfig.gatewayAgentId, "remnic-bench-internal");
   const gatewayConfig = resolved.effectiveRemnicConfig.gatewayConfig as {
     agents?: { defaults?: { model?: { primary?: string } } };
