@@ -139,9 +139,13 @@ import type {
 } from "@remnic/core";
 import type {
   ActionConfidenceInput,
+  MemoryExtensionPublisher,
   MemoryCategory,
+  PublishContext,
+  PublishResult,
   Taxonomy,
   TaxonomyCategory,
+  TokenEntry,
 } from "@remnic/core";
 // @remnic/bench is an optional install surface. Import types only at the
 // top level (erased at compile time); runtime access goes through
@@ -206,12 +210,56 @@ export {
   parseBenchArgs,
 } from "./bench-args.js";
 
+type PiPublisherModule = {
+  PiMemoryExtensionPublisher: new () => MemoryExtensionPublisher;
+};
+
+class LazyPiMemoryExtensionPublisher implements MemoryExtensionPublisher {
+  readonly hostId = "pi";
+  private delegate: Promise<MemoryExtensionPublisher> | undefined;
+
+  async resolveExtensionRoot(env?: NodeJS.ProcessEnv): Promise<string> {
+    return (await this.load()).resolveExtensionRoot(env);
+  }
+
+  async isHostAvailable(): Promise<boolean> {
+    return (await this.load()).isHostAvailable();
+  }
+
+  async renderInstructions(ctx: PublishContext): Promise<string> {
+    return (await this.load()).renderInstructions(ctx);
+  }
+
+  async publish(ctx: PublishContext): Promise<PublishResult> {
+    return (await this.load()).publish(ctx);
+  }
+
+  async unpublish(): Promise<void> {
+    return (await this.load()).unpublish();
+  }
+
+  private async load(): Promise<MemoryExtensionPublisher> {
+    this.delegate ??= loadPiPublisherModule()
+      .then((mod) => new mod.PiMemoryExtensionPublisher())
+      .catch((err) => {
+        this.delegate = undefined;
+        throw err;
+      });
+    return this.delegate;
+  }
+}
+
+async function loadPiPublisherModule(): Promise<PiPublisherModule> {
+  return await import("@remnic/plugin-pi/publisher") as PiPublisherModule;
+}
+
 // ── Host-specific publisher registrations ───────────────────────────────────
 // Publisher classes live in @remnic/core, but wiring them into the registry
 // belongs in the host adapter layer (CLAUDE.md gotcha #31).
 registerPublisher("codex", () => new CodexMemoryExtensionPublisher());
 registerPublisher("claude-code", () => new ClaudeCodeMemoryExtensionPublisher());
 registerPublisher("hermes", () => new HermesMemoryExtensionPublisher());
+registerPublisher("pi", () => new LazyPiMemoryExtensionPublisher());
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -4890,6 +4938,23 @@ function cmdDedup(json: boolean): void {
   console.log(`Duration: ${result.durationMs}ms`);
 }
 
+function readInstalledConnectorConfig(configPath: string | undefined, fallback: Record<string, unknown>): Record<string, unknown> {
+  if (!configPath) return fallback;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+    const { token: _token, ...config } = parsed as Record<string, unknown>;
+    return config;
+  } catch {
+    return fallback;
+  }
+}
+
+function snapshotConnectorTokenEntry(connectorId: string): TokenEntry | null {
+  const entry = listTokens().find((candidate) => candidate.connector === connectorId);
+  return entry ? { ...entry } : null;
+}
+
 // ── M5 connectors command ────────────────────────────────────────────────────
 
 async function cmdConnectors(action: string, rest: string[], json: boolean): Promise<void> {
@@ -4920,6 +4985,7 @@ async function cmdConnectors(action: string, rest: string[], json: boolean): Pro
       process.exit(1);
     }
     const connectorConfig = parseConnectorConfig(rest);
+    const preInstallTokenEntry = snapshotConnectorTokenEntry(connectorId);
     const result = installConnector({
       connectorId,
       config: connectorConfig,
@@ -4933,10 +4999,12 @@ async function cmdConnectors(action: string, rest: string[], json: boolean): Pro
     if (result.configPath) console.log(`  Config: ${result.configPath}`);
     if (result.status === "already_installed") console.log("Use --force to reinstall.");
     if (result.status === "config_required") console.log("Set config with --config <key>=<value>");
+    const effectiveConnectorConfig = readInstalledConnectorConfig(result.configPath, connectorConfig);
 
     // Publish memory extension if the connector has a publisher and the
     // install was successful (not error/already_installed/config_required).
-    if (result.status === "installed") {
+    const shouldPublishExtension = coerceInstallExtension(effectiveConnectorConfig.installExtension) ?? true;
+    if (result.status === "installed" && shouldPublishExtension) {
       const pub = publisherForConnector(connectorId);
       if (pub) {
         try {
@@ -4947,12 +5015,17 @@ async function cmdConnectors(action: string, rest: string[], json: boolean): Pro
             // the publish context so publishers use the actual namespace
             // instead of falling back to "default".
             const connectorNamespace =
-              typeof connectorConfig?.namespace === "string" && connectorConfig.namespace.length > 0
-                ? connectorConfig.namespace
+              typeof effectiveConnectorConfig.namespace === "string" && effectiveConnectorConfig.namespace.length > 0
+                ? effectiveConnectorConfig.namespace
+                : undefined;
+            const connectorDaemonUrl =
+              typeof effectiveConnectorConfig.remnicDaemonUrl === "string" && effectiveConnectorConfig.remnicDaemonUrl.trim().length > 0
+                ? effectiveConnectorConfig.remnicDaemonUrl.trim()
                 : undefined;
             const pubResult = await pub.publish({
-              config: { memoryDir, namespace: connectorNamespace },
+              config: { memoryDir, namespace: connectorNamespace, daemonUrl: connectorDaemonUrl },
               skillsRoot: path.join(memoryDir, "skills"),
+              rollbackTokenEntry: preInstallTokenEntry,
               log: { info: console.log, warn: console.warn, error: console.error },
             });
             if (pubResult.filesWritten.length > 0) {
@@ -4966,19 +5039,42 @@ async function cmdConnectors(action: string, rest: string[], json: boolean): Pro
           console.warn(`  Warning: memory extension publish failed: ${msg}`);
         }
       }
+    } else if (result.status === "installed" && !shouldPublishExtension) {
+      console.log("  Memory extension publish skipped via installExtension=false");
     }
   } else if (action === "remove") {
     if (!connectorId) {
       console.error("Usage: remnic connectors remove <id>");
       process.exit(1);
     }
+    const connectorBeforeRemoval = listConnectors().installed.find(
+      (connector) => connector.connectorId === connectorId,
+    );
+    const savedInstallExtension = connectorBeforeRemoval
+      ? coerceInstallExtension(connectorBeforeRemoval.config.installExtension)
+      : undefined;
     const result = removeConnector(connectorId);
     if (result.status === "error") {
       console.error(result.message);
       process.exit(1);
     }
     console.log(result.message);
-    if (result.status === "skipped" && result.reason === "config-parse-failed") {
+    if (result.status === "removed" && connectorId !== "codex-cli") {
+      if (savedInstallExtension === false) {
+        console.log("  Memory extension removal skipped via installExtension=false");
+      } else {
+        const pub = publisherForConnector(connectorId);
+        if (pub) {
+          try {
+            await pub.unpublish();
+            console.log("  Removed memory extension");
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`  Warning: memory extension removal failed: ${msg}`);
+          }
+        }
+      }
+    } else if (result.status === "skipped" && result.reason === "config-parse-failed") {
       // A malformed codex-cli.json means we could not verify or complete removal.
       // This is not a benign no-op — the connector may still be partially installed.
       // Exit non-zero so automation does not treat a failed removal as success.
