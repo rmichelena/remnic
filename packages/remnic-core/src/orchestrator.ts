@@ -8434,8 +8434,10 @@ export class Orchestrator {
 
     const eventOrderEntry = this.getRecallSectionEntry("event-order");
     const eventOrderMaxChars =
-      this.getRecallSectionMaxChars("event-order") ?? 2400;
+      this.getRecallSectionMaxChars("event-order") ??
+      this.config.eventOrderRecallMaxChars;
     if (
+      this.config.eventOrderRecallEnabled &&
       eventOrderEntry &&
       this.isRecallSectionEnabled("event-order") &&
       eventOrderMaxChars !== 0 &&
@@ -8449,11 +8451,14 @@ export class Orchestrator {
           query: retrievalQuery,
           maxChars: eventOrderMaxChars,
           maxItems:
-            this.getRecallSectionNumber("event-order", "maxResults") ?? 24,
+            this.getRecallSectionNumber("event-order", "maxResults") ??
+            this.config.eventOrderRecallMaxResults,
           maxScanWindowTurns:
-            this.getRecallSectionNumber("event-order", "maxTurns") ?? 12,
+            this.getRecallSectionNumber("event-order", "maxTurns") ??
+            this.config.eventOrderRecallScanWindowTurns,
           maxScanWindowTokens:
-            this.getRecallSectionNumber("event-order", "maxTokens") ?? 24_000,
+            this.getRecallSectionNumber("event-order", "maxTokens") ??
+            this.config.eventOrderRecallScanWindowTokens,
         });
         if (eventOrderSection) {
           this.appendRecallSection(
@@ -8469,8 +8474,10 @@ export class Orchestrator {
 
     const responseGuidanceEntry = this.getRecallSectionEntry("response-guidance");
     const responseGuidanceMaxChars =
-      this.getRecallSectionMaxChars("response-guidance") ?? 2400;
+      this.getRecallSectionMaxChars("response-guidance") ??
+      this.config.responseGuidanceRecallMaxChars;
     if (
+      this.config.responseGuidanceRecallEnabled &&
       responseGuidanceEntry &&
       this.isRecallSectionEnabled("response-guidance") &&
       responseGuidanceMaxChars !== 0 &&
@@ -8484,11 +8491,14 @@ export class Orchestrator {
           query: retrievalQuery,
           maxChars: responseGuidanceMaxChars,
           maxSearchResults:
-            this.getRecallSectionNumber("response-guidance", "maxResults") ?? 48,
+            this.getRecallSectionNumber("response-guidance", "maxResults") ??
+            this.config.responseGuidanceRecallMaxResults,
           maxScanWindowTurns:
-            this.getRecallSectionNumber("response-guidance", "maxTurns") ?? 64,
+            this.getRecallSectionNumber("response-guidance", "maxTurns") ??
+            this.config.responseGuidanceRecallScanWindowTurns,
           maxScanWindowTokens:
-            this.getRecallSectionNumber("response-guidance", "maxTokens") ?? 16_000,
+            this.getRecallSectionNumber("response-guidance", "maxTokens") ??
+            this.config.responseGuidanceRecallScanWindowTokens,
         });
         if (responseGuidanceSection) {
           this.appendRecallSection(

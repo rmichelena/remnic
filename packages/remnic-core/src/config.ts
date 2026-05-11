@@ -68,6 +68,16 @@ function parseBoundedIntegerMs(
   return Math.min(max, Math.max(min, Math.floor(coerced)));
 }
 
+function parseClampedInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+): number {
+  const coerced = coerceNumber(value);
+  if (coerced === undefined) return fallback;
+  return Math.max(min, Math.floor(coerced));
+}
+
 // Coerce common string/number representations of a boolean to a real boolean.
 // Returns `undefined` when the value cannot be interpreted, so callers can
 // fall back to their own default. Guards against the "string `false` is
@@ -2756,6 +2766,26 @@ export function parseConfig(raw: unknown): PluginConfig {
       coerceNumber(cfg.explicitCueRecallMaxReferences) !== undefined
         ? Math.max(0, Math.floor(coerceNumber(cfg.explicitCueRecallMaxReferences)!))
         : 24,
+    eventOrderRecallEnabled:
+      coerceBool(cfg.eventOrderRecallEnabled) ?? true,
+    eventOrderRecallMaxChars:
+      parseClampedInteger(cfg.eventOrderRecallMaxChars, 2400, 0),
+    eventOrderRecallMaxResults:
+      parseClampedInteger(cfg.eventOrderRecallMaxResults, 24, 0),
+    eventOrderRecallScanWindowTurns:
+      parseClampedInteger(cfg.eventOrderRecallScanWindowTurns, 12, 1),
+    eventOrderRecallScanWindowTokens:
+      parseClampedInteger(cfg.eventOrderRecallScanWindowTokens, 24_000, 1),
+    responseGuidanceRecallEnabled:
+      coerceBool(cfg.responseGuidanceRecallEnabled) ?? true,
+    responseGuidanceRecallMaxChars:
+      parseClampedInteger(cfg.responseGuidanceRecallMaxChars, 2400, 0),
+    responseGuidanceRecallMaxResults:
+      parseClampedInteger(cfg.responseGuidanceRecallMaxResults, 48, 0),
+    responseGuidanceRecallScanWindowTurns:
+      parseClampedInteger(cfg.responseGuidanceRecallScanWindowTurns, 64, 1),
+    responseGuidanceRecallScanWindowTokens:
+      parseClampedInteger(cfg.responseGuidanceRecallScanWindowTokens, 16_000, 1),
     // Lossless Context Management (LCM)
     lcmEnabled: cfg.lcmEnabled === true,
     lcmLeafBatchSize:
@@ -3374,19 +3404,19 @@ function buildDefaultRecallPipeline(cfg: Record<string, unknown>): RecallSection
     },
     {
       id: "event-order",
-      enabled: true,
-      maxChars: 2400,
-      maxResults: 24,
-      maxTurns: 12,
-      maxTokens: 24000,
+      enabled: coerceBool(cfg.eventOrderRecallEnabled) ?? true,
+      maxChars: parseClampedInteger(cfg.eventOrderRecallMaxChars, 2400, 0),
+      maxResults: parseClampedInteger(cfg.eventOrderRecallMaxResults, 24, 0),
+      maxTurns: parseClampedInteger(cfg.eventOrderRecallScanWindowTurns, 12, 1),
+      maxTokens: parseClampedInteger(cfg.eventOrderRecallScanWindowTokens, 24_000, 1),
     },
     {
       id: "response-guidance",
-      enabled: true,
-      maxChars: 2400,
-      maxResults: 48,
-      maxTurns: 64,
-      maxTokens: 16000,
+      enabled: coerceBool(cfg.responseGuidanceRecallEnabled) ?? true,
+      maxChars: parseClampedInteger(cfg.responseGuidanceRecallMaxChars, 2400, 0),
+      maxResults: parseClampedInteger(cfg.responseGuidanceRecallMaxResults, 48, 0),
+      maxTurns: parseClampedInteger(cfg.responseGuidanceRecallScanWindowTurns, 64, 1),
+      maxTokens: parseClampedInteger(cfg.responseGuidanceRecallScanWindowTokens, 16_000, 1),
     },
     {
       id: "profile",
