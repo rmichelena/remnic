@@ -111,6 +111,18 @@ test("disableThinking injects chat_template_kwargs for vllm backend (#548)", asy
   assert.deepEqual(bodies[0]?.chat_template_kwargs, { enable_thinking: false });
 });
 
+test("disableThinking injects chat_template_kwargs for llama.cpp backend (#979)", async () => {
+  const client = new LocalLlmClient(createConfig());
+  primeClient(client, { thinking: true, detected: "llamacpp" });
+  const { restore, bodies } = captureFetchBodies();
+  try {
+    await runOneChatCompletion(client);
+  } finally {
+    restore();
+  }
+  assert.deepEqual(bodies[0]?.chat_template_kwargs, { enable_thinking: false });
+});
+
 test("disableThinking fails open for generic backend — no kwarg sent (#548 Codex P1)", async () => {
   // Regression for Codex P1 on PR #550: `chat_template_kwargs` is a
   // llama.cpp / LM-Studio / vLLM extension.  Strict OpenAI-compat
