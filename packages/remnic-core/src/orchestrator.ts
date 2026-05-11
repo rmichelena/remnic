@@ -2154,7 +2154,10 @@ export class Orchestrator {
       );
       return result ? { content: result.content } : null;
     }
-    const result = await this.fastLlm.chatCompletion(messages, options);
+    const result = await this.fastLlm.chatCompletion(messages, {
+      ...options,
+      forceDisableThinking: true,
+    });
     return result ? { content: result.content } : null;
   }
 
@@ -2175,7 +2178,13 @@ export class Orchestrator {
           this.fastChatCompletion(messages, options ?? {}),
       };
     }
-    return this.fastLlm;
+    return {
+      chatCompletion: (messages, options) =>
+        this.fastLlm.chatCompletion(messages, {
+          ...(options ?? {}),
+          forceDisableThinking: true,
+        }),
+    };
   }
 
   async initialize(): Promise<void> {
@@ -3226,6 +3235,7 @@ export class Orchestrator {
             maxTokens: llmOpts.maxTokens,
             temperature: llmOpts.temperature,
             priority: "background",
+            forceDisableThinking: true,
           });
           response = fastResult ? { content: fastResult.content } : null;
         } else {

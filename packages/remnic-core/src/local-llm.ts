@@ -39,6 +39,20 @@ const THINKING_COMPATIBLE_BACKENDS: ReadonlySet<LocalLlmType> = new Set([
   "vllm",
 ]);
 
+const THINKING_SUPPRESSED_OPERATIONS: ReadonlySet<string> = new Set([
+  "extraction",
+  "extraction-judge",
+  "contradiction-judge",
+  "contradiction_verification",
+  "link_suggestion",
+  "memory_summarization",
+  "proactive_extraction",
+  "lcm-summarize",
+  "day_summary",
+  "hourly_summary",
+  "hourly_summary_extended",
+]);
+
 interface LocalServerConfig {
   type: LocalLlmType;
   defaultPort: number;
@@ -100,6 +114,7 @@ interface LocalLlmChatCompletionOptions {
   responseFormat?: { type: string };
   timeoutMs?: number;
   operation?: string;
+  forceDisableThinking?: boolean;
   priority?: LocalLlmRequestPriority;
 }
 
@@ -157,8 +172,10 @@ export class LocalLlmClient {
    * (LM Studio, vLLM; see `THINKING_COMPATIBLE_BACKENDS`).  Strict
    * OpenAI-compat backends reject unknown fields with 400; on those the
    * client fails open (thinking runs normally).  This is the safe
-   * default for Remnic extraction / consolidation: measurable latency
-   * win on thinking-capable backends, zero risk on others.  Issue #548.
+   * default for Remnic extraction-style operations: measurable latency
+   * win on thinking-capable backends, zero risk on others. Consolidation
+   * operations keep thinking enabled unless explicitly added to
+   * `THINKING_SUPPRESSED_OPERATIONS`. Issues #548 and #979.
    */
   set disableThinking(value: boolean) {
     this._disableThinking = value;
@@ -791,11 +808,15 @@ export class LocalLlmClient {
         requestBody.response_format = options.responseFormat;
       }
 
-      // Suppress thinking/reasoning for thinking-capable models
-      // (Qwen 3.5, Gemma 4, DeepSeek).  These models default to
-      // thinking-on via their chat template; sending
-      // `chat_template_kwargs: { enable_thinking: false }` tells the
-      // template to skip reasoning tokens.
+      // Suppress thinking/reasoning for operations that benefit from terse,
+      // structured output. Thinking-capable models (Qwen 3.5, Gemma 4,
+      // DeepSeek) default to thinking-on via their chat template; sending
+      // `chat_template_kwargs: { enable_thinking: false }` tells the template
+      // to skip reasoning tokens. Consolidation operations on the main client
+      // intentionally keep thinking enabled so entity resolution and
+      // deduplication can use the model's reasoning path. Fast-tier callers can
+      // still force suppression per request to preserve their low-latency
+      // contract.
       //
       // Gate the injection on detected backend support (issue #548,
       // Codex P1 on PR #550): `chat_template_kwargs` is an LM Studio /
@@ -804,8 +825,12 @@ export class LocalLlmClient {
       // unknown fields with 400, which trips the 400-cooldown path and
       // can effectively disable local extraction.  Fail open when the
       // backend hasn't been positively identified as thinking-capable.
+      const shouldSuppressThinking =
+        options.forceDisableThinking === true ||
+        (this._disableThinking &&
+          THINKING_SUPPRESSED_OPERATIONS.has(operation));
       if (
-        this._disableThinking &&
+        shouldSuppressThinking &&
         this.detectedType !== null &&
         THINKING_COMPATIBLE_BACKENDS.has(this.detectedType)
       ) {
