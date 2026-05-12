@@ -165,6 +165,8 @@ import {
   readRecentEntityTranscriptEntries,
 } from "./entity-retrieval.js";
 import { buildExplicitCueRecallSection } from "./explicit-cue-recall.js";
+import { buildEventOrderRecallSection } from "./event-order-recall.js";
+import { buildResponseGuidanceRecallSection } from "./response-guidance-recall.js";
 import {
   hasBroadGraphIntent,
   inferIntentFromText,
@@ -5746,6 +5748,15 @@ export class Orchestrator {
     return entry.enabled !== false;
   }
 
+  private isSpecializedRecallSectionEnabled(
+    sectionId: string,
+    topLevelEnabled: boolean,
+  ): boolean {
+    const entry = this.getRecallSectionEntry(sectionId);
+    if (!entry) return topLevelEnabled;
+    return entry.enabled === true || (topLevelEnabled && entry.enabled !== false);
+  }
+
   private getRecallSectionMaxChars(
     sectionId: string,
   ): number | null | undefined {
@@ -8437,6 +8448,86 @@ export class Orchestrator {
         }
       } catch (err) {
         log.debug(`Explicit cue recall assembly error: ${err}`);
+      }
+    }
+
+    const eventOrderMaxChars =
+      this.getRecallSectionMaxChars("event-order") ??
+      this.config.eventOrderRecallMaxChars;
+    if (
+      this.isSpecializedRecallSectionEnabled(
+        "event-order",
+        this.config.eventOrderRecallEnabled,
+      ) &&
+      eventOrderMaxChars !== 0 &&
+      this.lcmEngine?.enabled &&
+      (recallMode as RecallPlanMode) !== "no_recall"
+    ) {
+      try {
+        const eventOrderSection = await buildEventOrderRecallSection({
+          engine: this.lcmEngine,
+          sessionId: sessionKey,
+          query: retrievalQuery,
+          maxChars: eventOrderMaxChars,
+          maxItems:
+            this.getRecallSectionNumber("event-order", "maxResults") ??
+            this.config.eventOrderRecallMaxResults,
+          maxScanWindowTurns:
+            this.getRecallSectionNumber("event-order", "maxTurns") ??
+            this.config.eventOrderRecallScanWindowTurns,
+          maxScanWindowTokens:
+            this.getRecallSectionNumber("event-order", "maxTokens") ??
+            this.config.eventOrderRecallScanWindowTokens,
+        });
+        if (eventOrderSection) {
+          this.appendRecallSection(
+            sectionBuckets,
+            "event-order",
+            eventOrderSection,
+          );
+        }
+      } catch (err) {
+        log.debug(`Event-order recall assembly error: ${err}`);
+      }
+    }
+
+    const responseGuidanceMaxChars =
+      this.getRecallSectionMaxChars("response-guidance") ??
+      this.config.responseGuidanceRecallMaxChars;
+    if (
+      this.isSpecializedRecallSectionEnabled(
+        "response-guidance",
+        this.config.responseGuidanceRecallEnabled,
+      ) &&
+      responseGuidanceMaxChars !== 0 &&
+      this.lcmEngine?.enabled &&
+      (recallMode as RecallPlanMode) !== "no_recall"
+    ) {
+      try {
+        const responseGuidanceSection = await buildResponseGuidanceRecallSection({
+          engine: this.lcmEngine,
+          sessionId: sessionKey,
+          query: retrievalQuery,
+          maxChars: responseGuidanceMaxChars,
+          maxSearchResults:
+            this.getRecallSectionNumber("response-guidance", "maxResults") ??
+            this.config.responseGuidanceRecallMaxResults,
+          maxScanWindowTurns:
+            this.getRecallSectionNumber("response-guidance", "maxTurns") ??
+            this.config.responseGuidanceRecallScanWindowTurns,
+          maxScanWindowTokens:
+            this.getRecallSectionNumber("response-guidance", "maxTokens") ??
+            this.config.responseGuidanceRecallScanWindowTokens,
+        });
+        if (responseGuidanceSection) {
+          this.appendRecallSection(
+            sectionBuckets,
+            "response-guidance",
+            responseGuidanceSection,
+          );
+        }
+      } catch (err) {
+        log.debug(`Response guidance recall assembly error: ${err}`);
       }
     }
 
