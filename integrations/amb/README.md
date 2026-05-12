@@ -24,6 +24,28 @@ Use `--retrieve-only` to run AMB BEAM ingestion/retrieval and write retrieved
 contexts without answer generation or judging. Retrieval diagnostics do not
 count as leaderboard results.
 
+For local iteration runs that use the operator's Codex CLI auth instead of
+direct benchmark API keys, install the provider and check the Codex profile:
+
+```bash
+node integrations/amb/install-remnic-provider.mjs /path/to/agent-memory-benchmark
+
+export REMNIC_AMB_RUN_PROFILE=codex-cli
+export REMNIC_REPO_PATH=/path/to/remnic
+export OMB_ANSWER_LLM=codex_cli
+export OMB_ANSWER_MODEL=gpt-5.5
+export OMB_JUDGE_LLM=codex_cli
+export OMB_JUDGE_MODEL=gpt-5.5
+export OMB_CODEX_REASONING_EFFORT=xhigh
+export REMNIC_AMB_PRESERVE_RUNTIME_DEFAULTS=false
+node integrations/amb/check-remnic-run.mjs /path/to/agent-memory-benchmark
+```
+
+The installer also registers an AMB LLM provider named `codex_cli`. Codex CLI
+runs are useful for improvement loops and smoke checks, but they are not a
+replacement for a public-comparable run unless the target leaderboard uses the
+same answer and judge model setup.
+
 Manual setup:
 
 From an `agent-memory-benchmark` checkout:

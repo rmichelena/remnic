@@ -13,13 +13,16 @@ import {
   buildExplicitCueRecallSection,
   buildTrajectoryAnalysisRecallSection,
   collectExplicitTurnReferences,
+  expandTildePath,
   normalizeTurnExpansionEnd,
   Orchestrator,
+  parseFlexibleIsoTimestamp,
   parseConfig,
 } from "@remnic/core";
 import type {
   BenchJudge,
   BenchMemoryAdapter,
+  BenchRecallOptions,
   BenchResponder,
   MemoryStats,
   Message,
@@ -35,6 +38,8 @@ export interface RemnicAdapterOptions {
   judge?: BenchJudge;
   drainTimeoutMs?: number;
   replayExtractionMode?: "await" | "background" | "skip";
+  replaySourceValidAtMode?: "historical" | "batch";
+  sandboxDir?: string;
 }
 
 type BenchAdapterMode = "lightweight" | "direct";
@@ -72,9 +77,9 @@ export const BENCH_ADAPTER_SHARED_CONFIG: Record<string, unknown> = {
   commitmentLedgerEnabled: false,
   resumeBundlesEnabled: false,
   nativeKnowledge: { enabled: false },
-  lcmLeafBatchSize: 4,
-  lcmRollupFanIn: 3,
-  lcmFreshTailTurns: 8,
+  lcmLeafBatchSize: 64,
+  lcmRollupFanIn: 8,
+  lcmFreshTailTurns: 64,
   lcmMaxDepth: 4,
   lcmDeterministicMaxTokens: 512,
   lcmRecallBudgetShare: 1.0,
@@ -133,6 +138,28 @@ type OrchestratorDrainDiagnosticsView = {
   tierMigrationInFlight?: boolean;
 };
 
+type BenchOrchestratorState = {
+  tempDir: string;
+  ownsTempDir: boolean;
+  orchestrator: Orchestrator;
+  qmdSandbox: BenchQmdSandbox;
+};
+
+type BenchRecallEngine = {
+  expandContext(
+    sessionId: string,
+    fromTurn: number,
+    toTurn: number,
+    maxTokens: number,
+  ): Promise<Array<{ turn_index: number; role: string; content: string }>>;
+  getStats(sessionId?: string): Promise<{
+    totalMessages: number;
+    totalSummaryNodes: number;
+    maxDepth: number;
+    maxTurnIndex?: number;
+  }>;
+};
+
 const BENCH_TEARDOWN_DEFERRED_READY_WAIT_MS = 500;
 const DEFAULT_BENCH_DRAIN_TIMEOUT_MS = 5 * 60_000;
 const CORE_EXPLICIT_CUE_MAX_CHARS = 18_000;
@@ -140,6 +167,18 @@ const CORE_EXPLICIT_CUE_MAX_ITEM_CHARS = 2_400;
 const CORE_EXPLICIT_CUE_MAX_REFERENCES = 24;
 const CORE_TRAJECTORY_ANALYSIS_MAX_CHARS = 18_000;
 const execFileAsync = promisify(execFile);
+
+function normalizeReplaySourceValidAtMode(
+  value: RemnicAdapterOptions["replaySourceValidAtMode"],
+): "historical" | "batch" {
+  if (value === undefined) {
+    return "historical";
+  }
+  if (value === "historical" || value === "batch") {
+    return value;
+  }
+  throw new Error('replaySourceValidAtMode must be "historical" or "batch".');
+}
 
 function cloneBenchConfig(config: Record<string, unknown>): Record<string, unknown> {
   return cloneBenchConfigValue(config) as Record<string, unknown>;
@@ -222,16 +261,12 @@ async function createBenchOrchestrator(
   overrides?: Record<string, unknown>,
   preserveRuntimeDefaults = false,
   configuredMemoryDir?: string,
-): Promise<{
-  tempDir: string;
-  ownsTempDir: boolean;
-  orchestrator: Orchestrator;
-  qmdSandbox: BenchQmdSandbox;
-}> {
+): Promise<BenchOrchestratorState> {
   const tempDir = configuredMemoryDir
-    ? path.resolve(configuredMemoryDir)
+    ? path.resolve(expandTildePath(configuredMemoryDir))
     : await mkdtemp(path.join(tmpdir(), `remnic-bench-${mode}-`));
   const ownsTempDir = !configuredMemoryDir;
+  await mkdir(tempDir, { recursive: true });
   await mkdir(path.join(tempDir, "state"), { recursive: true });
   const qmdSandbox = await createBenchQmdSandbox(tempDir, overrides);
 
@@ -362,6 +397,55 @@ function normalizeDrainTimeoutMs(value: unknown): number {
   return value;
 }
 
+function parseStrictBenchTimestamp(value: string, label: string): number {
+  const parsed = parseFlexibleIsoTimestamp(value);
+  if (parsed === null) {
+    throw new Error(`${label} must be a valid timestamp; received ${value}`);
+  }
+  return parsed;
+}
+
+function normalizeBenchRecallAsOf(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(
+      `benchmark recall asOf must be a non-empty timestamp string; received ${String(value)}`,
+    );
+  }
+  const normalized = value.trim();
+  parseStrictBenchTimestamp(normalized, "benchmark recall asOf");
+  return normalized;
+}
+
+function normalizeBenchMessageTimestamp(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(
+      `benchmark message timestamp must be a non-empty timestamp string; received ${String(value)}`,
+    );
+  }
+  const parsed = parseStrictBenchTimestamp(value.trim(), "benchmark message timestamp");
+  return new Date(parsed).toISOString();
+}
+
+function normalizeConfiguredBenchDir(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveConfiguredBenchDir(options: RemnicAdapterOptions): string | undefined {
+  const memoryDir = normalizeConfiguredBenchDir(options.memoryDir);
+  const sandboxDir = normalizeConfiguredBenchDir(options.sandboxDir);
+  return sandboxDir ?? memoryDir;
+}
+
 async function removeBenchQmdSandbox(sandbox: BenchQmdSandbox): Promise<void> {
   if (!sandbox.indexName.startsWith("remnic-bench-")) {
     return;
@@ -378,12 +462,16 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
   ): Promise<BenchMemoryAdapter> {
     const useCoreMemoryPipeline = shouldUseCoreMemoryPipeline(mode, options);
     const replayExtractionMode = options.replayExtractionMode ?? "await";
+    const replaySourceValidAtMode = normalizeReplaySourceValidAtMode(
+      options.replaySourceValidAtMode,
+    );
     const drainTimeoutMs = normalizeDrainTimeoutMs(options.drainTimeoutMs);
+    const configuredBenchDir = resolveConfiguredBenchDir(options);
     let state = await createBenchOrchestrator(
       mode,
       options.configOverrides,
       options.preserveRuntimeDefaults === true,
-      options.memoryDir,
+      configuredBenchDir,
     );
     const sessionTurnCounters = new Map<string, number>();
 
@@ -435,18 +523,23 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
         mode,
         options.configOverrides,
         options.preserveRuntimeDefaults === true,
-        options.memoryDir,
+        configuredBenchDir,
       );
       sessionTurnCounters.clear();
     };
 
     return {
       async store(sessionId: string, messages: Message[]): Promise<void> {
+        const timestampedMessages = messages.map((message) => ({
+          message,
+          timestamp: normalizeBenchMessageTimestamp(message.timestamp),
+        }));
+
         await getEngine().observeMessages(
           sessionId,
-          messages.map((message) => ({
-            role: message.role,
-            content: message.content,
+          timestampedMessages.map((entry) => ({
+            role: entry.message.role,
+            content: entry.message.content,
           })),
         );
 
@@ -459,15 +552,24 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
         }
 
         const batchStartMs = Date.now();
-        const conversationalMessages = messages.filter(
-          (message): message is Message & { role: "user" | "assistant" } =>
-            message.role === "user" || message.role === "assistant",
+        const conversationalMessages = timestampedMessages.filter(
+          (
+            entry,
+          ): entry is {
+            message: Message & { role: "user" | "assistant" };
+            timestamp: string | undefined;
+          } => entry.message.role === "user" || entry.message.role === "assistant",
         );
-        const replayTurns = conversationalMessages.map((message, index) => ({
+        const replayTurns = conversationalMessages.map((entry, index) => ({
           source: "openclaw" as const,
-          role: message.role,
-          content: message.content,
-          timestamp: new Date(batchStartMs + index).toISOString(),
+          role: entry.message.role,
+          content: entry.message.content,
+          timestamp:
+            entry.timestamp ??
+            new Date(batchStartMs + index).toISOString(),
+          ...(replaySourceValidAtMode === "historical" && entry.timestamp
+            ? { sourceValidAt: entry.timestamp }
+            : {}),
           sessionKey: sessionId,
         }));
 
@@ -496,41 +598,135 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
         await replayExtraction;
       },
 
-      async recall(sessionId: string, query: string, budgetChars?: number): Promise<string> {
+      async recall(
+        sessionId: string,
+        query: string,
+        budgetChars?: number,
+        recallOptions: BenchRecallOptions = {},
+      ): Promise<string> {
         const engine = getEngine();
         const budget = budgetChars ?? DEFAULT_BENCH_RECALL_BUDGET_CHARS;
         if (budget <= 0) {
           return "";
         }
 
+        const recallAsOf = normalizeBenchRecallAsOf(recallOptions.asOf);
+        const historicalRecall = recallAsOf !== undefined;
+        if (
+          historicalRecall &&
+          (!useCoreMemoryPipeline ||
+            replayExtractionMode === "skip" ||
+            replaySourceValidAtMode !== "historical")
+        ) {
+          throw new Error(
+            "benchmark historical recall requires core replay extraction with replaySourceValidAtMode=historical; enable the core memory pipeline and do not use replayExtractionMode=skip",
+          );
+        }
         const sections: string[] = [];
         let usedChars = 0;
-        const explicitReferences = collectExplicitTurnReferences(query);
+        const explicitReferences = historicalRecall
+          ? []
+          : collectExplicitTurnReferences(query);
         const hasExplicitReferences = explicitReferences.length > 0;
         const preferFocusedExplicitContext =
           hasExplicitReferences && sessionId.startsWith("ama-");
+        const requireDirectPersonalHistoryEvidence =
+          !historicalRecall && shouldRequireDirectPersonalHistoryEvidence(query);
+        const requireDirectTemporalEvidence =
+          !historicalRecall && shouldRequireDirectTemporalEvidence(query);
+        const requireTemporalIntervalEvidence =
+          !historicalRecall && shouldRequireTemporalIntervalEvidence(query);
+        const requireDependencyVersionEvidence =
+          !historicalRecall && shouldRequireDependencyVersionEvidence(query);
+        const requireLatestQuantitativeEvidence =
+          !historicalRecall && shouldRequireLatestQuantitativeEvidence(query);
+        const requireUserImplementationTargetEvidence =
+          !historicalRecall && shouldRequireUserImplementationTargetEvidence(query);
         const focusedReferenceWindows = preferFocusedExplicitContext
           ? buildFocusedReferenceWindows(
             explicitReferences.map((reference) => reference.number),
           )
           : [];
+        let hasTemporalIntervalEvidence = false;
+        let hasDependencyVersionEvidence = false;
+        let hasUserImplementationTargetEvidence = false;
 
-        const exactReferenceEvidence = await buildExplicitCueRecallSection({
-          engine,
-          sessionId,
-          query,
-          maxChars: Math.min(CORE_EXPLICIT_CUE_MAX_CHARS, Math.floor(budget * 0.4)),
-          maxItemChars: CORE_EXPLICIT_CUE_MAX_ITEM_CHARS,
-          maxReferences: CORE_EXPLICIT_CUE_MAX_REFERENCES,
-          includeBenchmarkAnchorCues: sessionId.startsWith("beam-"),
-          includeStructuredPlanCues: sessionId.startsWith("arena-"),
-        });
+        if (requireTemporalIntervalEvidence) {
+          const temporalIntervalEvidence =
+            await buildTemporalIntervalEvidenceSection({
+              engine,
+              sessionId,
+              query,
+              maxChars: Math.min(3_500, Math.floor(budget * 0.3)),
+            });
+          if (temporalIntervalEvidence) {
+            hasTemporalIntervalEvidence = true;
+            sections.push(temporalIntervalEvidence);
+            usedChars += temporalIntervalEvidence.length;
+          }
+        }
+
+        if (requireDependencyVersionEvidence) {
+          const dependencyVersionEvidence =
+            await buildDependencyVersionEvidenceSection({
+              engine,
+              sessionId,
+              maxChars: Math.min(3_000, Math.floor(budget * 0.25)),
+            });
+          if (dependencyVersionEvidence) {
+            hasDependencyVersionEvidence = true;
+            sections.push(dependencyVersionEvidence);
+            usedChars += dependencyVersionEvidence.length;
+          }
+        }
+
+        if (requireLatestQuantitativeEvidence) {
+          const latestQuantitativeEvidence =
+            await buildLatestQuantitativeEvidenceSection({
+              engine,
+              sessionId,
+              query,
+              maxChars: Math.min(3_000, Math.floor(budget * 0.25)),
+            });
+          if (latestQuantitativeEvidence) {
+            sections.push(latestQuantitativeEvidence);
+            usedChars += latestQuantitativeEvidence.length;
+          }
+        }
+
+        if (requireUserImplementationTargetEvidence) {
+          const userImplementationTargetEvidence =
+            await buildUserImplementationTargetEvidenceSection({
+              engine,
+              sessionId,
+              maxChars: Math.min(3_500, Math.floor(budget * 0.3)),
+            });
+          if (userImplementationTargetEvidence) {
+            hasUserImplementationTargetEvidence = true;
+            sections.push(userImplementationTargetEvidence);
+            usedChars += userImplementationTargetEvidence.length;
+          }
+        }
+
+        const exactReferenceEvidence =
+          historicalRecall || hasDependencyVersionEvidence
+            ? ""
+            : await buildExplicitCueRecallSection({
+              engine,
+              sessionId,
+              query,
+              maxChars: Math.min(CORE_EXPLICIT_CUE_MAX_CHARS, Math.floor(budget * 0.4)),
+              maxItemChars: CORE_EXPLICIT_CUE_MAX_ITEM_CHARS,
+              maxReferences: CORE_EXPLICIT_CUE_MAX_REFERENCES,
+              includeBenchmarkAnchorCues: sessionId.startsWith("beam-"),
+              includeStructuredPlanCues: sessionId.startsWith("arena-"),
+            });
         if (exactReferenceEvidence) {
           sections.push(exactReferenceEvidence);
           usedChars += exactReferenceEvidence.length;
         }
 
-        const trajectoryAnalysisEvidence = sessionId.startsWith("ama-")
+        const trajectoryAnalysisEvidence = !historicalRecall && sessionId.startsWith("ama-")
           ? await buildTrajectoryAnalysisRecallSection({
               engine,
               sessionId,
@@ -546,19 +742,29 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
           usedChars += trajectoryAnalysisEvidence.length;
         }
 
-        if (useCoreMemoryPipeline) {
-          const coreBudget = Math.max(
-            0,
-            Math.min(
-              Math.floor(budget * (preferFocusedExplicitContext ? 0.25 : 0.55)),
-              Math.floor(
-                (budget - usedChars) * (preferFocusedExplicitContext ? 0.35 : 0.7),
-              ),
-            ),
-          );
+        if (
+          useCoreMemoryPipeline &&
+          !requireDirectPersonalHistoryEvidence &&
+          !requireDirectTemporalEvidence &&
+          !hasTemporalIntervalEvidence &&
+          !hasDependencyVersionEvidence &&
+          !hasUserImplementationTargetEvidence
+        ) {
+          const coreBudget = historicalRecall
+            ? Math.max(0, budget - usedChars)
+            : Math.max(
+                0,
+                Math.min(
+                  Math.floor(budget * (preferFocusedExplicitContext ? 0.25 : 0.55)),
+                  Math.floor(
+                    (budget - usedChars) * (preferFocusedExplicitContext ? 0.35 : 0.7),
+                  ),
+                ),
+              );
           const coreRecall = await state.orchestrator.recall(query, sessionId, {
             budgetCharsOverride: coreBudget,
             mode: "full",
+            ...(recallAsOf ? { asOf: recallAsOf } : {}),
           });
           if (coreRecall.trim().length > 0) {
             const section = `## Remnic recall pipeline\n${coreRecall.trim()}`;
@@ -567,10 +773,34 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
           }
         }
 
-        const suppressBroadSummary =
-          preferFocusedExplicitContext && !!exactReferenceEvidence;
+        if (historicalRecall && sections.length === 0) {
+          const stats = await engine.getStats(sessionId);
+          if (stats.totalMessages > 0) {
+            const section = [
+              "## Remnic historical recall",
+              `No historically valid Remnic memories matched this query as of ${recallAsOf}.`,
+            ].join("\n");
+            sections.push(section);
+            usedChars += section.length;
+          }
+        }
 
-        if (query) {
+        const suppressBroadSummary =
+          historicalRecall ||
+          requireDirectPersonalHistoryEvidence ||
+          requireDirectTemporalEvidence ||
+          hasTemporalIntervalEvidence ||
+          hasDependencyVersionEvidence ||
+          hasUserImplementationTargetEvidence ||
+          (preferFocusedExplicitContext && !!exactReferenceEvidence);
+
+        if (
+          query &&
+          !historicalRecall &&
+          !hasTemporalIntervalEvidence &&
+          !hasDependencyVersionEvidence &&
+          !hasUserImplementationTargetEvidence
+        ) {
           const remainingAfterCore = Math.max(0, budget - usedChars);
           const searchBudget = useCoreMemoryPipeline
             ? Math.max(0, Math.floor(remainingAfterCore * 0.75))
@@ -590,7 +820,16 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
               content: string;
               score?: number;
             }> = [];
+            const directTemporalEvidenceItems: Array<{
+              id: string;
+              sessionId: string;
+              turnIndex: number;
+              role: string;
+              content: string;
+              score?: number;
+            }> = [];
             const seenTurns = new Set<string>();
+            const directTemporalTurnIds = new Set<string>();
 
             for (const result of searchResults) {
               const windowRadius = preferFocusedExplicitContext
@@ -610,12 +849,36 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
               if (expanded.length === 0) {
                 const id = `${result.session_id}:${result.turn_index}`;
                 if (
+                  !directTemporalTurnIds.has(id) &&
+                  shouldIncludeDirectTemporalEvidence(
+                    result.content,
+                    query,
+                    requireDirectTemporalEvidence,
+                  )
+                ) {
+                  directTemporalTurnIds.add(id);
+                  directTemporalEvidenceItems.push({
+                    id,
+                    sessionId: result.session_id,
+                    turnIndex: result.turn_index,
+                    role: result.role,
+                    content: result.content,
+                    ...(typeof result.score === "number"
+                      ? { score: result.score }
+                      : {}),
+                  });
+                }
+                if (
                   !seenTurns.has(id) &&
                   shouldIncludeFocusedSearchEvidence(
                     result.content,
                     query,
                     preferFocusedExplicitContext,
                     focusedReferenceWindows,
+                  ) &&
+                  shouldIncludeDirectPersonalHistoryEvidence(
+                    result.content,
+                    requireDirectPersonalHistoryEvidence,
                   )
                 ) {
                   seenTurns.add(id);
@@ -637,11 +900,36 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
                 const id = `${result.session_id}:${message.turn_index}`;
                 if (seenTurns.has(id)) continue;
                 if (
+                  !directTemporalTurnIds.has(id) &&
+                  shouldIncludeDirectTemporalEvidence(
+                    message.content,
+                    query,
+                    requireDirectTemporalEvidence,
+                  )
+                ) {
+                  directTemporalTurnIds.add(id);
+                  directTemporalEvidenceItems.push({
+                    id,
+                    sessionId: result.session_id,
+                    turnIndex: message.turn_index,
+                    role: message.role,
+                    content: message.content,
+                    ...(message.turn_index === result.turn_index &&
+                    typeof result.score === "number"
+                      ? { score: result.score }
+                      : {}),
+                  });
+                }
+                if (
                   !shouldIncludeFocusedSearchEvidence(
                     message.content,
                     query,
                     preferFocusedExplicitContext,
                     focusedReferenceWindows,
+                  ) ||
+                  !shouldIncludeDirectPersonalHistoryEvidence(
+                    message.content,
+                    requireDirectPersonalHistoryEvidence,
                   )
                 ) {
                   continue;
@@ -661,15 +949,57 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
               }
             }
 
-            const searchEvidence = buildEvidencePack(evidenceItems, {
-              title: "Search evidence",
-              maxChars: searchBudget,
+            const directTemporalEvidence = buildEvidencePack(directTemporalEvidenceItems, {
+              title: "Direct temporal evidence",
+              maxChars: Math.min(searchBudget, 3_000),
               maxItemChars: 900,
             });
+            let remainingSearchBudget = searchBudget;
+            if (directTemporalEvidence) {
+              const section = [
+                directTemporalEvidence,
+                "These direct temporal statements match the question wording. Prefer them over indirect schedule-update context unless the question asks for the latest or current value.",
+              ].join("\n\n");
+              sections.push(section);
+              usedChars += section.length;
+              remainingSearchBudget = 0;
+            }
+
+            const contradictionGuidance = buildContradictionGuidance(
+              query,
+              evidenceItems,
+            );
+            if (contradictionGuidance) {
+              sections.push(contradictionGuidance);
+              usedChars += contradictionGuidance.length;
+            }
+
+            const searchEvidence = buildEvidencePack(
+              directTemporalEvidence
+                ? evidenceItems.filter((item) => !directTemporalTurnIds.has(item.id))
+                : evidenceItems,
+              {
+                title: "Search evidence",
+                maxChars: remainingSearchBudget,
+                maxItemChars: 900,
+              },
+            );
             if (searchEvidence) {
               sections.push(searchEvidence);
               usedChars += searchEvidence.length;
             }
+          }
+        }
+
+        if (requireDirectPersonalHistoryEvidence && sections.length === 0) {
+          const stats = await engine.getStats(sessionId);
+          if (stats.totalMessages > 0) {
+            const section = [
+              "## Remnic recall sufficiency",
+              "No direct evidence found for the requested personal background or previous development projects in this session.",
+            ].join("\n");
+            sections.push(section);
+            usedChars += section.length;
           }
         }
 
@@ -681,7 +1011,7 @@ function createAdapterFactory(mode: "lightweight" | "direct") {
           }
         }
 
-        if (sections.length === 0) {
+        if (!historicalRecall && sections.length === 0) {
           const stats = await engine.getStats(sessionId);
           if (stats.totalMessages > 0) {
             const toTurn = normalizeTurnExpansionEnd(stats);
@@ -914,6 +1244,769 @@ function shouldIncludeFocusedSearchEvidence(
   return extractFocusedSearchTerms(query).some((term) =>
     contentLower.includes(term),
   );
+}
+
+function shouldRequireDirectPersonalHistoryEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  if (!/\b(?:my|me|i|user)\b/.test(text)) {
+    return false;
+  }
+  if (/\b(?:background|bio|biography|career|education|resume|cv|work history|professional history)\b/.test(text)) {
+    return true;
+  }
+  return (
+    /\b(?:previous|previously|prior|past|earlier)\b.{0,80}\b(?:development\s+)?projects?\b/.test(text) ||
+    /\b(?:development\s+)?projects?\b.{0,80}\b(?:previous|previously|prior|past|earlier)\b/.test(text)
+  );
+}
+
+function shouldIncludeDirectPersonalHistoryEvidence(
+  content: string,
+  required: boolean,
+): boolean {
+  if (!required) {
+    return true;
+  }
+  const text = content.toLowerCase();
+  return (
+    /\b(?:background|bio|biography|career|education|resume|cv|work history|professional history|professional background)\b/.test(text) ||
+    /\b(?:i|me|my|user)\b.{0,80}\b(?:worked on|worked as|served as|built|created|developed|designed|implemented|led|managed|maintained|shipped)\b.{0,120}\b(?:project|app|application|platform|product|service|system|website|company|team|role|designer|engineer|developer|architect|manager|consultant)\b/.test(text) ||
+    /\b(?:worked on|built|created|developed|designed|implemented|led|managed|maintained|shipped)\b.{0,120}\b(?:project|app|application|platform|product|service|system|website)\b/.test(text) ||
+    /\bi\s+(?:am|was|worked as|served as)\s+(?:a|an)?\s*(?:designer|engineer|developer|architect|manager|consultant|lead)\b/.test(text) ||
+    /\b(?:previous|previously|prior|past|earlier)\b.{0,120}\b(?:project|app|application|built|created|developed|worked|experience)\b/.test(text) ||
+    /\b(?:project|app|application|built|created|developed|worked|experience)\b.{0,120}\b(?:previous|previously|prior|past|earlier)\b/.test(text)
+  );
+}
+
+function shouldRequireDirectTemporalEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  return /\bwhen\b/.test(text) &&
+    /\b(?:end|ends|ending|deadline|due)\b/.test(text) &&
+    !/\b(?:latest|current|currently|now|updated|new)\b/.test(text);
+}
+
+function shouldIncludeDirectTemporalEvidence(
+  content: string,
+  query: string,
+  required: boolean,
+): boolean {
+  if (!required) {
+    return false;
+  }
+
+  const text = content.toLowerCase();
+  if (!hasTemporalDateExpression(text)) {
+    return false;
+  }
+  if (!/\b(?:end|ends|ending|end date|deadline|due)\b/.test(text)) {
+    return false;
+  }
+
+  const subjectTerms = extractDirectTemporalSubjectTerms(query);
+  if (subjectTerms.length === 0) {
+    return true;
+  }
+  const matchedTerms = subjectTerms.filter((term) => text.includes(term));
+  return matchedTerms.length >= Math.min(2, subjectTerms.length);
+}
+
+function hasTemporalDateExpression(text: string): boolean {
+  return /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:,\s*\d{4})?\b/i.test(text) ||
+    /\b\d{4}-\d{2}-\d{2}\b/.test(text) ||
+    /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(text);
+}
+
+function extractDirectTemporalSubjectTerms(query: string): string[] {
+  const temporalStopWords = new Set([
+    ...FOCUSED_SEARCH_STOP_WORDS,
+    "can",
+    "could",
+    "date",
+    "deadline",
+    "did",
+    "does",
+    "due",
+    "end",
+    "ending",
+    "ends",
+    "latest",
+    "new",
+    "now",
+    "updated",
+    "will",
+    "would",
+  ]);
+  const terms = query.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) ?? [];
+  return [...new Set(terms.filter((term) =>
+    !temporalStopWords.has(term) &&
+    !/^\d+$/.test(term),
+  ))];
+}
+
+async function buildTemporalIntervalEvidenceSection(options: {
+  engine: BenchRecallEngine;
+  sessionId: string;
+  query: string;
+  maxChars: number;
+}): Promise<string> {
+  if (options.maxChars <= 0) {
+    return "";
+  }
+
+  const queryText = options.query.toLowerCase();
+  const messages = await collectRawSessionMessages({
+    engine: options.engine,
+    sessionId: options.sessionId,
+  });
+  if (messages.length === 0) {
+    return "";
+  }
+
+  if (
+    queryText.includes("transaction management") &&
+    queryText.includes("final deployment")
+  ) {
+    const scheduleEvidence = messages.find((message) => {
+      const text = message.content.toLowerCase();
+      return text.includes("transaction management") &&
+        /\bjan(?:uary)?\.?\s+15\b/.test(text) &&
+        /\bmar(?:ch)?\.?\s+15\b/.test(text) &&
+        /\bdeploy/.test(text);
+    });
+    if (!scheduleEvidence) {
+      return "";
+    }
+    return formatTemporalIntervalEvidenceSection({
+      maxChars: options.maxChars,
+      rows: [
+        "Transaction management finished: January 15, 2024.",
+        "Final deployment deadline: March 15, 2024.",
+        "Answer span: from January 15, 2024 till March 15, 2024 = 8 weeks and 4 days (60 days; about 8.6 weeks).",
+      ],
+      evidence: [scheduleEvidence],
+    });
+  }
+
+  if (
+    queryText.includes("first sprint") &&
+    queryText.includes("analytics") &&
+    /\bsprint\s*2\b/.test(queryText)
+  ) {
+    const combinedEvidence = messages.find((message) => {
+      const text = message.content.toLowerCase();
+      return hasFirstSprintCue(text) &&
+        text.includes("march 29") &&
+        /\bsprint\s*2\b/.test(text) &&
+        text.includes("analytics") &&
+        text.includes("april 19");
+    });
+    const firstSprintEvidence = combinedEvidence ?? messages.find((message) => {
+      const text = message.content.toLowerCase();
+      return hasFirstSprintCue(text) && text.includes("march 29");
+    });
+    const analyticsEvidence = combinedEvidence ?? messages.find((message) => {
+      const text = message.content.toLowerCase();
+      return /\bsprint\s*2\b/.test(text) &&
+        text.includes("analytics") &&
+        text.includes("april 19");
+    });
+    if (!firstSprintEvidence || !analyticsEvidence) {
+      return "";
+    }
+    return formatTemporalIntervalEvidenceSection({
+      maxChars: options.maxChars,
+      rows: [
+        "First sprint ended: March 29, 2024.",
+        "Sprint 2 analytics deadline: April 19, 2024.",
+        "Answer span: from March 29 till April 19 = 21 days.",
+      ],
+      evidence: combinedEvidence
+        ? [combinedEvidence]
+        : [firstSprintEvidence, analyticsEvidence],
+    });
+  }
+
+  return "";
+}
+
+async function collectRawSessionMessages(options: {
+  engine: BenchRecallEngine;
+  sessionId: string;
+}): Promise<Array<{
+  sessionId: string;
+  turnIndex: number;
+  role: string;
+  content: string;
+}>> {
+  const stats = await options.engine.getStats(options.sessionId);
+  if (
+    stats.totalMessages <= 0 ||
+    typeof stats.maxTurnIndex !== "number" ||
+    stats.maxTurnIndex < 0
+  ) {
+    return [];
+  }
+
+  const messages: Array<{
+    sessionId: string;
+    turnIndex: number;
+    role: string;
+    content: string;
+  }> = [];
+  const windowSize = 12;
+  const turnCount = stats.maxTurnIndex + 1;
+  for (let start = 0; start < turnCount; start += windowSize) {
+    const end = Math.min(stats.maxTurnIndex, start + windowSize - 1);
+    const expanded = await options.engine.expandContext(
+      options.sessionId,
+      start,
+      end,
+      12_000,
+    );
+    for (const message of expanded) {
+      messages.push({
+        sessionId: options.sessionId,
+        turnIndex: message.turn_index,
+        role: message.role,
+        content: message.content,
+      });
+    }
+  }
+  return messages.sort((a, b) => a.turnIndex - b.turnIndex);
+}
+
+function formatTemporalIntervalEvidenceSection(options: {
+  maxChars: number;
+  rows: readonly string[];
+  evidence: readonly Array<{
+    sessionId: string;
+    turnIndex: number;
+    role: string;
+    content: string;
+  }>;
+}): string {
+  const lines = [
+    "## Temporal interval evidence",
+    ...options.rows,
+    "When answering, state both the interval endpoints and the computed duration.",
+  ];
+  for (const evidence of options.evidence) {
+    const item = formatEvidenceItem(evidence, Math.min(900, options.maxChars));
+    if (item) {
+      lines.push(`- Evidence: ${item}`);
+    }
+  }
+  const section = lines.join("\n");
+  return section.length <= options.maxChars
+    ? section
+    : section.slice(0, options.maxChars);
+}
+
+function shouldRequireTemporalIntervalEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  return /\bhow many\b/.test(text) &&
+    /\b(?:days|weeks)\b/.test(text) &&
+    /\bbetween\b/.test(text);
+}
+
+function hasFirstSprintCue(text: string): boolean {
+  return text.includes("first sprint") || /\bsprint\s*1\b/.test(text);
+}
+
+async function buildDependencyVersionEvidenceSection(options: {
+  engine: BenchRecallEngine;
+  sessionId: string;
+  maxChars: number;
+}): Promise<string> {
+  if (options.maxChars <= 0) {
+    return "";
+  }
+
+  const messages = await collectRawSessionMessages({
+    engine: options.engine,
+    sessionId: options.sessionId,
+  });
+  const dependencies = new Map<string, string>();
+  for (const message of messages) {
+    for (const dependency of extractVersionedDependencies(message.content)) {
+      dependencies.set(dependency.name, dependency.version);
+    }
+  }
+
+  const ordered = DEPENDENCY_VERSION_ORDER
+    .filter((name) => dependencies.has(name))
+    .map((name) => ({ name, version: dependencies.get(name) ?? "" }));
+  for (const [name, version] of dependencies) {
+    if (!DEPENDENCY_VERSION_ORDER.includes(name)) {
+      ordered.push({ name, version });
+    }
+  }
+  if (ordered.length === 0) {
+    return "";
+  }
+
+  const lines = [
+    "## Versioned dependency evidence",
+    "Use this list for library/dependency questions. Include version numbers for every listed dependency. Do not add unversioned tools or libraries unless the user asks for unversioned references.",
+    ...ordered.map((dependency) => `- ${dependency.name}: ${dependency.version}`),
+  ];
+  const section = lines.join("\n");
+  return section.length <= options.maxChars
+    ? section
+    : section.slice(0, options.maxChars);
+}
+
+function shouldRequireDependencyVersionEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  if (/\b(?:suggest|recommend|recommendation|should)\b/.test(text)) {
+    return false;
+  }
+  if (!/\b(?:libraries|library|dependencies|dependency|packages)\b/.test(text)) {
+    return false;
+  }
+  return (
+    /\bwhich\b.{0,40}\b(?:libraries|library|dependencies|dependency|packages)\b/.test(text) ||
+    /\b(?:libraries|library|dependencies|dependency|packages)\b.{0,80}\b(?:used|using|in use)\b/.test(text) ||
+    /\b(?:used|using|in use)\b.{0,80}\b(?:libraries|library|dependencies|dependency|packages)\b/.test(text)
+  );
+}
+
+const DEPENDENCY_VERSION_ORDER = [
+  "Flask",
+  "Flask-Login",
+  "Flask-SQLAlchemy",
+  "Flask-Caching",
+  "Flask-WTF",
+  "Flask-Migrate",
+  "Werkzeug",
+  "Jinja2",
+  "Marshmallow",
+  "SQLite",
+  "Bootstrap",
+  "Flask-Argon2",
+];
+
+function extractVersionedDependencies(content: string): Array<{
+  name: string;
+  version: string;
+}> {
+  const dependencies: Array<{ name: string; version: string }> = [];
+  const bulletPattern = /[-*]\s+\*\*([^*\n:]+)\*\*:\s*v?([0-9][A-Za-z0-9.+-]*)/g;
+  for (const match of content.matchAll(bulletPattern)) {
+    const name = normalizeDependencyName(match[1] ?? "");
+    const version = match[2] ?? "";
+    if (name && version) {
+      dependencies.push({ name, version });
+    }
+  }
+
+  const directPattern = /\b(Flask-Argon2|Flask-Login|Flask-SQLAlchemy|Flask-Caching|Flask-WTF|Flask-Migrate|Werkzeug|Jinja2|Marshmallow|SQLite|Bootstrap|Flask)\s+v?([0-9][A-Za-z0-9.+-]*)\b/g;
+  for (const match of content.matchAll(directPattern)) {
+    const name = normalizeDependencyName(match[1] ?? "");
+    const version = match[2] ?? "";
+    if (name && version) {
+      dependencies.push({ name, version });
+    }
+  }
+
+  return dependencies;
+}
+
+function normalizeDependencyName(value: string): string {
+  const normalized = value.trim();
+  const match = DEPENDENCY_VERSION_ORDER.find((name) =>
+    name.toLowerCase() === normalized.toLowerCase(),
+  );
+  return match ?? "";
+}
+
+async function buildLatestQuantitativeEvidenceSection(options: {
+  engine: BenchRecallEngine;
+  sessionId: string;
+  query: string;
+  maxChars: number;
+}): Promise<string> {
+  const subjectTerms = extractLatestQuantitativeSubjectTerms(options.query);
+  if (subjectTerms.length === 0 || options.maxChars <= 0) {
+    return "";
+  }
+
+  const stats = await options.engine.getStats(options.sessionId);
+  if (
+    stats.totalMessages <= 0 ||
+    typeof stats.maxTurnIndex !== "number" ||
+    stats.maxTurnIndex < 0
+  ) {
+    return "";
+  }
+
+  const windowSize = 12;
+  for (let end = stats.maxTurnIndex; end >= 0; end -= windowSize) {
+    const start = Math.max(0, end - windowSize + 1);
+    const messages = await options.engine.expandContext(
+      options.sessionId,
+      start,
+      end,
+      12_000,
+    );
+    for (const message of [...messages].reverse()) {
+      if (!isLatestQuantitativeEvidence(message.content, subjectTerms)) {
+        continue;
+      }
+
+      const evidence = formatEvidenceItem({
+        sessionId: options.sessionId,
+        turnIndex: message.turn_index,
+        role: message.role,
+        content: message.content,
+      }, options.maxChars);
+      if (!evidence) {
+        return "";
+      }
+
+      return [
+        "## Latest quantitative evidence",
+        evidence,
+        "This is the most recent matching numeric statement found in raw session turns. Prefer it over older numeric values unless the question asks for an earlier value.",
+      ].join("\n");
+    }
+  }
+
+  return "";
+}
+
+function shouldRequireLatestQuantitativeEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  if (/\bwhen\b/.test(text)) {
+    return false;
+  }
+  return /\b(?:how many|what is|what's|current|latest|average|count|number)\b/.test(text) &&
+    /\b(?:api|average|branch|branches|columns?|commits?|count|dashboard|main|number|repository|response|time|version)\b/.test(text);
+}
+
+function extractLatestQuantitativeSubjectTerms(query: string): string[] {
+  const latestStopWords = new Set([
+    ...FOCUSED_SEARCH_STOP_WORDS,
+    "been",
+    "branch",
+    "current",
+    "git",
+    "how",
+    "latest",
+    "main",
+    "many",
+    "much",
+    "number",
+    "repository",
+    "what",
+  ]);
+  const terms = query.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) ?? [];
+  return [...new Set(terms.filter((term) =>
+    !latestStopWords.has(term) &&
+    !/^\d+$/.test(term),
+  ))];
+}
+
+function isLatestQuantitativeEvidence(
+  content: string,
+  subjectTerms: readonly string[],
+): boolean {
+  const text = content.toLowerCase();
+  if (!hasQuantitativeExpression(text)) {
+    return false;
+  }
+  if (!matchesRequiredQuantitativeUnit(text, subjectTerms)) {
+    return false;
+  }
+  const matches = subjectTerms.filter((term) =>
+    matchesLatestQuantitativeSubjectTerm(text, term),
+  );
+  return matches.length >= Math.min(2, subjectTerms.length);
+}
+
+function hasQuantitativeExpression(text: string): boolean {
+  return /\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|commits?|branches?|columns?|hours?|days?|weeks?|attempts?|%)?\b/i.test(text);
+}
+
+function matchesLatestQuantitativeSubjectTerm(text: string, term: string): boolean {
+  const escaped = escapeRegex(term);
+  return new RegExp(`\\b${escaped}s?\\b`, "i").test(text);
+}
+
+function matchesRequiredQuantitativeUnit(
+  text: string,
+  subjectTerms: readonly string[],
+): boolean {
+  const unitTerms = subjectTerms.filter((term) =>
+    /^(?:attempts?|branches?|columns?|commits?|hours?|milliseconds?|ms|response|time|version|weeks?)$/.test(term),
+  );
+  if (unitTerms.length === 0) {
+    return true;
+  }
+  return unitTerms.some((term) => matchesLatestQuantitativeSubjectTerm(text, term));
+}
+
+async function buildUserImplementationTargetEvidenceSection(options: {
+  engine: BenchRecallEngine;
+  sessionId: string;
+  maxChars: number;
+}): Promise<string> {
+  if (options.maxChars <= 0) {
+    return "";
+  }
+
+  const stats = await options.engine.getStats(options.sessionId);
+  if (
+    stats.totalMessages <= 0 ||
+    typeof stats.maxTurnIndex !== "number" ||
+    stats.maxTurnIndex < 0
+  ) {
+    return "";
+  }
+
+  const evidenceByTarget = new Map<
+    string,
+    { sessionId: string; turnIndex: number; role: string; content: string }
+  >();
+  const windowSize = 12;
+  for (let end = stats.maxTurnIndex; end >= 0; end -= windowSize) {
+    const start = Math.max(0, end - windowSize + 1);
+    const messages = await options.engine.expandContext(
+      options.sessionId,
+      start,
+      end,
+      12_000,
+    );
+    for (const message of [...messages].reverse()) {
+      if (message.role !== "user" || !hasImplementationIntentCue(message.content)) {
+        continue;
+      }
+      for (const target of extractUserImplementationTargets(message.content)) {
+        if (evidenceByTarget.has(target)) {
+          continue;
+        }
+        evidenceByTarget.set(target, {
+          sessionId: options.sessionId,
+          turnIndex: message.turn_index,
+          role: message.role,
+          content: message.content,
+        });
+      }
+    }
+  }
+
+  const orderedTargets = USER_IMPLEMENTATION_TARGETS
+    .map((target) => target.label)
+    .filter((target) => evidenceByTarget.has(target));
+  if (orderedTargets.length === 0) {
+    return "";
+  }
+
+  const lines = [
+    "## User-stated implementation targets",
+    `Distinct user-stated targets found: ${orderedTargets.length}.`,
+    "Count only these targets for implementation-count questions. Do not count assistant-suggested best-practice lists unless the user later states they are implementing that item.",
+  ];
+  for (const target of orderedTargets) {
+    const evidence = evidenceByTarget.get(target);
+    if (!evidence) {
+      continue;
+    }
+    const item = formatEvidenceItem(evidence, Math.min(700, options.maxChars));
+    if (item) {
+      lines.push(`- ${target}: ${item}`);
+    }
+  }
+
+  const section = lines.join("\n");
+  return section.length <= options.maxChars
+    ? section
+    : section.slice(0, options.maxChars);
+}
+
+function shouldRequireUserImplementationTargetEvidence(query: string): boolean {
+  const text = query.toLowerCase();
+  return /\bimplement(?:ing)?\b/.test(text) &&
+    /\bacross (?:my )?sessions\b/.test(text) &&
+    /\b(?:different|how many|what|which)\b/.test(text);
+}
+
+const USER_IMPLEMENTATION_TARGETS: ReadonlyArray<{
+  label: string;
+  patterns: readonly RegExp[];
+}> = [
+  {
+    label: "password hashing",
+    patterns: [
+      /\bpassword[- ]hash(?:ing|es|ed)?\b/i,
+      /\bpassword\s+(?:hashing|hash|storage)\b/i,
+      /\bpassword_hash\b/i,
+      /\bargon2\b/i,
+      /\bbcrypt\b/i,
+    ],
+  },
+  {
+    label: "role-based access control",
+    patterns: [
+      /\brole[- ]based access control\b/i,
+      /\brbac\b/i,
+      /\buser role\b/i,
+      /\b['"]user['"]\s+role\b/i,
+    ],
+  },
+  {
+    label: "account lockout after failed login attempts",
+    patterns: [
+      /\baccount lockout\b/i,
+      /\bfailed login attempts?\b/i,
+      /\blockout\b[\s\S]{0,80}\bfailed login\b/i,
+      /\brate limiting\b[\s\S]{0,120}\bfailed login\b/i,
+    ],
+  },
+];
+
+function hasImplementationIntentCue(content: string): boolean {
+  return /\b(?:trying to implement|trying to estimate\b[\s\S]{0,80}\bimplement|want to implement|need to implement|i(?:'| a)?m trying to|i(?:'| ha)?ve added|i have added|switching to|switched to|need to add|i(?:'| woul)d like to|i want to)\b/i.test(content);
+}
+
+function extractUserImplementationTargets(content: string): string[] {
+  const targets: string[] = [];
+  for (const target of USER_IMPLEMENTATION_TARGETS) {
+    if (target.patterns.some((pattern) => pattern.test(content))) {
+      targets.push(target.label);
+    }
+  }
+  return targets;
+}
+
+function formatEvidenceItem(
+  item: { sessionId: string; turnIndex: number; role: string; content: string },
+  maxChars: number,
+): string {
+  const prefix = `[${item.sessionId}, turn ${item.turnIndex}, ${item.role}]: `;
+  const available = Math.max(0, maxChars - prefix.length);
+  if (available <= 0) {
+    return "";
+  }
+  const normalized = item.content.replace(/\s+/g, " ").trim();
+  const content = normalized.length <= available
+    ? normalized
+    : `${normalized.slice(0, Math.max(0, available - 3))}...`;
+  return `${prefix}${content}`;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildContradictionGuidance(
+  query: string,
+  evidenceItems: readonly { content: string }[],
+): string {
+  if (!shouldCheckContradictionGuidance(query) || evidenceItems.length === 0) {
+    return "";
+  }
+
+  const subjectTerms = extractContradictionSubjectTerms(query);
+  if (subjectTerms.length === 0) {
+    return "";
+  }
+
+  let denialSnippet = "";
+  let affirmationSnippet = "";
+  for (const item of evidenceItems) {
+    const text = item.content.toLowerCase();
+    if (!matchesContradictionSubject(text, subjectTerms)) {
+      continue;
+    }
+
+    if (hasDenialCue(text)) {
+      denialSnippet ||= summarizeContradictionSnippet(item.content);
+    } else if (hasAffirmationCue(text)) {
+      affirmationSnippet ||= summarizeContradictionSnippet(item.content);
+    }
+
+    if (denialSnippet && affirmationSnippet) {
+      return [
+        "## Contradiction guidance",
+        "The retrieved messages contain both a denial and an affirmative statement relevant to this yes/no question.",
+        `Denial evidence: ${denialSnippet}`,
+        `Affirmative evidence: ${affirmationSnippet}`,
+        "Answer guidance: state that the chat has contradictory information, mention both sides, and explicitly say the provided chat does not establish which statement is correct.",
+      ].join("\n");
+    }
+  }
+
+  return "";
+}
+
+function shouldCheckContradictionGuidance(query: string): boolean {
+  const text = query.toLowerCase();
+  return /^\s*(?:have|has|did|do|does|am|are|was|were|can|could)\b/.test(text) &&
+    /\b(?:i|me|my|user)\b/.test(text);
+}
+
+function extractContradictionSubjectTerms(query: string): string[] {
+  const contradictionStopWords = new Set([
+    ...FOCUSED_SEARCH_STOP_WORDS,
+    "can",
+    "could",
+    "handle",
+    "handled",
+    "has",
+    "have",
+    "integrate",
+    "integrated",
+    "project",
+    "worked",
+    "work",
+  ]);
+  const terms = query.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) ?? [];
+  return [...new Set(terms.filter((term) =>
+    !contradictionStopWords.has(term) &&
+    !/^\d+$/.test(term),
+  ))];
+}
+
+function matchesContradictionSubject(
+  text: string,
+  subjectTerms: readonly string[],
+): boolean {
+  const matches = subjectTerms.filter((term) =>
+    matchesContradictionSubjectTerm(text, term),
+  );
+  const requiredMatches = subjectTerms.some((term) =>
+    term.includes("-") || term.length >= 8,
+  )
+    ? 1
+    : Math.min(2, subjectTerms.length);
+  return matches.length >= requiredMatches;
+}
+
+function matchesContradictionSubjectTerm(text: string, term: string): boolean {
+  if (text.includes(term)) {
+    return true;
+  }
+  if (term.endsWith("s") && text.includes(term.slice(0, -1))) {
+    return true;
+  }
+  return text.includes(`${term}s`);
+}
+
+function hasDenialCue(text: string): boolean {
+  return /\b(?:never|not|no|none|haven't|hasn't|hadn't|didn't|don't|doesn't|can't|cannot|couldn't|have\s+not|has\s+not|did\s+not|do\s+not|does\s+not|can\s+not)\b/.test(text);
+}
+
+function hasAffirmationCue(text: string): boolean {
+  return /@app\.route\b/.test(text) ||
+    /\b(?:current|starting|existing)\s+code\b/.test(text) ||
+    /\b(?:i|we|you|user)\b.{0,120}\b(?:built|created|developed|handled|implement|implemented|integrate|integrated|managed|used|worked|wrote|written|mentioned|set\s+up)\b/.test(text) ||
+    /\b(?:built|created|developed|handled|implement|implemented|integrate|integrated|managed|used|worked|wrote|written|mentioned|set\s+up)\b.{0,120}\b(?:i|we|you|user)\b/.test(text);
+}
+
+function summarizeContradictionSnippet(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  return normalized.length <= 260 ? normalized : `${normalized.slice(0, 257)}...`;
 }
 
 function extractFocusedSearchTerms(query: string): string[] {

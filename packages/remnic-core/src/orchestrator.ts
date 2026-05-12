@@ -304,6 +304,7 @@ import {
   CompoundingEngine,
   defaultTierMigrationCycleBudget,
 } from "./compounding/engine.js";
+import { parseFlexibleIsoTimestamp } from "./utils/iso-timestamp.js";
 // IRC preference consolidation — used by eval adapter directly;
 // orchestrator integration planned for future PR.
 // import { consolidatePreferences, buildQueryAwarePreferenceSection, synthesizePreferencesFromLcm } from "./compounding/preference-consolidator.js";
@@ -700,6 +701,131 @@ export function sanitizeSessionKeyForFilename(sessionKey: string): string {
     .digest("hex")
     .slice(0, 12);
   return `${readable}-${hash}`;
+}
+
+function latestSourceValidAtFromTurns(turns: readonly BufferTurn[]): string | undefined {
+  let latestMs: number | null = null;
+  for (const turn of turns) {
+    if (turn.extractionContextOnly === true) continue;
+    if (typeof turn.sourceValidAt !== "string") continue;
+    const parsed = parseFlexibleIsoTimestamp(turn.sourceValidAt.trim());
+    if (parsed === null) continue;
+    if (latestMs === null || parsed > latestMs) {
+      latestMs = parsed;
+    }
+  }
+  return latestMs === null ? undefined : new Date(latestMs).toISOString();
+}
+
+function sourceValidAtMs(turn: BufferTurn): number | null {
+  if (typeof turn.sourceValidAt !== "string") return null;
+  return parseFlexibleIsoTimestamp(turn.sourceValidAt.trim());
+}
+
+const SOURCE_VALID_AT_CONTEXT_TURNS = 2;
+
+function sourceValidAtSliceKey(turn: BufferTurn, index: number): string {
+  const validAtMs = sourceValidAtMs(turn);
+  return validAtMs === null ? `unknown:${index}` : String(validAtMs);
+}
+
+function asExtractionContextTurn(turn: BufferTurn): BufferTurn {
+  return { ...turn, extractionContextOnly: true };
+}
+
+function asExtractionTargetTurn(turn: BufferTurn): BufferTurn {
+  const { extractionContextOnly: _contextOnly, ...targetTurn } = turn;
+  return targetTurn;
+}
+
+function sourceValidAtContextTurns(
+  turns: readonly BufferTurn[],
+  targetStart: number,
+  targetEnd: number,
+  targetValidAtMs: number | null,
+): BufferTurn[] {
+  if (targetValidAtMs === null) return [];
+  return turns
+    .flatMap((turn, index) => {
+      if (index >= targetStart && index < targetEnd) return [];
+      const contextValidAtMs = sourceValidAtMs(turn);
+      if (contextValidAtMs === null || contextValidAtMs > targetValidAtMs) {
+        return [];
+      }
+      return [{ turn, index, validAtMs: contextValidAtMs }];
+    })
+    .sort((a, b) => {
+      if (a.validAtMs < b.validAtMs) return -1;
+      if (a.validAtMs > b.validAtMs) return 1;
+      if (a.index === b.index) return 0;
+      return a.index < b.index ? -1 : 1;
+    })
+    .slice(-SOURCE_VALID_AT_CONTEXT_TURNS)
+    .map(({ turn }) => asExtractionContextTurn(turn));
+}
+
+function targetSourceValidAtSortMs(turns: readonly BufferTurn[]): number {
+  let latestMs: number | null = null;
+  for (const turn of turns) {
+    if (turn.extractionContextOnly === true) continue;
+    const validAtMs = sourceValidAtMs(turn);
+    if (validAtMs === null) continue;
+    if (latestMs === null || validAtMs > latestMs) {
+      latestMs = validAtMs;
+    }
+  }
+  return latestMs ?? Number.POSITIVE_INFINITY;
+}
+
+function sortSourceValidAtSlicesChronologically(
+  slices: BufferTurn[][],
+): BufferTurn[][] {
+  return slices
+    .map((turns, order) => ({
+      turns,
+      order,
+      targetValidAtMs: targetSourceValidAtSortMs(turns),
+    }))
+    .sort((a, b) => {
+      if (a.targetValidAtMs < b.targetValidAtMs) return -1;
+      if (a.targetValidAtMs > b.targetValidAtMs) return 1;
+      if (a.order === b.order) return 0;
+      return a.order < b.order ? -1 : 1;
+    })
+    .map((slice) => slice.turns);
+}
+
+function splitTurnsBySourceValidAt(turns: readonly BufferTurn[]): BufferTurn[][] {
+  if (turns.length === 0) return [];
+  if (!turns.some((turn) => sourceValidAtMs(turn) !== null)) {
+    return [[...turns]];
+  }
+
+  const slices: BufferTurn[][] = [];
+  let start = 0;
+  while (start < turns.length) {
+    const targetValidAtMs = sourceValidAtMs(turns[start]);
+    const activeKey = sourceValidAtSliceKey(turns[start], start);
+    let end = start + 1;
+    while (
+      end < turns.length &&
+      sourceValidAtSliceKey(turns[end], end) === activeKey
+    ) {
+      end += 1;
+    }
+
+    slices.push([
+      ...sourceValidAtContextTurns(
+        turns,
+        start,
+        end,
+        targetValidAtMs,
+      ),
+      ...turns.slice(start, end).map(asExtractionTargetTurn),
+    ]);
+    start = end;
+  }
+  return sortSourceValidAtSlicesChronologically(slices);
 }
 
 export function isArtifactMemoryPath(filePath: string): boolean {
@@ -10233,6 +10359,7 @@ export class Orchestrator {
         role: turn.role,
         content: turn.content,
         timestamp: turn.timestamp,
+        sourceValidAt: turn.sourceValidAt,
         sessionKey: key,
         parts: turn.parts,
         rawContent: turn.rawContent,
@@ -10241,7 +10368,12 @@ export class Orchestrator {
       bySession.set(key, list);
     }
 
-    const replayTasks: Array<Promise<void>> = [];
+    const replaySlices: Array<{
+      bufferKey: string;
+      order: number;
+      targetValidAtMs: number;
+      turns: BufferTurn[];
+    }> = [];
     for (const [key, sessionTurns] of bySession.entries()) {
       if (sessionTurns.length === 0) continue;
       if (options.archiveLcm !== false && this.lcmEngine?.enabled) {
@@ -10256,19 +10388,37 @@ export class Orchestrator {
           })),
         );
       }
-      replayTasks.push(
-        new Promise<void>((resolve, reject) => {
-          void this.queueBufferedExtraction(sessionTurns, "trigger_mode", {
-            skipDedupeCheck: true,
-            clearBufferAfterExtraction: false,
-            skipCharThreshold: true,
-            bufferKey: key,
-            extractionDeadlineMs: options.deadlineMs,
-            onTaskSettled: (err) => (err ? reject(err) : resolve()),
-          }).catch(reject);
-        }),
-      );
+      for (const sessionSlice of splitTurnsBySourceValidAt(sessionTurns)) {
+        replaySlices.push({
+          bufferKey: key,
+          order: replaySlices.length,
+          targetValidAtMs: targetSourceValidAtSortMs(sessionSlice),
+          turns: sessionSlice,
+        });
+      }
     }
+
+    const replayTasks = replaySlices
+      .sort((a, b) => {
+        if (a.targetValidAtMs < b.targetValidAtMs) return -1;
+        if (a.targetValidAtMs > b.targetValidAtMs) return 1;
+        if (a.order === b.order) return 0;
+        return a.order < b.order ? -1 : 1;
+      })
+      .map(
+        ({ bufferKey, turns: sessionSlice }) =>
+          new Promise<void>((resolve, reject) => {
+            void this.queueBufferedExtraction(sessionSlice, "trigger_mode", {
+              skipDedupeCheck: true,
+              clearBufferAfterExtraction: false,
+              skipCharThreshold: true,
+              skipUserTurnThreshold: true,
+              bufferKey,
+              extractionDeadlineMs: options.deadlineMs,
+              onTaskSettled: (err) => (err ? reject(err) : resolve()),
+            }).catch(reject);
+          }),
+      );
     if (replayTasks.length > 0) {
       const settled = await Promise.allSettled(replayTasks);
       const firstRejected = settled.find(
@@ -10363,6 +10513,7 @@ export class Orchestrator {
         role: turn.role,
         content: turn.content,
         timestamp: turn.timestamp,
+        sourceValidAt: turn.timestamp,
         sessionKey,
         parts: turn.parts,
         rawContent: turn.rawContent,
@@ -10384,17 +10535,29 @@ export class Orchestrator {
       );
     }
 
-    await new Promise<void>((resolve, reject) => {
-      void this.queueBufferedExtraction(sessionTurns, "trigger_mode", {
-        skipDedupeCheck: true,
-        clearBufferAfterExtraction: false,
-        skipCharThreshold: true,
-        bufferKey: sessionKey,
-        extractionDeadlineMs: options.deadlineMs,
-        writeNamespaceOverride: this.bulkImportWriteNamespace(),
-        onTaskSettled: (err) => (err ? reject(err) : resolve()),
-      }).catch(reject);
-    });
+    const importTasks = splitTurnsBySourceValidAt(sessionTurns).map(
+      (sessionSlice) =>
+        new Promise<void>((resolve, reject) => {
+          void this.queueBufferedExtraction(sessionSlice, "trigger_mode", {
+            skipDedupeCheck: true,
+            clearBufferAfterExtraction: false,
+            skipCharThreshold: true,
+            skipUserTurnThreshold: true,
+            bufferKey: sessionKey,
+            extractionDeadlineMs: options.deadlineMs,
+            writeNamespaceOverride: this.bulkImportWriteNamespace(),
+            onTaskSettled: (err) => (err ? reject(err) : resolve()),
+          }).catch(reject);
+        }),
+    );
+    const settled = await Promise.allSettled(importTasks);
+    const firstRejected = settled.find(
+      (result): result is PromiseRejectedResult =>
+        result.status === "rejected",
+    );
+    if (firstRejected) {
+      throw firstRejected.reason;
+    }
   }
 
   async observeSessionHeartbeat(
@@ -10474,6 +10637,7 @@ export class Orchestrator {
       skipDedupeCheck?: boolean;
       clearBufferAfterExtraction?: boolean;
       skipCharThreshold?: boolean;
+      skipUserTurnThreshold?: boolean;
       extractionDeadlineMs?: number;
       onTaskSettled?: (error?: unknown) => void;
       bufferKey?: string;
@@ -10504,6 +10668,7 @@ export class Orchestrator {
           clearBufferAfterExtraction:
             options.clearBufferAfterExtraction ?? true,
           skipCharThreshold: options.skipCharThreshold ?? false,
+          skipUserTurnThreshold: options.skipUserTurnThreshold ?? false,
           deadlineMs: options.extractionDeadlineMs,
           bufferKey,
           abortSignal: options.abortSignal,
@@ -10650,6 +10815,7 @@ export class Orchestrator {
     options: {
       clearBufferAfterExtraction?: boolean;
       skipCharThreshold?: boolean;
+      skipUserTurnThreshold?: boolean;
       deadlineMs?: number;
       bufferKey?: string;
       abortSignal?: AbortSignal;
@@ -10667,6 +10833,7 @@ export class Orchestrator {
     const clearBufferAfterExtraction =
       options.clearBufferAfterExtraction ?? true;
     const skipCharThreshold = options.skipCharThreshold ?? false;
+    const skipUserTurnThreshold = options.skipUserTurnThreshold ?? false;
     const deadlineMs =
       typeof options.deadlineMs === "number" &&
       Number.isFinite(options.deadlineMs)
@@ -10709,16 +10876,26 @@ export class Orchestrator {
         content: t.content.trim().slice(0, this.config.extractionMaxTurnChars),
       }))
       .filter((t) => t.content.length > 0);
+    const targetTurns = normalizedTurns.filter(
+      (turn) => turn.extractionContextOnly !== true,
+    );
+    if (targetTurns.length === 0) {
+      log.debug("skipping extraction: no non-context turns after normalization");
+      await clearBuffer();
+      return;
+    }
+    const sourceValidAt = latestSourceValidAtFromTurns(targetTurns);
     throwIfDeadlineExceeded("before_extract");
     throwIfAborted("before_extract");
 
-    const userTurns = normalizedTurns.filter((t) => t.role === "user");
-    const totalChars = normalizedTurns.reduce(
+    const userTurns = targetTurns.filter((t) => t.role === "user");
+    const totalChars = targetTurns.reduce(
       (sum, t) => sum + t.content.length,
       0,
     );
     const belowCharThreshold = totalChars < this.config.extractionMinChars;
     const belowUserTurnThreshold =
+      !skipUserTurnThreshold &&
       userTurns.length < this.config.extractionMinUserTurns;
     if ((!skipCharThreshold && belowCharThreshold) || belowUserTurnThreshold) {
       log.debug(
@@ -10742,11 +10919,11 @@ export class Orchestrator {
             defaultNamespaceForPrincipal(principal, this.config),
           );
     const storage = await this.storageRouter.storageFor(selfNamespace);
-    const shouldPersistProcessedFingerprint = normalizedTurns.some(
+    const shouldPersistProcessedFingerprint = targetTurns.some(
       (turn) => turn.persistProcessedFingerprint === true,
     );
     const extractionFingerprint = this.buildExtractionFingerprint(
-      normalizedTurns,
+      targetTurns,
       bufferKey,
     );
     let meta =
@@ -10825,7 +11002,7 @@ export class Orchestrator {
       result,
       storage,
       threadIdForExtraction,
-      { sessionKey, principal },
+      { sessionKey, principal, validAt: sourceValidAt },
     );
     meta ??= await storage.loadMeta();
     if (extractionFingerprint && shouldPersistProcessedFingerprint) {
@@ -11300,7 +11477,7 @@ export class Orchestrator {
     result: ExtractionResult,
     storage: StorageManager,
     threadIdForExtraction?: string | null,
-    sourceContext?: { sessionKey?: string; principal?: string },
+    sourceContext?: { sessionKey?: string; principal?: string; validAt?: string },
   ): Promise<string[]> {
     // Inline source attribution (issue #369). When enabled, every extracted
     // fact is rewritten to carry a compact provenance tag inside its body so
@@ -11333,6 +11510,8 @@ export class Orchestrator {
       // to avoid a maintenance hazard where the two guard paths could diverge.
       return attachCitation(content, citationContext, citationTemplate);
     };
+    const supersessionOrderingAt = (validAt?: string): string =>
+      validAt && validAt.length > 0 ? validAt : new Date().toISOString();
     const persistedIds: string[] = [];
     const persistedIdsByStorage = new Map<
       string,
@@ -11432,6 +11611,7 @@ export class Orchestrator {
       intentActionType?: string;
       intentEntityTypes?: string[];
       memoryKind?: MemoryFrontmatter["memoryKind"];
+      validAt?: string;
       source: string;
     }): Promise<void> => {
       if (
@@ -11562,25 +11742,26 @@ export class Orchestrator {
               hashDedupLookupComplete = true;
               if (hashDedupMatchingFact) {
                 // Finding UvU1 (PR #402 round-11): anchor supersession to the
-                // CURRENT wall-clock time, not the existing fact's persisted
-                // `created`.  The matching fact may be an old shared copy whose
-                // `created` predates the incoming promotion event — using it as
+                // incoming event's time, not the existing fact's persisted
+                // `created`.  For source-dated replay/import, this is the
+                // source valid_at; otherwise it is the current wall-clock. The
+                // matching fact may be an old shared copy whose `created`
+                // predates the incoming promotion event — using it as
                 // `createdAt` would make the new memory appear older than the
                 // existing one, preventing supersession from firing.
                 // PR #402 round-12 (Finding Uyui): the matching fact is an
                 // existing OLD memory — its persisted `frontmatter.created` is
                 // stale relative to the incoming promotion event.  Pass
                 // `useCallerTimestamp: true` so the function uses
-                // `createdAt` (current wall-clock) as the ordering anchor
-                // instead of the old fact's timestamp, ensuring supersession
-                // fires correctly even when the matching fact predates
-                // conflicting candidates.
+                // `createdAt` as the ordering anchor instead of the old fact's
+                // timestamp, ensuring supersession fires correctly even when
+                // the matching fact predates conflicting candidates.
                 await applyTemporalSupersession({
                   storage: sharedStorage,
                   newMemoryId: hashDedupMatchingFact.frontmatter.id,
                   entityRef: options.entityRef,
                   structuredAttributes: options.structuredAttributes,
-                  createdAt: new Date().toISOString(),
+                  createdAt: supersessionOrderingAt(options.validAt),
                   enabled: true,
                   useCallerTimestamp: true,
                 });
@@ -11643,6 +11824,7 @@ export class Orchestrator {
             intentActionType: options.intentActionType,
             intentEntityTypes: options.intentEntityTypes,
             memoryKind: options.memoryKind,
+            validAt: options.validAt,
             // Index the RAW content hash so hasFactContentHash(rawContent)
             // returns true on subsequent extractions. Without this, the index
             // would record the hash of citedContent (which changes every call
@@ -11668,7 +11850,7 @@ export class Orchestrator {
               newMemoryId: promotedId,
               entityRef: options.entityRef,
               structuredAttributes: options.structuredAttributes,
-              createdAt: new Date().toISOString(),
+              createdAt: supersessionOrderingAt(options.validAt),
               enabled: true,
             });
           } catch (sharedSupersessionErr) {
@@ -12452,6 +12634,7 @@ export class Orchestrator {
               intentEntityTypes: inferredIntent?.entityTypes,
               memoryKind,
               structuredAttributes: fact.structuredAttributes,
+              validAt: sourceContext?.validAt,
               contentHashSource: rawChunkedContent,
             },
           );
@@ -12487,6 +12670,7 @@ export class Orchestrator {
                 intentActionType: inferredIntent?.actionType,
                 intentEntityTypes: inferredIntent?.entityTypes,
                 memoryKind,
+                validAt: sourceContext?.validAt,
               },
             );
           }
@@ -12520,7 +12704,7 @@ export class Orchestrator {
               newMemoryId: parentId,
               entityRef: supersessionEntityRef,
               structuredAttributes: fact.structuredAttributes,
-              createdAt: new Date().toISOString(),
+              createdAt: supersessionOrderingAt(sourceContext?.validAt),
               enabled: this.config.temporalSupersessionEnabled,
             });
           } catch (err) {
@@ -12540,6 +12724,7 @@ export class Orchestrator {
             intentActionType: inferredIntent?.actionType,
             intentEntityTypes: inferredIntent?.entityTypes,
             memoryKind,
+            validAt: sourceContext?.validAt,
             source: extractionWriteSource,
           });
           // Register chunked content in hash index too.
@@ -12696,6 +12881,7 @@ export class Orchestrator {
           intentEntityTypes: inferredIntent?.entityTypes,
           memoryKind,
           structuredAttributes: fact.structuredAttributes,
+          validAt: sourceContext?.validAt,
           contentHashSource: writeCategory === "fact" ? fact.content : undefined,
         },
       );
@@ -12717,7 +12903,7 @@ export class Orchestrator {
           newMemoryId: memoryId,
           entityRef: supersessionEntityRef,
           structuredAttributes: fact.structuredAttributes,
-          createdAt: new Date().toISOString(),
+          createdAt: supersessionOrderingAt(sourceContext?.validAt),
           enabled: this.config.temporalSupersessionEnabled,
         });
       } catch (err) {
@@ -12759,6 +12945,7 @@ export class Orchestrator {
         intentActionType: inferredIntent?.actionType,
         intentEntityTypes: inferredIntent?.entityTypes,
         memoryKind,
+        validAt: sourceContext?.validAt,
         source: extractionWriteSource,
       });
       // v8.2: graph edge building (fail-open — errors caught inside GraphIndex)
@@ -12851,11 +13038,12 @@ export class Orchestrator {
         const safeFacts = Array.isArray((entity as any)?.facts)
           ? (entity as any).facts.filter((f: any) => typeof f === "string")
           : [];
-        const id = await storage.writeEntity(name, type, safeFacts, {
-          source: typeof (entity as any)?.source === "string" ? (entity as any).source : "extraction",
-          sessionKey: sourceContext?.sessionKey,
-          principal: sourceContext?.principal,
-          structuredSections: Array.isArray((entity as any)?.structuredSections)
+          const id = await storage.writeEntity(name, type, safeFacts, {
+            source: typeof (entity as any)?.source === "string" ? (entity as any).source : "extraction",
+            timestamp: sourceContext?.validAt,
+            sessionKey: sourceContext?.sessionKey,
+            principal: sourceContext?.principal,
+            structuredSections: Array.isArray((entity as any)?.structuredSections)
             ? (entity as any).structuredSections
             : undefined,
         });

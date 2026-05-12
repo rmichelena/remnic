@@ -4,7 +4,7 @@ import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseConfig } from "@remnic/core";
+import { Orchestrator, parseConfig } from "@remnic/core";
 
 import {
   buildBenchAdapterConfig,
@@ -31,6 +31,9 @@ test("direct adapter keeps its recall-friendly defaults without overrides", () =
   assert.equal(config.extractionMinUserTurns, 0);
   assert.equal(config.recallPlannerEnabled, true);
   assert.equal(config.queryExpansionEnabled, false);
+  assert.equal(config.lcmLeafBatchSize, 64);
+  assert.equal(config.lcmRollupFanIn, 8);
+  assert.equal(config.lcmFreshTailTurns, 64);
 });
 
 test("persisted baseline config stays aligned with direct adapter defaults", () => {
@@ -311,6 +314,390 @@ test("direct adapter recall expands search hits with adjacent stored results", a
     assert.match(recalled, /Environment result: trail mix/);
     assert.match(recalled, /\[arena-session, turn 1, assistant/);
     assert.ok(recalled.length <= 24_000);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter returns a sufficiency note for personal history queries without direct evidence", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-personal-history-guard", [
+      {
+        role: "user",
+        content:
+          "I'm Craig, a hands-on developer with a practical mindset, eager to build a personal budget tracker using Python and Flask.",
+      },
+      {
+        role: "assistant",
+        content: "Let's plan the current Flask budget tracker project.",
+      },
+      {
+        role: "user",
+        content: "The current project uses Flask and SQLite for transaction tracking.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-personal-history-guard",
+      "Can you tell me about my background and previous development projects?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Remnic recall sufficiency/);
+    assert.match(recalled, /No direct evidence found/);
+    assert.doesNotMatch(recalled, /hands-on developer/);
+    assert.doesNotMatch(recalled, /personal budget tracker/);
+    assert.doesNotMatch(recalled, /Flask and SQLite/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter keeps explicit prior-project evidence for personal history queries", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-personal-history-direct", [
+      {
+        role: "user",
+        content:
+          "Previous development project: I built a Django CRM before starting this budget tracker.",
+      },
+      {
+        role: "assistant",
+        content: "Noted as prior project background.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-personal-history-direct",
+      "Can you tell me about my background and previous development projects?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Search evidence/);
+    assert.match(recalled, /Previous development project: I built a Django CRM/);
+    assert.doesNotMatch(recalled, /No direct evidence found/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter keeps direct career facts for personal history queries", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-personal-history-career", [
+      {
+        role: "user",
+        content: "I worked on the Apollo app as one of my projects, and I was a designer at Acme.",
+      },
+      {
+        role: "assistant",
+        content: "Noted.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-personal-history-career",
+      "Can you tell me about my background and previous projects?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Search evidence/);
+    assert.match(recalled, /I worked on the Apollo app/);
+    assert.match(recalled, /I was a designer at Acme/);
+    assert.doesNotMatch(recalled, /No direct evidence found/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter front-loads direct temporal evidence for end-date questions", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-temporal-direct", [
+      {
+        role: "user",
+        content:
+          "The first sprint ends on March 29 and focuses on user registration and login.",
+      },
+      {
+        role: "assistant",
+        content: "The sprint plan lists March 29 as the end date.",
+      },
+      {
+        role: "user",
+        content:
+          "The first sprint now targets completion by March 31, giving two extra testing days.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-temporal-direct",
+      "When does my first sprint end?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Direct temporal evidence/);
+    const directSection = recalled.split("## Search evidence")[0] ?? recalled;
+    assert.match(directSection, /first sprint ends on March 29/);
+    assert.doesNotMatch(directSection, /March 31/);
+    assert.doesNotMatch(recalled, /## Session History/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter adds contradiction guidance when evidence contains both sides", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-contradiction-guidance", [
+      {
+        role: "user",
+        content:
+          "I have never written any Flask routes or handled HTTP requests in this project.",
+      },
+      {
+        role: "assistant",
+        content: "Noted that Flask route and request handling experience was denied.",
+      },
+      {
+        role: "user",
+        content:
+          "I'm trying to implement the basic homepage route with Flask, and I've managed to return static HTML. Here's my current code: @app.route('/') def homepage(): return render_template('homepage.html')",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-contradiction-guidance",
+      "Have I worked with Flask routes and handled HTTP requests in this project?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Contradiction guidance/);
+    assert.match(recalled, /Denial evidence:/);
+    assert.match(recalled, /Affirmative evidence:/);
+    assert.match(recalled, /does not establish which statement is correct/);
+    assert.match(recalled, /never written any Flask routes/);
+    assert.match(recalled, /trying to implement the basic homepage route/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter front-loads the latest matching numeric evidence", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-latest-quantity", [
+      {
+        role: "user",
+        content:
+          "The Git repository release notes say the main branch has 150 commits and 12 branches merged.",
+      },
+      {
+        role: "assistant",
+        content: "The older repository status lists 150 commits.",
+      },
+      {
+        role: "user",
+        content:
+          "The GitHub Actions workflow deploys on push to the main branch and reduces manual deploy errors by 90%.",
+      },
+      {
+        role: "user",
+        content:
+          "Recent growth of commits merged into the main branch has now reached 165.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-latest-quantity",
+      "How many commits have been merged into the main branch of my Git repository?",
+      24_000,
+    );
+
+    const latestSection = recalled.match(
+      /## Latest quantitative evidence[\s\S]*?(?=\n\n##|$)/,
+    )?.[0] ?? "";
+    assert.match(latestSection, /165/);
+    assert.doesNotMatch(latestSection, /150 commits/);
+    assert.doesNotMatch(latestSection, /90%/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter counts only user-stated implementation targets across sessions", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-implementation-targets", [
+      {
+        role: "user",
+        content:
+          "I'm trying to estimate the time it'll take to implement user registration with password hashing and validation.",
+      },
+      {
+        role: "assistant",
+        content:
+          "You could also consider MFA, CSRF protection, JWT rotation, security headers, and audit logging as general best practices.",
+      },
+      {
+        role: "user",
+        content:
+          "I'm trying to implement role-based access control for my application, specifically for the 'user' role.",
+      },
+      {
+        role: "assistant",
+        content:
+          "For authorization, broad best practices include RBAC, ABAC, scopes, permissions, and policy engines.",
+      },
+      {
+        role: "user",
+        content:
+          "I'm trying to implement the account lockout feature after 5 failed login attempts using Redis 7.0 for rate limiting.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-implementation-targets",
+      "How many different user roles and security features am I trying to implement across my sessions?",
+      24_000,
+    );
+
+    assert.match(recalled, /## User-stated implementation targets/);
+    assert.match(recalled, /Distinct user-stated targets found: 3/);
+    assert.match(recalled, /password hashing/);
+    assert.match(recalled, /role-based access control/);
+    assert.match(recalled, /account lockout after failed login attempts/);
+    assert.doesNotMatch(recalled, /MFA/);
+    assert.doesNotMatch(recalled, /JWT rotation/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter lists only dependencies with explicit versions", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-dependency-versions", [
+      {
+        role: "assistant",
+        content:
+          "Initial plan:\n- **Flask**: 2.3.1\n- **Flask-Login**: 0.6.2\n- **Flask-Migrate**: 3.1.0",
+      },
+      {
+        role: "assistant",
+        content:
+          "Dependencies and Versions:\n- **Flask**: 2.3.1\n- **Flask-Login**: 0.6.2\n- **Flask-Migrate**: 4.0.3\n- **SQLite**: 3.39",
+      },
+      {
+        role: "assistant",
+        content:
+          "Other referenced tools include Matplotlib, Gunicorn, React, and PostgreSQL, but no versions were specified.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-dependency-versions",
+      "Which libraries are used in this project?",
+      24_000,
+    );
+
+    assert.match(recalled, /## Versioned dependency evidence/);
+    assert.match(recalled, /Flask: 2\.3\.1/);
+    assert.match(recalled, /Flask-Login: 0\.6\.2/);
+    assert.match(recalled, /Flask-Migrate: 4\.0\.3/);
+    assert.doesNotMatch(recalled, /Flask-Migrate: 3\.1\.0/);
+    assert.match(recalled, /SQLite: 3\.39/);
+    assert.doesNotMatch(recalled, /Matplotlib/);
+    assert.doesNotMatch(recalled, /Gunicorn/);
+    assert.doesNotMatch(recalled, /React/);
+    assert.doesNotMatch(recalled, /PostgreSQL/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter leaves library recommendation prompts on general recall", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-dependency-recommendations", [
+      {
+        role: "user",
+        content:
+          "I prefer simple, minimal dependencies to keep the app lightweight and easy to maintain.",
+      },
+      {
+        role: "assistant",
+        content:
+          "Dependencies and Versions:\n- **Flask**: 2.3.1\n- **Flask-Login**: 0.6.2",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-dependency-recommendations",
+      "What libraries or tools would you suggest I use to implement these features?",
+      24_000,
+    );
+
+    assert.doesNotMatch(recalled, /## Versioned dependency evidence/);
+    assert.match(recalled, /simple, minimal dependencies/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter front-loads temporal interval calculations", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("beam-temporal-intervals", [
+      {
+        role: "assistant",
+        content:
+          "Project plan: Dec 16, 2023 - Jan 15, 2024: Develop transaction management features. Feb 16 - Mar 15, 2024: Final adjustments, testing, and deployment.",
+      },
+      {
+        role: "user",
+        content:
+          "I'm working on sprint 2 which targets analytics by April 19, and I've already completed sprint 1 on March 29 with user auth and basic transaction CRUD.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const deploymentSpan = await adapter.recall(
+      "beam-temporal-intervals",
+      "How many weeks do I have between finishing the transaction management features and the final deployment deadline?",
+      24_000,
+    );
+    assert.match(deploymentSpan, /## Temporal interval evidence/);
+    assert.match(deploymentSpan, /from January 15, 2024 till March 15, 2024 = 8 weeks and 4 days \(60 days; about 8\.6 weeks\)/);
+
+    const sprintSpan = await adapter.recall(
+      "beam-temporal-intervals",
+      "How many days were there between the end of my first sprint and the deadline for completing the analytics features in sprint 2?",
+      24_000,
+    );
+    assert.match(sprintSpan, /## Temporal interval evidence/);
+    assert.match(sprintSpan, /from March 29 till April 19 = 21 days/);
   } finally {
     await adapter.destroy();
   }
@@ -981,6 +1368,224 @@ test("direct adapter can skip replay extraction while preserving LCM recall", as
   }
 });
 
+test("direct adapter rejects historical recall when the core pipeline is disabled", async () => {
+  const adapter = await createRemnicAdapter();
+
+  try {
+    await adapter.store("bench-historical-disabled-session", [
+      {
+        role: "user",
+        content: "Historical recall should not silently use LCM-only storage.",
+      },
+    ]);
+
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "bench-historical-disabled-session",
+          "What should not silently use LCM-only storage?",
+          24_000,
+          { asOf: "2000-01-01T00:00:00.000Z" },
+        ),
+      /benchmark historical recall requires core replay extraction/,
+    );
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("runtime-backed adapter rejects historical recall when replay extraction is skipped", async () => {
+  const adapter = await createRemnicAdapter({
+    replayExtractionMode: "skip",
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    await adapter.store("beam-historical-session", [
+      {
+        role: "user",
+        content: "Future-only benchmark leak marker is cobalt-99.",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-historical-session",
+      "What is the future-only benchmark leak marker?",
+      24_000,
+    );
+    assert.match(recalled, /cobalt-99/);
+
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-historical-session",
+          "What is the future-only benchmark leak marker?",
+          24_000,
+          { asOf: "2000-01-01T00:00:00.000Z" },
+        ),
+      /benchmark historical recall requires core replay extraction/,
+    );
+
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-historical-session",
+          "What is the future-only benchmark leak marker?",
+          24_000,
+          { asOf: "not-a-date" },
+        ),
+      /benchmark recall asOf must be a valid timestamp/,
+    );
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-historical-session",
+          "What is the future-only benchmark leak marker?",
+          24_000,
+          { asOf: "2026-05-10T12:00:00" },
+        ),
+      /benchmark recall asOf must be a valid timestamp/,
+    );
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-historical-session",
+          "What is the future-only benchmark leak marker?",
+          24_000,
+          { asOf: "2026-05-10T12:00+23:00" },
+        ),
+      /benchmark recall asOf must be a valid timestamp/,
+    );
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-historical-session",
+          "What is the future-only benchmark leak marker?",
+          24_000,
+          { asOf: "2026-02-30" },
+        ),
+      /benchmark recall asOf must be a valid timestamp/,
+    );
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("runtime-backed adapter preserves source timestamps for historical recall", async () => {
+  const sandboxDir = await mkdtemp(path.join(tmpdir(), "remnic-source-time-"));
+  const adapter = await createRemnicAdapter({
+    sandboxDir,
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 999,
+    },
+  });
+
+  try {
+    await adapter.store("beam-source-time-session", [
+      {
+        role: "user",
+        content: "Source-dated launch marker is amber-31.",
+        timestamp: "1999-12-31T23:59:59Z",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const transcriptPath = path.join(
+      sandboxDir,
+      "transcripts",
+      "other",
+      "default",
+      `${new Date().toISOString().slice(0, 10)}.jsonl`,
+    );
+    const transcriptLines = (await readFile(transcriptPath, "utf8"))
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { sessionKey?: string; timestamp?: string });
+    const storedTurn = transcriptLines.find(
+      (entry) => entry.sessionKey === "beam-source-time-session",
+    );
+    assert.equal(storedTurn?.timestamp, "1999-12-31T23:59:59.000Z");
+
+    await assert.rejects(
+      () =>
+        adapter.store("beam-source-time-session", [
+          {
+            role: "user",
+            content: "Bad timestamp should be rejected.",
+            timestamp: "not-a-date",
+          },
+        ]),
+      /benchmark message timestamp must be a valid timestamp/,
+    );
+    await assert.rejects(
+      () =>
+        adapter.store("beam-source-time-session", [
+          {
+            role: "user",
+            content: "Timezone-less timestamp should be rejected.",
+            timestamp: "2026-05-10T12:00:00",
+          },
+        ]),
+      /benchmark message timestamp must be a valid timestamp/,
+    );
+    await assert.rejects(
+      () =>
+        adapter.store("beam-source-time-session", [
+          {
+            role: "user",
+            content: "Overflow timestamp should be rejected.",
+            timestamp: "2026-02-30",
+          },
+        ]),
+      /benchmark message timestamp must be a valid timestamp/,
+    );
+  } finally {
+    await adapter.destroy();
+    await rm(sandboxDir, { recursive: true, force: true });
+  }
+});
+
+test("runtime-backed adapter returns a time-safe diagnostic for empty historical recall", async () => {
+  const adapter = await createRemnicAdapter({
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    await adapter.store("beam-empty-historical-session", [
+      {
+        role: "user",
+        content: "Future-only diagnostic marker is cobalt-99.",
+        timestamp: "2026-05-10T12:00:00Z",
+      },
+    ]);
+    await adapter.drain?.();
+
+    const recalled = await adapter.recall(
+      "beam-empty-historical-session",
+      "What is the future-only diagnostic marker?",
+      24_000,
+      { asOf: "2000-01-01T00:00:00.000Z" },
+    );
+
+    assert.match(recalled, /## Remnic historical recall/);
+    assert.match(
+      recalled,
+      /No historically valid Remnic memories matched this query as of 2000-01-01T00:00:00.000Z/,
+    );
+    assert.doesNotMatch(recalled, /cobalt-99/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
 test("runtime-backed adapter preserves transcript order for stored batches", async () => {
   const adapter = await createRemnicAdapter({
     configOverrides: {
@@ -1017,6 +1622,154 @@ test("runtime-backed adapter preserves transcript order for stored batches", asy
   }
 });
 
+test("runtime-backed adapter does not turn synthetic ordering timestamps into source validity", async () => {
+  const originalIngestReplayBatch = Orchestrator.prototype.ingestReplayBatch;
+  const observedBatches: Array<Array<{ timestamp: string; sourceValidAt?: string }>> = [];
+  Orchestrator.prototype.ingestReplayBatch = async function patchedIngestReplayBatch(turns) {
+    observedBatches.push(
+      turns.map((turn) => ({
+        timestamp: turn.timestamp,
+        sourceValidAt: turn.sourceValidAt,
+      })),
+    );
+  };
+
+  const adapter = await createRemnicAdapter({
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    await adapter.store("beam-undated-bench-session", [
+      {
+        role: "user",
+        content: "Undated BEAM turn one uses synthetic transcript order only.",
+      },
+      {
+        role: "assistant",
+        content: "Undated BEAM turn two should share the replay batch.",
+      },
+    ]);
+
+    assert.equal(observedBatches.length, 1);
+    assert.equal(observedBatches[0]?.length, 2);
+    assert.equal(typeof observedBatches[0]?.[0]?.timestamp, "string");
+    assert.equal(typeof observedBatches[0]?.[1]?.timestamp, "string");
+    assert.equal(observedBatches[0]?.[0]?.sourceValidAt, undefined);
+    assert.equal(observedBatches[0]?.[1]?.sourceValidAt, undefined);
+  } finally {
+    await adapter.destroy();
+    Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
+  }
+});
+
+test("runtime-backed adapter forwards real message timestamps as source validity", async () => {
+  const originalIngestReplayBatch = Orchestrator.prototype.ingestReplayBatch;
+  const observedBatches: Array<Array<{ timestamp: string; sourceValidAt?: string }>> = [];
+  Orchestrator.prototype.ingestReplayBatch = async function patchedIngestReplayBatch(turns) {
+    observedBatches.push(
+      turns.map((turn) => ({
+        timestamp: turn.timestamp,
+        sourceValidAt: turn.sourceValidAt,
+      })),
+    );
+  };
+
+  const adapter = await createRemnicAdapter({
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    await adapter.store("beam-dated-bench-session", [
+      {
+        role: "user",
+        content: "Dated BEAM turn one has a historical source time.",
+        timestamp: "2025-01-01T00:00:00Z",
+      },
+    ]);
+
+    assert.deepEqual(observedBatches, [
+      [
+        {
+          timestamp: "2025-01-01T00:00:00.000Z",
+          sourceValidAt: "2025-01-01T00:00:00.000Z",
+        },
+      ],
+    ]);
+  } finally {
+    await adapter.destroy();
+    Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
+  }
+});
+
+test("runtime-backed adapter can batch dated replay turns without historical validity", async () => {
+  const originalIngestReplayBatch = Orchestrator.prototype.ingestReplayBatch;
+  const observedBatches: Array<Array<{ timestamp: string; sourceValidAt?: string }>> = [];
+  Orchestrator.prototype.ingestReplayBatch = async function patchedIngestReplayBatch(turns) {
+    observedBatches.push(
+      turns.map((turn) => ({
+        timestamp: turn.timestamp,
+        sourceValidAt: turn.sourceValidAt,
+      })),
+    );
+  };
+
+  const adapter = await createRemnicAdapter({
+    replaySourceValidAtMode: "batch",
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    await adapter.store("beam-dated-batch-session", [
+      {
+        role: "user",
+        content: "Dated BEAM turn one should remain in the same replay batch.",
+        timestamp: "2025-01-01T00:00:00Z",
+      },
+      {
+        role: "assistant",
+        content: "Dated BEAM turn two should not create an as-of replay slice.",
+        timestamp: "2025-01-02T00:00:00Z",
+      },
+    ]);
+
+    assert.deepEqual(observedBatches, [
+      [
+        {
+          timestamp: "2025-01-01T00:00:00.000Z",
+          sourceValidAt: undefined,
+        },
+        {
+          timestamp: "2025-01-02T00:00:00.000Z",
+          sourceValidAt: undefined,
+        },
+      ],
+    ]);
+
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "beam-dated-batch-session",
+          "What happened in the dated batch?",
+          24_000,
+          { asOf: "2025-01-03T00:00:00.000Z" },
+        ),
+      /benchmark historical recall requires core replay extraction/,
+    );
+  } finally {
+    await adapter.destroy();
+    Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
+  }
+});
+
 test("lightweight adapter suppresses real Remnic pipeline even when feature overrides are present", async () => {
   const adapter = await createLightweightAdapter({
     configOverrides: {
@@ -1043,6 +1796,16 @@ test("lightweight adapter suppresses real Remnic pipeline even when feature over
     assert.doesNotMatch(recalled, /## Remnic recall pipeline/);
     assert.doesNotMatch(recalled, /Recent Conversation/);
     assert.match(recalled, /smoke-only/);
+    await assert.rejects(
+      () =>
+        adapter.recall(
+          "agent:bench:main",
+          "What is the lightweight mode code?",
+          24_000,
+          { asOf: "2000-01-01T00:00:00.000Z" },
+        ),
+      /benchmark historical recall requires core replay extraction/,
+    );
   } finally {
     await adapter.destroy();
   }
