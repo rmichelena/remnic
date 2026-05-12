@@ -1,16 +1,31 @@
 # Remnic
+[![npm version](https://img.shields.io/npm/v/@remnic/cli)](https://www.npmjs.com/package/@remnic/cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink)](https://github.com/sponsors/joshuaswarren)
 
 Open-source memory and context for user-aware agents.
+
+Remnic is for agents that need to understand the people they work with over time.
 
 Remnic helps AI agents understand the people they work with: their preferences, projects, constraints, decisions, patterns, and definition of good. The goal is simple: agents that remember responsibly, retrieve the right context, and ask fewer unnecessary questions.
 
 Remnic is not just a memory store. It is an exploration of the systems layer around user-aware agents: scoped memory, provenance, retrieval quality, correction, boundaries, and evals.
 
-**The trace is noise. The primitive is the product.** Remnic's job is the pipeline that distills hours of agent conversation into compressed, searchable, durable memory primitives. ([How it works →](docs/trace-to-primitive.md))
+## Why this matters
 
-[![npm version](https://img.shields.io/npm/v/@remnic/cli)](https://www.npmjs.com/package/@remnic/cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink)](https://github.com/sponsors/joshuaswarren)
+Most agents do not fail because they lack another prompt. They fail because they do not understand the user, the project, the boundaries, or what “good” means in context.
+
+Remnic explores the systems layer needed for user-aware agents:
+
+- what to remember
+- where that memory applies
+- why it was retrieved
+- when it should expire
+- how users correct it
+- when the agent should ask instead of act
+- how to evaluate whether memory improved the outcome
+
+**The trace is noise. The primitive is the product.** Remnic's job is the pipeline that distills hours of agent conversation into compressed, searchable, durable memory primitives. ([How it works →](docs/trace-to-primitive.md))
 
 Creator and maintainer of Remnic: [Joshua Warren](https://github.com/joshuaswarren).
 
