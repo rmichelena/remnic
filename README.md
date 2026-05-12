@@ -29,13 +29,20 @@ Remnic explores the systems layer needed for user-aware agents:
 
 Creator and maintainer of Remnic: [Joshua Warren](https://github.com/joshuaswarren).
 
-> **Engram is now Remnic.** Canonical packages live under the `@remnic/*` scope:
-> [`@remnic/core`](https://www.npmjs.com/package/@remnic/core),
-> [`@remnic/server`](https://www.npmjs.com/package/@remnic/server),
-> [`@remnic/cli`](https://www.npmjs.com/package/@remnic/cli).
-> OpenClaw installs should use [`@remnic/plugin-openclaw`](https://www.npmjs.com/package/@remnic/plugin-openclaw).
-> The legacy `engram` CLI name remains available as a forwarder during the rename window.
-> Hermes users: [`remnic-hermes`](https://pypi.org/project/remnic-hermes/) v1.0.2 on PyPI.
+## OpenAI / Codex / MCP 
+
+Remnic exposes memory and context through HTTP and MCP surfaces and includes integrations for agentic development workflows such as Codex CLI, Claude Code, Replit, and other MCP clients.
+
+The long-term goal is to make memory inspectable, scoped, correctable, and measurable across agent workflows.
+
+## Engram -> Remnic
+ **Engram is now Remnic.** Canonical packages live under the `@remnic/*` scope:
+ [`@remnic/core`](https://www.npmjs.com/package/@remnic/core),
+ [`@remnic/server`](https://www.npmjs.com/package/@remnic/server),
+ [`@remnic/cli`](https://www.npmjs.com/package/@remnic/cli).
+ OpenClaw installs should use [`@remnic/plugin-openclaw`](https://www.npmjs.com/package/@remnic/plugin-openclaw).
+ The legacy `engram` CLI name remains available as a forwarder during the rename window.
+ Hermes users: [`remnic-hermes`](https://pypi.org/project/remnic-hermes/) v1.0.2 on PyPI.
 
 ## Support Remnic
 
