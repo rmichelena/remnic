@@ -537,7 +537,7 @@ function refineRecSysRecommendationsFromRecall(
   recalledText: string,
   recsysMapping: RecSysEntityMapping,
 ): string | undefined {
-  const recalledMovies = extractRecommendationMovies(
+  const recalledMovies = extractRecalledRecommendationMovies(
     recalledText,
     recsysMapping.movieCandidates,
     recsysMapping.aliasCounts,
@@ -551,10 +551,15 @@ function refineRecSysRecommendationsFromRecall(
     recsysMapping.movieCandidates,
     recsysMapping.aliasCounts,
   );
-  const rankedMovies = uniquePreservingOrder([
-    ...recalledMovies,
-    ...answeredMovies,
-  ]).slice(0, 20);
+  const answeredTop = answeredMovies[0];
+  const recallSupportsAnsweredTop =
+    answeredTop !== undefined &&
+    recalledMovies.some((movie) => sameOfficialAnswer(movie, answeredTop));
+  const rankedMovies = uniquePreservingOrder(
+    recallSupportsAnsweredTop
+      ? [...answeredMovies, ...recalledMovies]
+      : [...recalledMovies, ...answeredMovies],
+  ).slice(0, 20);
   if (
     rankedMovies.length === answeredMovies.length &&
     rankedMovies.every((movie, index) => movie === answeredMovies[index])
@@ -565,6 +570,39 @@ function refineRecSysRecommendationsFromRecall(
   return rankedMovies
     .map((movie, index) => `${index + 1}. ${movie}`)
     .join("\n");
+}
+
+function extractRecalledRecommendationMovies(
+  recalledText: string,
+  movieCandidates: string[],
+  aliasCounts: Map<string, number>,
+): string[] {
+  return recalledText
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => recalledRecommendationSpan(line))
+    .filter((line): line is string => line !== undefined)
+    .flatMap((line) =>
+      extractRecommendationMoviesFromLine(line, movieCandidates, aliasCounts),
+    );
+}
+
+function recalledRecommendationSpan(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  if (/^\d+[\.)]\s+/.test(trimmed)) {
+    return trimmed;
+  }
+
+  const cues = [...trimmed.matchAll(/\b(?:recommend(?:ed|s|ing|ation|ations)?|suggest(?:ed|s|ing|ion|ions)?)\b/gi)];
+  const lastCue = cues.at(-1);
+  if (lastCue?.index === undefined) {
+    return undefined;
+  }
+  return trimmed.slice(lastCue.index);
 }
 
 function uniquePreservingOrder(values: string[]): string[] {
@@ -579,6 +617,10 @@ function uniquePreservingOrder(values: string[]): string[] {
     unique.push(value);
   }
   return unique;
+}
+
+function sameOfficialAnswer(left: string, right: string): boolean {
+  return normalizeOfficialAnswer(left) === normalizeOfficialAnswer(right);
 }
 
 function rankedMemoryAgentBenchLines(
