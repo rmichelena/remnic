@@ -65,6 +65,8 @@ test("codex-cli provider invokes codex exec in an isolated benchmark mode", asyn
     "--config",
     'model_reasoning_effort="xhigh"',
     "--config",
+    'service_tier="fast"',
+    "--config",
     'approval_policy="never"',
     "--disable",
     "codex_hooks",
@@ -114,6 +116,7 @@ test("codex-cli provider defaults reasoning effort to xhigh", async () => {
     args[args.indexOf("--config") + 1],
     'model_reasoning_effort="xhigh"',
   );
+  assert.ok(args.includes('service_tier="fast"'));
 });
 
 test("codex-cli provider can use a benchmark-scoped executable env override", async () => {
@@ -440,6 +443,7 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
     assert.equal(diagnostic.provider, "codex-cli");
     assert.equal(diagnostic.model, "gpt-5.5");
     assert.equal(diagnostic.reasoningEffort, "xhigh");
+    assert.equal(diagnostic.serviceTier, "fast");
     assert.equal(diagnostic.timeoutMs, 1234);
     assert.equal("fullPrompt" in diagnostic, false);
     assert.equal((diagnostic.prompt as { userPromptChars: number }).userPromptChars, 19);

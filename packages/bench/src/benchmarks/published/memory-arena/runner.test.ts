@@ -321,3 +321,81 @@ test("MemoryArena no-responder runs do not score the live task prompt as recall"
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("MemoryArena scores item-selection objects with deterministic match metric", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
+  const datasetPath = path.join(tempDir, "shopping.jsonl");
+  let responderPrompt = "";
+
+  try {
+    await writeFile(
+      datasetPath,
+      JSON.stringify({
+        id: 11,
+        category: "shopping",
+        questions: [
+          "Options include target_asin B00-TEA, a blue ceramic mug, and target_asin B00-CUP, a red cup. Which item should be selected for the tea setup?",
+        ],
+        answers: [
+          {
+            target_asin: "B00-TEA",
+            attributes: ["blue ceramic mug"],
+          },
+        ],
+      }) + "\n",
+      "utf8",
+    );
+
+    const result = await runMemoryArenaBenchmark({
+      benchmark: memoryArenaDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return "The tea setup should use the blue ceramic mug with target_asin B00-TEA.";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond(question) {
+            responderPrompt = question;
+            return {
+              text: "target_asin: B00-TEA; attributes: blue ceramic mug",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "memory-arena-test-responder",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 0;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 0,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "judge-smoke",
+            };
+          },
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.match(responderPrompt, /item-selection task/);
+    assert.equal(task.scores.item_selection_match, 1);
+    assert.equal(task.scores.process_score, 1);
+    assert.equal(task.scores.llm_judge, 0);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

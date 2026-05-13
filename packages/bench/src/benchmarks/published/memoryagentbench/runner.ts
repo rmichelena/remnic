@@ -173,6 +173,10 @@ export async function runMemoryAgentBenchBenchmark(
           return recalledSessions.filter(Boolean).join("\n\n");
         });
         const answerRecalledText = stripVisibleCueAnchors(recalledText);
+        if (protocol === "recsys_redial" && !recsysMappingLoaded) {
+          recsysMapping = await loadRecSysEntityMapping(options.datasetDir);
+          recsysMappingLoaded = true;
+        }
         const answered = await answerBenchmarkQuestion({
           question: officialQuestion,
           recalledText: answerRecalledText,
@@ -184,12 +188,9 @@ export async function runMemoryAgentBenchBenchmark(
           question,
           recalledText: answerRecalledText,
           answeredText: answered.finalAnswer,
+          recsysMapping: protocol === "recsys_redial" ? recsysMapping : null,
         });
         const finalAnswer = refinedAnswer ?? answered.finalAnswer;
-        if (protocol === "recsys_redial" && !recsysMappingLoaded) {
-          recsysMapping = await loadRecSysEntityMapping(options.datasetDir);
-          recsysMappingLoaded = true;
-        }
         const officialScoring = scoreOfficialProtocol({
           protocol,
           actual: finalAnswer,
@@ -495,7 +496,16 @@ function refineMemoryAgentBenchAnswerFromRecall(args: {
   question: string;
   recalledText: string;
   answeredText: string;
+  recsysMapping?: RecSysEntityMapping | null;
 }): string | undefined {
+  if (args.protocol === "recsys_redial" && args.recsysMapping) {
+    return refineRecSysRecommendationsFromRecall(
+      args.answeredText,
+      args.recalledText,
+      args.recsysMapping,
+    );
+  }
+
   if (args.protocol !== "eventqa" || !/\bwhere\b/i.test(args.question)) {
     return undefined;
   }
@@ -520,6 +530,55 @@ function refineMemoryAgentBenchAnswerFromRecall(args: {
   }
 
   return undefined;
+}
+
+function refineRecSysRecommendationsFromRecall(
+  answeredText: string,
+  recalledText: string,
+  recsysMapping: RecSysEntityMapping,
+): string | undefined {
+  const recalledMovies = extractRecommendationMovies(
+    recalledText,
+    recsysMapping.movieCandidates,
+    recsysMapping.aliasCounts,
+  );
+  if (recalledMovies.length === 0) {
+    return undefined;
+  }
+
+  const answeredMovies = extractRecommendationMovies(
+    answeredText,
+    recsysMapping.movieCandidates,
+    recsysMapping.aliasCounts,
+  );
+  const rankedMovies = uniquePreservingOrder([
+    ...recalledMovies,
+    ...answeredMovies,
+  ]).slice(0, 20);
+  if (
+    rankedMovies.length === answeredMovies.length &&
+    rankedMovies.every((movie, index) => movie === answeredMovies[index])
+  ) {
+    return undefined;
+  }
+
+  return rankedMovies
+    .map((movie, index) => `${index + 1}. ${movie}`)
+    .join("\n");
+}
+
+function uniquePreservingOrder(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const key = normalizeOfficialAnswer(value);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(value);
+  }
+  return unique;
 }
 
 function rankedMemoryAgentBenchLines(
@@ -1099,6 +1158,7 @@ function extractMovieName(rawName: string): string {
   const decodedFilename = decodeUrlComponentSafely(filename);
   return decodedFilename
     .replace(/[_>]+/g, " ")
+    .replace(/\((\d{4})\s+film\)$/i, "($1)")
     .replace(/\s+/g, " ")
     .trim();
 }

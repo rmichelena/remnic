@@ -68,6 +68,7 @@ interface CodexCliDiagnosticRecord {
   provider: "codex-cli";
   model: string;
   reasoningEffort: string;
+  serviceTier: string;
   executable: string;
   timeoutMs?: number;
   workspaceBasename: string;
@@ -101,6 +102,7 @@ interface CodexCliDiagnosticHandle {
 }
 
 const DEFAULT_REASONING_EFFORT = "xhigh";
+const DEFAULT_SERVICE_TIER = "fast";
 const CODEX_CLI_STDIO_LIMIT = 64_000;
 const CODEX_CLI_PARENT_SIGNALS: NodeJS.Signals[] = [
   "SIGHUP",
@@ -172,6 +174,7 @@ class CodexCliProvider implements LlmProvider {
         config: this.config,
         request,
         reasoningEffort: this.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        serviceTier: DEFAULT_SERVICE_TIER,
       });
       const result = await this.runCodexCli(request);
       await finishCodexCliDiagnostics(diagnostics, startedAt, { result });
@@ -393,6 +396,8 @@ class CodexCliProvider implements LlmProvider {
       "--config",
       `model_reasoning_effort=${tomlString(reasoningEffort)}`,
       "--config",
+      `service_tier=${tomlString(DEFAULT_SERVICE_TIER)}`,
+      "--config",
       'approval_policy="never"',
       "--disable",
       "codex_hooks",
@@ -586,6 +591,7 @@ async function startCodexCliDiagnostics(args: {
   config: CodexCliProviderConfig;
   request: CodexCliRunRequest;
   reasoningEffort: string;
+  serviceTier: string;
 }): Promise<CodexCliDiagnosticHandle | undefined> {
   const diagnosticsDir = resolveCodexCliDiagnosticsDir(args.config);
   if (!diagnosticsDir) {
@@ -604,6 +610,7 @@ async function startCodexCliDiagnostics(args: {
       provider: "codex-cli",
       model: args.config.model,
       reasoningEffort: args.reasoningEffort,
+      serviceTier: args.serviceTier,
       executable: path.basename(args.request.executable),
       ...(args.request.timeoutMs ? { timeoutMs: args.request.timeoutMs } : {}),
       workspaceBasename: path.basename(args.request.workspacePath),

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -60,4 +63,90 @@ test("MemoryAgentBench refines EventQA destinations from recalled event evidence
   assert.equal(task.scores.official_exact_match, 1);
   assert.equal(task.scores.official_f1, 1);
   assert.equal(task.details.originalAnsweredText, "She walked to the riverside market.");
+});
+
+test("MemoryAgentBench ReDial scoring can rank mapped movies from recalled evidence", async () => {
+  const datasetDir = await mkdtemp(path.join(tmpdir(), "remnic-mab-redial-"));
+
+  try {
+    await writeFile(
+      path.join(datasetDir, "entity2id.json"),
+      JSON.stringify({
+        "http://dbpedia.org/resource/The_Matrix_(1999_film)": 1,
+        "http://dbpedia.org/resource/Titanic_(1997_film)": 2,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(datasetDir, "memoryagentbench.json"),
+      JSON.stringify([
+        {
+          context:
+            "The user asked for cyberpunk action movies. The recommender suggested The Matrix (1999) as the best fit.",
+          questions: [
+            "User: I want a cyberpunk action movie. Recommender:",
+          ],
+          answers: [["1"]],
+          metadata: {
+            source: "recsys_redial",
+            qa_pair_ids: ["redial-1"],
+            question_types: ["recommendation"],
+          },
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runMemoryAgentBenchBenchmark({
+      benchmark: memoryAgentBenchDefinition,
+      mode: "full",
+      datasetDir,
+      system: {
+        async reset() {},
+        async store() {},
+        async recall() {
+          return "The recalled ReDial evidence says to recommend The Matrix (1999).";
+        },
+        async search() {
+          return [];
+        },
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond() {
+            return {
+              text: "1. Titanic (1997)",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "mab-test-responder",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 1;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "mab-test-judge",
+            };
+          },
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.match(task.actual, /^1\. The Matrix \(1999\)/);
+    assert.equal(task.scores.official_protocol_ready, 1);
+    assert.equal(task.scores.recsys_recall_at_1, 1);
+    assert.deepEqual(task.details?.recsysGroundTruthMovies, ["The Matrix (1999)"]);
+    assert.equal(task.details?.originalAnsweredText, "1. Titanic (1997)");
+  } finally {
+    await rm(datasetDir, { recursive: true, force: true });
+  }
 });

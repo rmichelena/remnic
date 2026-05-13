@@ -140,21 +140,24 @@ export async function runPersonaMemBenchmark(
             answeredText: answered.finalAnswer,
           });
       const finalAnswer = refinedAnswer ?? answered.finalAnswer;
+      const predictedMcqOption = mcq
+        ? extractMcqFinalAnswer(finalAnswer)
+        : undefined;
+      const scoredAnswer = mcq && predictedMcqOption && mcq.options[predictedMcqOption]
+        ? mcq.options[predictedMcqOption]
+        : finalAnswer;
       const judgeResult = await llmJudgeScoreDetailed(
         options.system.judge,
         sample.userQuery,
-        finalAnswer,
+        scoredAnswer,
         sample.correctAnswer,
       );
 
       const scores: Record<string, number> = {
-        f1: f1Score(finalAnswer, sample.correctAnswer),
-        contains_answer: containsAnswer(finalAnswer, sample.correctAnswer),
+        f1: f1Score(scoredAnswer, sample.correctAnswer),
+        contains_answer: containsAnswer(scoredAnswer, sample.correctAnswer),
         search_hits: searchResults.length,
       };
-      const predictedMcqOption = mcq
-        ? extractMcqFinalAnswer(finalAnswer)
-        : undefined;
       if (mcq) {
         scores.mcq_accuracy = predictedMcqOption === mcq.correctOption ? 1 : 0;
       }
@@ -192,6 +195,7 @@ export async function runPersonaMemBenchmark(
           mcqOptions: mcq?.options,
           correctMcqOption: mcq?.correctOption,
           predictedMcqOption,
+          scoredAnswer,
           recalledLength: answerRecalledText.length,
           answeredLength: finalAnswer.length,
           recalledText: answerRecalledText,
@@ -716,6 +720,7 @@ function extractMcqFinalAnswer(response: string): string | undefined {
     /the answer is\s*([A-Z])/i,
     /answer:\s*([A-Z])\b/i,
     /\b([A-Z])\.\s*$/i,
+    /^\s*([A-Z])\s*$/i,
   ];
 
   for (const pattern of patterns) {

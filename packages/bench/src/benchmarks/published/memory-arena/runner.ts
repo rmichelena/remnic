@@ -651,6 +651,18 @@ function formatMemoryArenaQuestion(
   question: string,
   expectedAnswer: ArenaExpectedAnswer,
 ): string {
+  if (hasItemSelectionExpectation(expectedAnswer)) {
+    return [
+      "You are completing a MemoryArena item-selection task.",
+      "Use the supplied memory context and current task prompt to select the exact item requested.",
+      "Return only the selected item identifiers and distinguishing attributes from the task or memory context.",
+      "Use this format when available: target_asin: <ASIN>; attributes: <attribute1>, <attribute2>.",
+      "",
+      "Current item-selection request:",
+      question,
+    ].join("\n");
+  }
+
   if (!shouldUseGroupTravelPlanProtocol(category, expectedAnswer)) {
     return question;
   }
@@ -700,19 +712,21 @@ function scoreMemoryArenaDomainAnswer(
   predicted: string,
   expectedAnswer: ArenaExpectedAnswer,
 ): Record<string, number> {
+  const itemScore = scoreItemSelectionAnswer(predicted, expectedAnswer);
   if (!isGroupTravelPlannerCategory(category)) {
-    return {};
+    return itemScore;
   }
 
   const expectedFields = extractPlanFieldValues(expectedAnswer);
   if (expectedFields.length === 0) {
-    return {};
+    return itemScore;
   }
 
   const hits = countNonOverlappingPlanFieldHits(predicted, expectedFields);
   const planFieldRecall = hits / expectedFields.length;
 
   return {
+    ...itemScore,
     soft_process_score: hits === expectedFields.length ? 1 : 0,
     plan_field_recall: planFieldRecall,
   };
@@ -722,16 +736,95 @@ function failureMemoryArenaDomainScores(
   category: string,
   expectedAnswer: ArenaExpectedAnswer,
 ): Record<string, number> {
+  const itemScore: Record<string, number> = hasItemSelectionExpectation(expectedAnswer)
+    ? { item_selection_match: 0 }
+    : {};
   if (
     !isGroupTravelPlannerCategory(category)
     || extractPlanFieldValues(expectedAnswer).length === 0
   ) {
-    return {};
+    return itemScore;
   }
   return {
+    ...itemScore,
     plan_field_recall: 0,
     soft_process_score: 0,
   };
+}
+
+function scoreItemSelectionAnswer(
+  predicted: string,
+  expectedAnswer: ArenaExpectedAnswer,
+): Record<string, number> {
+  const expectations = extractItemSelectionExpectations(expectedAnswer);
+  if (expectations.length === 0) {
+    return {};
+  }
+
+  const predictedNormalized = normalizeItemSelectionText(predicted);
+  const hits = expectations.filter((expectation) =>
+    itemSelectionExpectationMatches(predictedNormalized, expectation),
+  ).length;
+  return {
+    item_selection_match: hits / expectations.length,
+  };
+}
+
+interface ItemSelectionExpectation {
+  targetAsin?: string;
+  attributes: string[];
+}
+
+function hasItemSelectionExpectation(answer: ArenaExpectedAnswer): boolean {
+  return extractItemSelectionExpectations(answer).length > 0;
+}
+
+function extractItemSelectionExpectations(
+  answer: ArenaExpectedAnswer,
+): ItemSelectionExpectation[] {
+  const values = Array.isArray(answer) ? answer : [answer];
+  return values
+    .filter(isValidArenaAnswerObject)
+    .map((item) => {
+      const targetAsin = typeof item.target_asin === "string" && item.target_asin.trim().length > 0
+        ? item.target_asin.trim()
+        : undefined;
+      const attributes = Array.isArray(item.attributes)
+        ? item.attributes
+            .filter((attribute): attribute is string =>
+              typeof attribute === "string" && attribute.trim().length > 0,
+            )
+            .map((attribute) => attribute.trim())
+        : [];
+      return { targetAsin, attributes };
+    })
+    .filter((item) => item.targetAsin !== undefined || item.attributes.length > 0);
+}
+
+function itemSelectionExpectationMatches(
+  predictedNormalized: string,
+  expectation: ItemSelectionExpectation,
+): boolean {
+  if (
+    expectation.targetAsin &&
+    !predictedNormalized.includes(normalizeItemSelectionText(expectation.targetAsin))
+  ) {
+    return false;
+  }
+
+  return expectation.attributes.every((attribute) =>
+    predictedNormalized.includes(normalizeItemSelectionText(attribute)),
+  );
+}
+
+function normalizeItemSelectionText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isGroupTravelPlannerCategory(category: string): boolean {
@@ -1164,11 +1257,14 @@ async function storeCompletedSubtask(
 }
 
 function scoreSubtaskSuccess(scores: Record<string, number>): number {
-  if (typeof scores.llm_judge === "number") {
-    return scores.llm_judge >= 0.5 ? 1 : 0;
+  if (typeof scores.item_selection_match === "number") {
+    return scores.item_selection_match >= 1 ? 1 : 0;
   }
   if (typeof scores.soft_process_score === "number") {
     return scores.soft_process_score >= 1 ? 1 : 0;
+  }
+  if (typeof scores.llm_judge === "number") {
+    return scores.llm_judge >= 0.5 ? 1 : 0;
   }
   if (scores.contains_answer === 1) {
     return 1;
