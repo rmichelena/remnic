@@ -164,12 +164,23 @@ CI jobs that provision OpenClaw should use
 `npm run check:openclaw-sdk-surface:required` or pass
 `-- --require --package-root <path>` so a missing SDK fails instead of skipping.
 
-Last compatibility sweep: May 7, 2026. The SDK surface check passed against
+Last compatibility sweep: May 13, 2026. The SDK surface check passed against
 `openclaw@2026.5.3`, `openclaw@2026.5.3-1`, `openclaw@2026.5.4-beta.1`,
 `openclaw@2026.5.4-beta.2`, `openclaw@2026.5.4-beta.3`,
-`openclaw@2026.5.4`, `openclaw@2026.5.5`, and `openclaw@2026.5.6`.
+`openclaw@2026.5.4`, `openclaw@2026.5.5`, `openclaw@2026.5.6`, and
+`openclaw@2026.5.12-beta.4`.
 Keep the peer range broad unless an upstream release removes a runtime surface
 Remnic actively uses.
+
+OpenClaw 2026.5.12 package-entry discovery prefers explicit built runtime
+entries for installed packages. The published Remnic adapter declares
+`openclaw.runtimeExtensions: ["./dist/index.js"]` alongside the existing
+extension entry, and its package install metadata advertises
+`openclaw.install.clawhubSpec: "clawhub:@remnic/plugin-openclaw"`,
+`openclaw.install.npmSpec: "@remnic/plugin-openclaw"`, and
+`openclaw.install.defaultChoice: "clawhub"`. That keeps OpenClaw setup,
+repair, and update flows ClawHub-first while preserving npm as the fallback
+install surface and `>=2026.4.8` as the minimum supported host range.
 
 Native memory registrars are tracked separately in
 [`docs/plugins/openclaw-native-memory-registrars.md`](../../docs/plugins/openclaw-native-memory-registrars.md).

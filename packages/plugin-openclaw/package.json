@@ -22,14 +22,20 @@
     "extensions": [
       "./dist/index.js"
     ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.4.8"
     },
     "build": {
-      "openclawVersion": "2026.5.9-beta.1",
-      "pluginSdkVersion": "2026.5.9-beta.1"
+      "openclawVersion": "2026.5.12-beta.4",
+      "pluginSdkVersion": "2026.5.12-beta.4"
     },
     "install": {
+      "clawhubSpec": "clawhub:@remnic/plugin-openclaw",
+      "npmSpec": "@remnic/plugin-openclaw",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.4.8"
     },
     "environment": {
