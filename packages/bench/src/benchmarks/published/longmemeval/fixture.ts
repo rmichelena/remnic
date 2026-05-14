@@ -4,7 +4,7 @@ interface HaystackTurn {
 }
 
 export interface LongMemEvalItem {
-  question_id: number;
+  question_id: string | number;
   question_type: string;
   question: string;
   answer: string;

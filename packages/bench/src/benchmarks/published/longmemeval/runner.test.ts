@@ -509,3 +509,90 @@ test("LongMemEval official judge prompt handles numeric question_id", async () =
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("LongMemEval official judge prompt handles abstention question ids", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-lme-abs-id-"));
+  try {
+    await writeFile(
+      path.join(tempDir, "longmemeval_oracle.json"),
+      JSON.stringify([
+        {
+          question_id: "2655_abs",
+          question_type: "single-session-user",
+          question: "What city did the user say they are moving to?",
+          answer: "The conversation does not contain the user's moving city.",
+          question_date: "2025-01-01",
+          haystack_sessions: [
+            [{ role: "user", content: "I need to pick a moving date." }],
+          ],
+          haystack_session_ids: ["move-session"],
+          haystack_dates: ["2025-01-01"],
+          answer_session_ids: ["move-session"],
+        },
+      ]),
+      "utf8",
+    );
+
+    let capturedPrompt = "";
+    const result = await runLongMemEvalBenchmark({
+      benchmark: longMemEvalDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return "I need to pick a moving date.";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond() {
+            return {
+              text: "The conversation does not say.",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "smoke-responder",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 0;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 0,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "smoke-judge",
+            };
+          },
+          async scoreBinaryPrompt(prompt) {
+            capturedPrompt = prompt;
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "smoke-judge",
+            };
+          },
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.equal(task.taskId, "q2655_abs");
+    assert.equal(task.scores.judge_accuracy, 1);
+    assert.match(capturedPrompt, /unanswerable question/);
+    assert.match(capturedPrompt, /Explanation:/);
+    assert.doesNotMatch(capturedPrompt, /Correct Answer:/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
