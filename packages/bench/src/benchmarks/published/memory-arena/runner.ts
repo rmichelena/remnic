@@ -1461,11 +1461,11 @@ function scoreSubtaskSuccess(scores: Record<string, number>): number {
   if (typeof scores.item_selection_match === "number") {
     return scores.item_selection_match >= 1 ? 1 : 0;
   }
-  if (typeof scores.soft_process_score === "number") {
-    return scores.soft_process_score >= 1 ? 1 : 0;
-  }
   if (typeof scores.llm_judge === "number") {
     return scores.llm_judge >= 0.5 ? 1 : 0;
+  }
+  if (typeof scores.soft_process_score === "number") {
+    return scores.soft_process_score >= 1 ? 1 : 0;
   }
   if (scores.contains_answer === 1) {
     return 1;
