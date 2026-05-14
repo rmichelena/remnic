@@ -1,12 +1,105 @@
-# Remnic AMB Provider
+# Remnic AMB Integration
 
-This integration lets Agent Memory Benchmark (AMB) run its own public
-ingest/retrieve/generate/judge loop while using Remnic as the memory provider.
+This directory contains Remnic adapters for Vectorize's Agent Memory
+Benchmark (AMB).
 
-## Install Into AMB
+There are two supported paths:
 
-The helper script performs the registration and sets the AMB model defaults to
-match the published Hindsight BEAM result artifacts:
+- `install.py`, `remnic.py`, and `remnic-amb-provider.mjs` register Remnic as
+  AMB's `remnic` memory provider and add a Codex-backed AMB LLM provider.
+- The existing BEAM tooling, including `run-remnic-amb.sh`,
+  `install-remnic-provider.mjs`, and `check-remnic-results.mjs`, keeps the
+  Hindsight BEAM comparison workflow available.
+
+## Official Provider Install
+
+```bash
+git clone https://github.com/vectorize-io/agent-memory-benchmark ../agent-memory-benchmark
+pnpm install
+pnpm --filter @remnic/core build
+
+python integrations/amb/install.py --amb ../agent-memory-benchmark
+
+cd ../agent-memory-benchmark
+export REMNIC_REPO=/path/to/remnic
+uv run omb providers
+```
+
+The provider should appear as `remnic`.
+
+You can also use the repository wrapper:
+
+```bash
+scripts/bench/run-amb-remnic.sh --amb ../agent-memory-benchmark --install-only
+```
+
+## PersonaMem / Codex Run
+
+Use the same public AMB process as other providers, with AMB answer and judge
+LLMs routed through Codex CLI:
+
+```bash
+cd ../agent-memory-benchmark
+export REMNIC_REPO=/path/to/remnic
+export OMB_ANSWER_LLM=codex
+export OMB_JUDGE_LLM=codex
+export OMB_ANSWER_MODEL=gpt-5.5
+export OMB_JUDGE_MODEL=gpt-5.5
+# Optional: set this when the shell default Node does not match the native
+# modules installed in the Remnic checkout.
+export REMNIC_AMB_NODE=/path/to/node22
+
+uv run omb run \
+  --dataset personamem \
+  --split 128k \
+  --memory remnic \
+  --llm codex \
+  --query-limit 20
+```
+
+Or run the same flow through the wrapper:
+
+```bash
+scripts/bench/run-amb-remnic.sh \
+  --amb ../agent-memory-benchmark \
+  --dataset personamem \
+  --split 128k \
+  --query-limit 20
+```
+
+The default `rag` mode follows AMB's normal retrieve-then-answer path. To test
+AMB `agent` mode with Remnic's native direct-answer bridge, use:
+
+```bash
+scripts/bench/run-amb-remnic.sh \
+  --amb ../agent-memory-benchmark \
+  --dataset personamem \
+  --split 128k \
+  --mode agent \
+  --query-limit 20
+```
+
+After a full run, add `--verify-sota` to compare the produced result JSON
+against AMB's current `external_results.json`:
+
+```bash
+scripts/bench/run-amb-remnic.sh \
+  --amb ../agent-memory-benchmark \
+  --dataset personamem \
+  --split 128k \
+  --min-queries 2727 \
+  --verify-sota
+```
+
+Full leaderboard-style runs must remove `--query-limit`, run from clean git
+checkouts for both AMB and Remnic, preserve `outputs/.../*.json`, and use the
+same Codex CLI LLM path (`codex:gpt-5.5:xhigh:fast`) for answer generation and
+judging.
+
+## BEAM / Hindsight Workflow
+
+The legacy BEAM helper script performs registration and sets AMB model defaults
+to match the published Hindsight BEAM result artifacts:
 
 ```bash
 integrations/amb/run-remnic-amb.sh \
@@ -24,8 +117,8 @@ Use `--retrieve-only` to run AMB BEAM ingestion/retrieval and write retrieved
 contexts without answer generation or judging. Retrieval diagnostics do not
 count as leaderboard results.
 
-For local iteration runs that use the operator's Codex CLI auth instead of
-direct benchmark API keys, install the provider and check the Codex profile:
+For local BEAM iteration runs that use Codex CLI auth instead of direct
+benchmark API keys, install the provider and check the Codex profile:
 
 ```bash
 node integrations/amb/install-remnic-provider.mjs /path/to/agent-memory-benchmark
@@ -41,48 +134,12 @@ export REMNIC_AMB_PRESERVE_RUNTIME_DEFAULTS=false
 node integrations/amb/check-remnic-run.mjs /path/to/agent-memory-benchmark
 ```
 
-The installer also registers an AMB LLM provider named `codex_cli`. Codex CLI
+The BEAM installer registers an AMB LLM provider named `codex_cli`. Codex CLI
 runs are useful for improvement loops and smoke checks, but they are not a
 replacement for a public-comparable run unless the target leaderboard uses the
 same answer and judge model setup.
 
-Manual setup:
-
-From an `agent-memory-benchmark` checkout:
-
-```bash
-cp /path/to/remnic/integrations/amb/remnic_provider.py src/memory_bench/memory/remnic.py
-```
-
-Then add Remnic to `src/memory_bench/memory/__init__.py`:
-
-```python
-from .remnic import RemnicMemoryProvider
-
-REGISTRY["remnic"] = RemnicMemoryProvider
-```
-
-Build Remnic's benchmark package before running:
-
-```bash
-cd /path/to/remnic
-pnpm --filter @remnic/bench build
-```
-
-## Run
-
-```bash
-cd /path/to/agent-memory-benchmark
-export REMNIC_REPO_ROOT=/path/to/remnic
-export GEMINI_API_KEY=...
-OMB_ANSWER_LLM=gemini \
-OMB_ANSWER_MODEL=gemini-3.1-pro-preview \
-OMB_JUDGE_LLM=gemini \
-OMB_JUDGE_MODEL=gemini-2.5-flash-lite \
-uv run omb run --dataset beam --split 100k --memory remnic --mode rag --name remnic
-```
-
-## Check Against Public Best
+## BEAM Public Best Check
 
 After running AMB, compare Remnic's BEAM result files against AMB's current
 `results-manifest.json`:
@@ -109,61 +166,40 @@ a result for the same split.
 
 ## Publishable SOTA Checklist
 
-A Remnic BEAM result is publishable/comparable only when all of these are true:
-
 1. The run uses AMB's normal `omb run` answer/generate/judge loop, not
    `--retrieve-only`, `--skip-answer`, or a separate local scorer.
-2. The result artifact is for `dataset: "beam"` and the requested split.
-3. `total_queries` equals the current public full split count in AMB's
-   `results-manifest.json` unless the audit explicitly passes
-   `--allow-extra-queries`.
-4. `answer_llm` is `gemini:gemini-3.1-pro-preview` and `judge_llm` is
-   `gemini:gemini-2.5-flash-lite`, matching the published Hindsight BEAM
-   artifacts, unless the comparison explicitly declares a different model pair.
+2. The result artifact is for the intended dataset and split.
+3. `total_queries` covers the public full split unless the audit explicitly
+   passes `--allow-extra-queries`.
+4. The result declares the answer and judge LLM IDs used by the comparison.
 5. The result strictly beats the current public best for every requested split,
    unless the reporting context explicitly accepts ties with `--allow-equal`.
-6. `integrations/amb/check-remnic-results.mjs` exits successfully for the exact
-   artifact paths that will be published.
+6. The relevant verifier exits successfully for the exact artifact paths that
+   will be published.
+7. The verifier records clean Remnic and AMB git provenance before any SOTA
+   claim is published.
 
-The helper script intentionally fails before registering Remnic or building
+The BEAM helper intentionally fails before registering Remnic or building
 `@remnic/bench` when an official judged run is requested without
 `GEMINI_API_KEY` or `GOOGLE_API_KEY`. `--verify` and `--retrieve-only` remain
 keyless diagnostics, but their artifacts are not leaderboard evidence.
 
-Useful diagnostic limits:
-
-```bash
-uv run omb run --dataset beam --split 100k --memory remnic --mode rag --query-limit 20 --name remnic-100k-smoke
-```
-
-Gemini-free retrieval diagnostic:
-
-```bash
-integrations/amb/run-remnic-amb.sh \
-  --amb-dir /path/to/agent-memory-benchmark \
-  --split 100k \
-  --query-limit 20 \
-  --name remnic-100k-retrieval-smoke \
-  --retrieve-only
-```
-
 ## Notes
 
-- AMB owns answer generation and judging. Remnic only implements the memory
-  provider `ingest()` and `retrieve()` contract.
-- The bridge uses Remnic's full `@remnic/bench` direct adapter by default.
-- AMB passes its per-run `store_dir` into the Remnic bridge, so the memory
-  state used for an output artifact is isolated under the AMB output tree.
-- The provider derives the dataset name from AMB's `store_dir` and prefixes
-  Remnic sessions with it, e.g. BEAM conversations use `beam-...` session IDs.
-  Set `REMNIC_AMB_SESSION_PREFIX` only when running outside AMB's normal output
-  layout.
-- `REMNIC_AMB_PRESERVE_RUNTIME_DEFAULTS=0` is available only for diagnostics;
-  leave it unset for public-comparable runs so the full Remnic stack is used.
-- Published Hindsight BEAM artifacts currently use `gemini-3.1-pro-preview`
-  for answer generation and `gemini-2.5-flash-lite` for judging.
-- The current AMB CLI registers `rag`, `agentic-rag`, and `agent` response
-  modes. Some existing published artifacts are stored under `single-query`;
-  that is not a registered mode in the current upstream checkout.
-- Set `REMNIC_AMB_CONFIG_JSON` to pass Remnic config overrides as JSON.
-- Set `REMNIC_AMB_RECALL_BUDGET_CHARS` to control returned recall context size.
+- `REMNIC_REPO` must point at this Remnic checkout unless
+  `REMNIC_AMB_HELPER` points directly at `remnic-amb-provider.mjs`.
+- `REMNIC_AMB_NODE` can point at the Node binary matching this checkout's
+  installed native modules.
+- `REMNIC_AMB_CODEX_BIN` can point at a specific Codex CLI binary.
+- `REMNIC_AMB_CLI` can force the AMB CLI command name. The wrapper auto-detects
+  current `omb` and older `amb` command names.
+- The PersonaMem wrapper unsets `GEMINI_API_KEY` and `GOOGLE_API_KEY` before
+  invoking AMB and sets `REMNIC_AMB_FORCE_CODEX_LLM=1`, so benchmark LLM calls
+  cannot silently fall back to those providers or AMB `.env` overrides.
+- The Node helper uses `packages/remnic-core/dist/index.js`; rebuild
+  `@remnic/core` after changing core code.
+- The official provider scopes AMB `user_id` values to Remnic session ids of
+  the form `amb:<user_id>`.
+- AMB still performs answer generation and judging; these integrations only
+  register Remnic as a memory provider and, where configured, route AMB LLM
+  calls through Codex CLI.

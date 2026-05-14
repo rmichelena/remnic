@@ -29,7 +29,7 @@ Remnic explores the systems layer needed for user-aware agents:
 
 Creator and maintainer of Remnic: [Joshua Warren](https://github.com/joshuaswarren).
 
-## OpenAI / Codex / MCP 
+## OpenAI / Codex / MCP
 
 Remnic exposes memory and context through HTTP and MCP surfaces and includes integrations for agentic development workflows such as Codex CLI, Claude Code, Replit, and other MCP clients.
 
