@@ -251,6 +251,10 @@ test("MemoryArena passes the live task prompt into answer context", async () => 
     assert.match(responderContext, /Current MemoryArena task prompt/);
     assert.match(responderContext, /Product 1 options: ASIN A/);
     assert.match(responderContext, /Prior memory context/);
+    assert.doesNotMatch(
+      responderContext,
+      /Best-supported option by current rules/,
+    );
     assert.match(
       String(result.results.tasks[0]?.details?.answerContext ?? ""),
       /Product 2 options: ASIN B/,
@@ -362,6 +366,169 @@ test("MemoryArena item-selection context prioritizes compact prior environment r
     assert.doesNotMatch(responderContext, /stale old option/);
     assert.equal(result.results.tasks[0]?.scores.item_selection_match, 1);
   } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("MemoryArena item-selection context includes WebShop sidecar observations", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
+  const datasetPath = path.join(tempDir, "bundled_shopping.jsonl");
+  const sidecarPath = path.join(tempDir, "webshop-products.jsonl");
+  const previousSidecarPath =
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+  const storedMessages: string[] = [];
+  let responderContext = "";
+
+  try {
+    await writeFile(
+      datasetPath,
+      JSON.stringify({
+        id: 16,
+        category: "bundled_shopping",
+        questions: [
+          [
+            "Product 1:",
+            "### Select Base",
+            "**Goal:** Buy the cake base.",
+            "**Available Options:**",
+            "- A vanilla cake base.",
+          ].join("\n"),
+          [
+            "Product 2:",
+            "### Select Decorations",
+            "**Goal:** Compatibility notes: Vanilla pairs well with Rose.",
+            "**Preference:** Pick the highest-priced option among those compatible with the notes.",
+            "**Constraint:** Must be compatible with the previous (ground truth) products.",
+            "**Available Options:**",
+            "- A low-price chocolate sprinkle mix for cakes.",
+            "- A Dessert Rose Sprinkle Mix for cupcakes and baked goods.",
+          ].join("\n"),
+        ],
+        answers: [
+          {
+            target_asin: "BASE000001",
+            attributes: ["vanilla cake base"],
+          },
+          {
+            target_asin: "B08957C9ZH",
+            attributes: ["dessert rose", "sprinkle mix"],
+          },
+        ],
+      }) + "\n",
+      "utf8",
+    );
+    await writeFile(
+      sidecarPath,
+      [
+        JSON.stringify({
+          asin: "BASE000001",
+          name: "Vanilla Cake Base",
+          pricing: "$3.00",
+          average_rating: 4.5,
+          total_reviews: 10,
+          product_category: "Grocery & Gourmet Food > Cakes",
+        }),
+        JSON.stringify({
+          asin: "LOWPRICE01",
+          name: "Low Price Chocolate Sprinkle Mix for Cakes",
+          pricing: "$4.00",
+          average_rating: 4.9,
+          total_reviews: 50,
+          product_category: "Grocery & Gourmet Food > Sprinkles",
+        }),
+        JSON.stringify({
+          asin: "B08957C9ZH",
+          name: "Dessert Rose Sprinkle Mix for cupcakes and baked goods",
+          pricing: "$12.00",
+          average_rating: 4.2,
+          total_reviews: 9,
+          product_category: "Grocery & Gourmet Food > Sprinkles",
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS = sidecarPath;
+
+    const result = await runMemoryArenaBenchmark({
+      benchmark: memoryArenaDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store(_sessionId, messages) {
+          storedMessages.push(...messages.map((message) => message.content));
+        },
+        async recall() {
+          return storedMessages.join("\n\n");
+        },
+        async search() {
+          return [];
+        },
+        async reset() {
+          storedMessages.length = 0;
+        },
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: storedMessages.length, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond(_question, context) {
+            responderContext = context;
+            return {
+              text: "target_asin: B08957C9ZH; item: A Dessert Rose Sprinkle Mix for cupcakes and baked goods.; attributes: dessert rose, sprinkle mix",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "responder-smoke",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 0;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 0,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "judge-smoke",
+            };
+          },
+        },
+      },
+    });
+
+    assert.equal(result.results.tasks.length, 1);
+    assert.match(responderContext, /WebShop environment observations/);
+    assert.match(responderContext, /Selected WebShop product title: Vanilla Cake Base/);
+    assert.match(responderContext, /LOWPRICE01/);
+    assert.match(responderContext, /\$4\.00/);
+    assert.match(responderContext, /B08957C9ZH/);
+    assert.match(responderContext, /\$12\.00/);
+    assert.match(responderContext, /Average rating: 4\.2/);
+    assert.match(responderContext, /WebShop derived decision support/);
+    assert.match(
+      String(result.results.tasks[0]?.details?.promptQuestion ?? ""),
+      /return that option/,
+    );
+    assert.match(responderContext, /Prior selected rule labels detected: Vanilla/);
+    assert.match(
+      responderContext,
+      /Best-supported option by current rules: Option 2: A Dessert Rose Sprinkle Mix/,
+    );
+    assert.equal(
+      result.results.tasks[0]?.details?.webshopProductCatalog,
+      sidecarPath,
+    );
+    assert.equal(result.results.tasks[0]?.scores.item_selection_match, 1);
+    assert.equal(result.results.tasks[0]?.scores.process_score, 1);
+  } finally {
+    if (previousSidecarPath === undefined) {
+      delete process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+    } else {
+      process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS =
+        previousSidecarPath;
+    }
     await rm(tempDir, { recursive: true, force: true });
   }
 });
