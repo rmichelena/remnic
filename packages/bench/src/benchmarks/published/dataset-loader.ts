@@ -35,10 +35,10 @@ import {
 
 /** Canonical LongMemEval-S filenames probed by the loader, in priority order. */
 export const LONG_MEM_EVAL_DATASET_FILENAMES = Object.freeze([
+  "longmemeval_oracle.json",
   "longmemeval_s_cleaned.json",
   "longmemeval_s.json",
   "longmemeval.json",
-  "longmemeval_oracle.json",
 ]);
 
 /** Canonical LoCoMo-10 filenames probed by the loader, in priority order. */
