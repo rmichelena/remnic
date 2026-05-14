@@ -351,6 +351,7 @@ test("MemoryAgentBench ReDial datasets require entity mapping before adapter wor
         benchmark: memoryAgentBenchDefinition,
         mode: "full",
         datasetDir,
+        adapterMode: "dry-run",
         system: {
           async reset() {
             resetCalled = true;

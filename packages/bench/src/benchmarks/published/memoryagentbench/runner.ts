@@ -130,7 +130,9 @@ export async function runMemoryAgentBenchBenchmark(
   options: ResolvedRunBenchmarkOptions,
 ): Promise<BenchmarkResult> {
   const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
-  let recsysMapping: RecSysEntityMapping | null = hasRecSysRedialItems(dataset)
+  const validateRecsysMappingBeforeExecution =
+    options.adapterMode === "dry-run" && hasRecSysRedialItems(dataset);
+  let recsysMapping: RecSysEntityMapping | null = validateRecsysMappingBeforeExecution
     ? await requireRecSysEntityMapping(options.datasetDir)
     : null;
   let recsysMappingLoaded = recsysMapping !== null;
