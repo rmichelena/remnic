@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import type { BenchmarkMode, BenchmarkResult } from "./types.js";
 import { loadBenchmarkResult, listBenchmarkResults } from "./results-store.js";
+import { resolveBenchmarkRunId } from "./run-identity.js";
 
 export const BENCHMARK_REPRO_MANIFEST_FILENAME = "MANIFEST.json";
 export const BENCHMARK_REPRO_MANIFEST_SCHEMA_VERSION = 1;
@@ -55,6 +56,7 @@ export interface BenchmarkReproManifest {
   schemaVersion: number;
   generatedAt: string;
   run: {
+    id: string;
     mode?: BenchmarkMode;
     selectedBenchmarks: string[];
     runtimeProfiles: string[];
@@ -98,6 +100,7 @@ export interface BenchmarkReproManifest {
 
 export interface BuildBenchmarkReproManifestOptions {
   resultPaths?: string[];
+  runId?: string;
   selectedBenchmarks?: string[];
   runtimeProfiles?: string[];
   mode?: BenchmarkMode;
@@ -221,7 +224,13 @@ function buildGitInfo(cwd: string): BenchmarkReproManifest["git"] {
 function buildArtifactHashIdentity(manifest: Omit<BenchmarkReproManifest, "artifactHash">): unknown {
   return {
     schemaVersion: manifest.schemaVersion,
-    run: manifest.run,
+    run: {
+      ...(manifest.run.mode ? { mode: manifest.run.mode } : {}),
+      selectedBenchmarks: manifest.run.selectedBenchmarks,
+      runtimeProfiles: manifest.run.runtimeProfiles,
+      ...(manifest.run.limit !== undefined ? { limit: manifest.run.limit } : {}),
+      ...(manifest.run.seed !== undefined ? { seed: manifest.run.seed } : {}),
+    },
     git: {
       commit: manifest.git.commit,
       shortCommit: manifest.git.shortCommit,
@@ -485,6 +494,7 @@ export async function buildBenchmarkReproManifest(
     schemaVersion: BENCHMARK_REPRO_MANIFEST_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     run: {
+      id: options.runId ?? resolveBenchmarkRunId(),
       ...(options.mode ? { mode: options.mode } : {}),
       selectedBenchmarks,
       runtimeProfiles: options.runtimeProfiles ?? [],

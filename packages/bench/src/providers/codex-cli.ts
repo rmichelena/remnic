@@ -13,6 +13,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { retryFetch } from "./retry-fetch.js";
+import { resolveBenchmarkRunId } from "../run-identity.js";
 
 interface CodexCliRunRequest {
   executable: string;
@@ -62,6 +63,7 @@ interface ResponsesApiResponse {
 interface CodexCliDiagnosticRecord {
   schemaVersion: 1;
   id: string;
+  runId: string;
   startedAt: string;
   finishedAt?: string;
   durationMs?: number;
@@ -607,6 +609,7 @@ async function startCodexCliDiagnostics(args: {
     const record: CodexCliDiagnosticRecord = {
       schemaVersion: 1,
       id,
+      runId: resolveBenchmarkRunId(),
       startedAt: new Date().toISOString(),
       provider: "codex-cli",
       model: args.config.model,

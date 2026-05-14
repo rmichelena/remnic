@@ -40,6 +40,7 @@ const MANIFEST_FILENAME = "MANIFEST.json";
 type ProviderRole = "systemProvider" | "judgeProvider" | "internalProvider";
 
 interface CodexDiagnosticRecord {
+  runId?: string;
   provider?: string;
   model?: string;
   reasoningEffort?: string;
@@ -58,6 +59,7 @@ interface ReproManifest {
     dirty?: boolean;
   };
   run?: {
+    id?: string;
     mode?: string;
     runtimeProfiles?: string[];
     selectedBenchmarks?: string[];
@@ -181,6 +183,7 @@ export async function verifyPublicMatrixEvidence(
 
   if (options.requireDiagnostics ?? true) {
     const diagnosticsChecked = await validateDiagnostics(diagnosticsDir, {
+      manifestPath,
       expectedModel,
       expectedReasoningEffort,
       expectedServiceTier,
@@ -352,6 +355,13 @@ async function validateManifest(
       message: `Expected manifest run.mode=full, got ${String(manifest.run?.mode)}.`,
     });
   }
+  if (!isNonEmptyString(manifest.run?.id)) {
+    options.issues.push({
+      code: "manifest-missing-run-id",
+      path: manifestPath,
+      message: "Repro manifest must record run.id so shared Codex diagnostics can be scoped to this run.",
+    });
+  }
   if (manifest.run && Object.prototype.hasOwnProperty.call(manifest.run, "limit")) {
     options.issues.push({
       code: "manifest-limited-run",
@@ -398,12 +408,14 @@ async function validateManifest(
 async function validateDiagnostics(
   diagnosticsDir: string,
   options: {
+    manifestPath: string;
     expectedModel: string;
     expectedReasoningEffort: BenchReasoningEffort;
     expectedServiceTier: string;
     issues: PublicMatrixEvidenceIssue[];
   },
 ): Promise<number> {
+  const expectedRunId = await readManifestRunId(options.manifestPath);
   if (!fs.existsSync(diagnosticsDir)) {
     options.issues.push({
       code: "missing-codex-diagnostics",
@@ -426,6 +438,7 @@ async function validateDiagnostics(
     return 0;
   }
 
+  let checked = 0;
   for (const file of files) {
     let record: CodexDiagnosticRecord;
     try {
@@ -438,6 +451,10 @@ async function validateDiagnostics(
       });
       continue;
     }
+    if (expectedRunId && record.runId !== expectedRunId) {
+      continue;
+    }
+    checked += 1;
     if (record.provider !== "codex-cli") {
       options.issues.push({ code: "wrong-diagnostic-provider", path: file, message: `Expected provider=codex-cli, got ${String(record.provider)}.` });
     }
@@ -457,7 +474,23 @@ async function validateDiagnostics(
       options.issues.push({ code: "diagnostic-nonzero-exit", path: file, message: `Diagnostic result was status=${String(record.result?.status)} signal=${String(record.result?.signal)}.` });
     }
   }
-  return files.length;
+  if (expectedRunId && checked === 0) {
+    options.issues.push({
+      code: "missing-run-codex-diagnostics",
+      path: diagnosticsDir,
+      message: `Codex CLI diagnostics directory contains no JSON records for manifest run.id=${expectedRunId}.`,
+    });
+  }
+  return checked;
+}
+
+async function readManifestRunId(manifestPath: string): Promise<string | undefined> {
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReproManifest;
+    return isNonEmptyString(manifest.run?.id) ? manifest.run.id.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveBenchmarks(rawBenchmarks: readonly string[] | undefined): string[] {
@@ -498,6 +531,10 @@ function gitShaMatches(actual: string, expected: string): boolean {
 
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function resolveCurrentGitSha(cwd: string): string | undefined {

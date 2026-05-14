@@ -144,6 +144,7 @@ async function writeManifest(
   benchmarks: readonly string[],
   gitSha = "abc123",
   limit?: number,
+  runId = "test-public-matrix-run",
 ): Promise<void> {
   await writeJson(path.join(resultsDir, "MANIFEST.json"), {
     git: {
@@ -151,6 +152,7 @@ async function writeManifest(
       dirty: false,
     },
     run: {
+      id: runId,
       mode: "full",
       runtimeProfiles: ["real"],
       selectedBenchmarks: benchmarks,
@@ -175,7 +177,11 @@ async function writeDiagnostic(
   diagnosticsDir: string,
   overrides: Record<string, unknown> = {},
 ): Promise<void> {
-  await writeJson(path.join(diagnosticsDir, "codex-cli.json"), {
+  const fileName = typeof overrides.runId === "string"
+    ? `codex-cli-${overrides.runId}.json`
+    : "codex-cli.json";
+  await writeJson(path.join(diagnosticsDir, fileName), {
+    runId: "test-public-matrix-run",
     provider: "codex-cli",
     model: CODEX_MODEL,
     reasoningEffort: CODEX_REASONING_EFFORT,
@@ -200,6 +206,11 @@ test("verifies a complete Codex CLI public matrix evidence subset", async (t) =>
   }
   await writeManifest(resultsDir, benchmarks);
   await writeDiagnostic(diagnosticsDir);
+  await writeDiagnostic(diagnosticsDir, {
+    runId: "stale-run",
+    serviceTier: "auto",
+    error: "stale failure from previous run",
+  });
 
   const verifyPublicMatrixEvidence = await loadVerifier();
   const report = await verifyPublicMatrixEvidence({

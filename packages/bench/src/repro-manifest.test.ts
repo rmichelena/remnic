@@ -106,6 +106,7 @@ test("buildBenchmarkReproManifest hashes datasets/results and redacts secret arg
   });
 
   assert.equal(manifest.run.mode, "full");
+  assert.match(manifest.run.id, /^20[0-9]{2}-/);
   assert.deepEqual(manifest.run.runtimeProfiles, ["real"]);
   assert.equal(manifest.run.seed, 42);
   assert.deepEqual(manifest.command.argv, [
@@ -172,16 +173,19 @@ test("artifact hash ignores volatile host and command metadata", async () => {
 
   const firstManifest = await buildBenchmarkReproManifest(firstResultsDir, {
     resultPaths: [firstResultPath],
+    runId: "first-run",
     selectedBenchmarks: ["longmemeval"],
     command: { cwd: firstRoot, argv: ["bench", "run", "longmemeval"] },
   });
   const secondManifest = await buildBenchmarkReproManifest(secondResultsDir, {
     resultPaths: [secondResultPath],
+    runId: "second-run",
     selectedBenchmarks: ["longmemeval"],
     command: { cwd: secondRoot, argv: ["bench", "run", "longmemeval"] },
   });
 
   assert.notEqual(firstManifest.command.cwd, secondManifest.command.cwd);
+  assert.notEqual(firstManifest.run.id, secondManifest.run.id);
   assert.equal(firstManifest.artifactHash, secondManifest.artifactHash);
 });
 

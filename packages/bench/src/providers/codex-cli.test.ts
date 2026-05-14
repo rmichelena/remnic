@@ -408,6 +408,8 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
   const diagnosticsDir = await mkdtemp(
     path.join(os.tmpdir(), "remnic-codex-cli-diag-"),
   );
+  const previousRunId = process.env.REMNIC_BENCH_RUN_ID;
+  process.env.REMNIC_BENCH_RUN_ID = "test-public-matrix-run";
 
   try {
     const provider = createCodexCliProvider(
@@ -442,6 +444,7 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
     ) as Record<string, unknown>;
 
     assert.equal(diagnostic.provider, "codex-cli");
+    assert.equal(diagnostic.runId, "test-public-matrix-run");
     assert.equal(diagnostic.model, "gpt-5.5");
     assert.equal(diagnostic.reasoningEffort, "xhigh");
     assert.equal(diagnostic.serviceTier, "fast");
@@ -450,6 +453,11 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
     assert.equal((diagnostic.prompt as { userPromptChars: number }).userPromptChars, 19);
     assert.equal((diagnostic.result as { status: number }).status, 0);
   } finally {
+    if (previousRunId === undefined) {
+      delete process.env.REMNIC_BENCH_RUN_ID;
+    } else {
+      process.env.REMNIC_BENCH_RUN_ID = previousRunId;
+    }
     await rm(diagnosticsDir, { force: true, recursive: true });
   }
 });
