@@ -23,10 +23,16 @@ const SPECIFIER = "@remnic/" + "bench";
 const TSX_ESM_API_SPECIFIER = "tsx/esm/" + "api";
 
 let cached: BenchModule | null | undefined;
+let cachedFromLocalWorkspaceBenchSource = false;
 
 type TsxEsmApi = {
   tsImport: (specifier: string, parentURL: string) => Promise<unknown>;
 };
+
+interface BenchLoadResult {
+  module: BenchModule;
+  fromLocalWorkspaceBenchSource: boolean;
+}
 
 function resolveLocalWorkspaceBenchPaths(): {
   distEntry: string;
@@ -42,7 +48,7 @@ function resolveLocalWorkspaceBenchPaths(): {
 
 async function tryImportLocalWorkspaceBenchSource(
   err: unknown,
-): Promise<BenchModule | null> {
+): Promise<BenchLoadResult | null> {
   if (!isMissingLocalWorkspaceBenchDistError(err)) {
     return null;
   }
@@ -51,7 +57,10 @@ async function tryImportLocalWorkspaceBenchSource(
     return null;
   }
   const { tsImport } = (await import(TSX_ESM_API_SPECIFIER)) as TsxEsmApi;
-  return (await tsImport(pathToFileURL(sourceEntry).href, import.meta.url)) as BenchModule;
+  return {
+    module: (await tsImport(pathToFileURL(sourceEntry).href, import.meta.url)) as BenchModule,
+    fromLocalWorkspaceBenchSource: true,
+  };
 }
 
 function isMissingLocalWorkspaceBenchDistError(err: unknown): boolean {
@@ -82,9 +91,12 @@ function isMissingLocalWorkspaceBenchDistError(err: unknown): boolean {
   );
 }
 
-async function tryImportBench(): Promise<BenchModule | null> {
+async function tryImportBench(): Promise<BenchLoadResult | null> {
   try {
-    return (await import(SPECIFIER)) as BenchModule;
+    return {
+      module: (await import(SPECIFIER)) as BenchModule,
+      fromLocalWorkspaceBenchSource: false,
+    };
   } catch (err) {
     const localSource = await tryImportLocalWorkspaceBenchSource(err);
     if (localSource) {
@@ -108,7 +120,10 @@ async function tryImportBench(): Promise<BenchModule | null> {
  */
 export async function loadBenchModule(): Promise<BenchModule> {
   if (cached === undefined) {
-    cached = await tryImportBench();
+    const loaded = await tryImportBench();
+    cached = loaded?.module ?? null;
+    cachedFromLocalWorkspaceBenchSource =
+      loaded?.fromLocalWorkspaceBenchSource ?? false;
   }
   if (!cached) {
     throw new Error(
@@ -121,7 +136,9 @@ export async function loadBenchModule(): Promise<BenchModule> {
       "  pnpm add @remnic/bench\n",
     );
   }
-  assertBenchModuleFreshForDevelopment();
+  if (!cachedFromLocalWorkspaceBenchSource) {
+    assertBenchModuleFreshForDevelopment();
+  }
   return cached;
 }
 
@@ -132,7 +149,10 @@ export async function loadBenchModule(): Promise<BenchModule> {
  */
 export async function tryLoadBenchModule(): Promise<BenchModule | undefined> {
   if (cached === undefined) {
-    cached = await tryImportBench();
+    const loaded = await tryImportBench();
+    cached = loaded?.module ?? null;
+    cachedFromLocalWorkspaceBenchSource =
+      loaded?.fromLocalWorkspaceBenchSource ?? false;
   }
   return cached ?? undefined;
 }
