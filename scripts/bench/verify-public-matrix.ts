@@ -73,6 +73,7 @@ interface ReproManifest {
   }>;
   results?: Array<{
     benchmark?: string;
+    path?: string;
     mode?: string;
     gitSha?: string;
     taskCount?: number;
@@ -142,27 +143,62 @@ export async function verifyPublicMatrixEvidence(
   const rows: PublicMatrixEvidenceRow[] = benchmarks.map((benchmark) => ({
     benchmark,
   }));
+  const requireManifest = options.requireManifest ?? true;
+  const manifest = requireManifest
+    ? await loadReproManifest(manifestPath, issues)
+    : undefined;
 
-  const summaries = await listBenchmarkResults(resultsDir);
+  if (requireManifest && manifest) {
+    validateManifest(manifest, manifestPath, {
+      benchmarks,
+      expectedGitSha,
+      expectedRuntimeProfile,
+      issues,
+    });
+  }
+
+  const summaries = requireManifest ? [] : await listBenchmarkResults(resultsDir);
   for (const row of rows) {
-    const summary = summaries
-      .filter((candidate) => candidate.benchmark === row.benchmark)
-      .filter((candidate) => candidate.mode === "full")
-      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0];
-    if (!summary) {
+    const resultPath = manifest
+      ? resolveManifestResultPath(resultsDir, manifest, row.benchmark, issues)
+      : resolveLatestResultPath(summaries, row.benchmark);
+    if (!resultPath) {
+      if (!manifest) {
+        issues.push({
+          code: "missing-full-result",
+          benchmark: row.benchmark,
+          message: `No full-mode result found for ${row.benchmark}.`,
+        });
+      }
+      continue;
+    }
+
+    row.resultPath = resultPath;
+    let result: BenchmarkResult;
+    try {
+      result = await loadBenchmarkResult(resultPath);
+    } catch (error) {
       issues.push({
-        code: "missing-full-result",
+        code: "manifest-result-unreadable",
         benchmark: row.benchmark,
-        message: `No full-mode result found for ${row.benchmark}.`,
+        path: resultPath,
+        message: `Could not load manifest result: ${error instanceof Error ? error.message : String(error)}.`,
       });
       continue;
     }
 
-    row.resultPath = summary.path;
-    const result = await loadBenchmarkResult(summary.path);
     row.resultId = result.meta.id;
     row.taskCount = result.results.tasks.length;
-    validateResultEnvelope(result, summary.path, {
+    if (result.meta.benchmark !== row.benchmark) {
+      addIssue(
+        issues,
+        row.benchmark,
+        resultPath,
+        "manifest-result-benchmark-mismatch",
+        `Manifest entry for ${row.benchmark} points to result for ${result.meta.benchmark}.`,
+      );
+    }
+    validateResultEnvelope(result, resultPath, {
       expectedModel,
       expectedReasoningEffort,
       expectedRuntimeProfile,
@@ -172,18 +208,11 @@ export async function verifyPublicMatrixEvidence(
     });
   }
 
-  if (options.requireManifest ?? true) {
-    await validateManifest(manifestPath, {
-      benchmarks,
-      expectedGitSha,
-      expectedRuntimeProfile,
-      issues,
-    });
-  }
-
   if (options.requireDiagnostics ?? true) {
     const diagnosticsChecked = await validateDiagnostics(diagnosticsDir, {
-      manifestPath,
+      expectedRunId: isNonEmptyString(manifest?.run?.id)
+        ? manifest.run.id.trim()
+        : undefined,
       expectedModel,
       expectedReasoningEffort,
       expectedServiceTier,
@@ -304,7 +333,33 @@ function validateProviderRole(
   }
 }
 
-async function validateManifest(
+async function loadReproManifest(
+  manifestPath: string,
+  issues: PublicMatrixEvidenceIssue[],
+): Promise<ReproManifest | undefined> {
+  if (!fs.existsSync(manifestPath)) {
+    issues.push({
+      code: "missing-manifest",
+      path: manifestPath,
+      message: `Repro manifest not found: ${manifestPath}.`,
+    });
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(await readFile(manifestPath, "utf8")) as ReproManifest;
+  } catch (error) {
+    issues.push({
+      code: "invalid-manifest",
+      path: manifestPath,
+      message: `Could not parse repro manifest: ${error instanceof Error ? error.message : String(error)}.`,
+    });
+    return undefined;
+  }
+}
+
+function validateManifest(
+  manifest: ReproManifest,
   manifestPath: string,
   options: {
     benchmarks: string[];
@@ -312,28 +367,7 @@ async function validateManifest(
     expectedRuntimeProfile: BenchRuntimeProfile;
     issues: PublicMatrixEvidenceIssue[];
   },
-): Promise<void> {
-  if (!fs.existsSync(manifestPath)) {
-    options.issues.push({
-      code: "missing-manifest",
-      path: manifestPath,
-      message: `Repro manifest not found: ${manifestPath}.`,
-    });
-    return;
-  }
-
-  let manifest: ReproManifest;
-  try {
-    manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReproManifest;
-  } catch (error) {
-    options.issues.push({
-      code: "invalid-manifest",
-      path: manifestPath,
-      message: `Could not parse repro manifest: ${error instanceof Error ? error.message : String(error)}.`,
-    });
-    return;
-  }
-
+): void {
   if (manifest.git?.dirty !== false) {
     options.issues.push({
       code: "dirty-manifest-git",
@@ -393,6 +427,8 @@ async function validateManifest(
     const result = manifest.results?.find((entry) => entry.benchmark === benchmark);
     if (!result) {
       addIssue(options.issues, benchmark, manifestPath, "manifest-missing-result", "Manifest has no result entry for benchmark.");
+    } else if (!isNonEmptyString(result.path)) {
+      addIssue(options.issues, benchmark, manifestPath, "manifest-result-missing-path", "Manifest result entry must include a relative result path.");
     } else if (
       result.mode !== "full" ||
       !Number.isInteger(result.taskCount) ||
@@ -405,17 +441,67 @@ async function validateManifest(
   }
 }
 
+function resolveManifestResultPath(
+  resultsDir: string,
+  manifest: ReproManifest,
+  benchmark: string,
+  issues: PublicMatrixEvidenceIssue[],
+): string | undefined {
+  const result = manifest.results?.find((entry) => entry.benchmark === benchmark);
+  if (!result || !isNonEmptyString(result.path)) {
+    return undefined;
+  }
+  if (path.isAbsolute(result.path)) {
+    addIssue(
+      issues,
+      benchmark,
+      result.path,
+      "manifest-result-absolute-path",
+      "Manifest result path must be relative to the results directory.",
+    );
+    return undefined;
+  }
+
+  const resolvedPath = path.resolve(resultsDir, result.path);
+  const relativePath = path.relative(resultsDir, resolvedPath);
+  if (
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath) ||
+    relativePath.length === 0
+  ) {
+    addIssue(
+      issues,
+      benchmark,
+      resolvedPath,
+      "manifest-result-path-outside-dir",
+      "Manifest result path must stay inside the results directory.",
+    );
+    return undefined;
+  }
+  return resolvedPath;
+}
+
+function resolveLatestResultPath(
+  summaries: Awaited<ReturnType<typeof listBenchmarkResults>>,
+  benchmark: string,
+): string | undefined {
+  return summaries
+    .filter((candidate) => candidate.benchmark === benchmark)
+    .filter((candidate) => candidate.mode === "full")
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0]
+    ?.path;
+}
+
 async function validateDiagnostics(
   diagnosticsDir: string,
   options: {
-    manifestPath: string;
+    expectedRunId: string | undefined;
     expectedModel: string;
     expectedReasoningEffort: BenchReasoningEffort;
     expectedServiceTier: string;
     issues: PublicMatrixEvidenceIssue[];
   },
 ): Promise<number> {
-  const expectedRunId = await readManifestRunId(options.manifestPath);
   if (!fs.existsSync(diagnosticsDir)) {
     options.issues.push({
       code: "missing-codex-diagnostics",
@@ -451,7 +537,7 @@ async function validateDiagnostics(
       });
       continue;
     }
-    if (expectedRunId && record.runId !== expectedRunId) {
+    if (options.expectedRunId && record.runId !== options.expectedRunId) {
       continue;
     }
     checked += 1;
@@ -474,23 +560,14 @@ async function validateDiagnostics(
       options.issues.push({ code: "diagnostic-nonzero-exit", path: file, message: `Diagnostic result was status=${String(record.result?.status)} signal=${String(record.result?.signal)}.` });
     }
   }
-  if (expectedRunId && checked === 0) {
+  if (options.expectedRunId && checked === 0) {
     options.issues.push({
       code: "missing-run-codex-diagnostics",
       path: diagnosticsDir,
-      message: `Codex CLI diagnostics directory contains no JSON records for manifest run.id=${expectedRunId}.`,
+      message: `Codex CLI diagnostics directory contains no JSON records for manifest run.id=${options.expectedRunId}.`,
     });
   }
   return checked;
-}
-
-async function readManifestRunId(manifestPath: string): Promise<string | undefined> {
-  try {
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReproManifest;
-    return isNonEmptyString(manifest.run?.id) ? manifest.run.id.trim() : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function resolveBenchmarks(rawBenchmarks: readonly string[] | undefined): string[] {

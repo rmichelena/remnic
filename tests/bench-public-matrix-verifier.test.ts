@@ -166,6 +166,7 @@ async function writeManifest(
     })),
     results: benchmarks.map((benchmark) => ({
       benchmark,
+      path: `${benchmark}-test-result.json`,
       mode: "full",
       gitSha,
       taskCount: 1,
@@ -204,6 +205,22 @@ test("verifies a complete Codex CLI public matrix evidence subset", async (t) =>
   for (const benchmark of benchmarks) {
     await writeResult(resultsDir, benchmarkResult(benchmark));
   }
+  await writeResult(
+    resultsDir,
+    benchmarkResult("longmemeval", {
+      meta: {
+        id: "longmemeval-newer-unmanifested",
+        timestamp: "2026-05-14T13:00:00.000Z",
+      },
+      config: {
+        runtimeProfile: "baseline",
+        systemProvider: {
+          provider: "openai",
+          model: "gpt-4.1",
+        },
+      },
+    }),
+  );
   await writeManifest(resultsDir, benchmarks);
   await writeDiagnostic(diagnosticsDir);
   await writeDiagnostic(diagnosticsDir, {
@@ -271,5 +288,5 @@ test("reports missing and wrong public matrix evidence", async (t) => {
   assert.equal(issueCodes.has("limited-result"), true);
   assert.equal(issueCodes.has("manifest-limited-run"), true);
   assert.equal(issueCodes.has("wrong-diagnostic-service-tier"), true);
-  assert.equal(issueCodes.has("missing-full-result"), true);
+  assert.equal(issueCodes.has("manifest-result-unreadable"), true);
 });
