@@ -1570,10 +1570,19 @@ function readMemoryArenaNumberField(
     return value;
   }
   if (typeof value === "string") {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : undefined;
+    return parseMemoryArenaNumber(value);
   }
   return undefined;
+}
+
+function parseMemoryArenaNumber(value: string): number | undefined {
+  const match =
+    /[-+]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?/.exec(value.trim());
+  if (match?.[0] === undefined) {
+    return undefined;
+  }
+  const parsed = Number(match[0].replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function readMemoryArenaPriceField(

@@ -1105,6 +1105,155 @@ test("MemoryArena ranks WebShop price preferences from currency price fields", a
   }
 });
 
+test("MemoryArena ranks WebShop rating preferences from Amazon review strings", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
+  const datasetPath = path.join(tempDir, "bundled_shopping.jsonl");
+  const sidecarPath = path.join(tempDir, "webshop-products.jsonl");
+  const previousSidecarPath =
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+  const storedMessages: string[] = [];
+  let responderContext = "";
+
+  try {
+    await writeFile(
+      datasetPath,
+      JSON.stringify({
+        id: 26,
+        category: "bundled_shopping",
+        questions: [
+          [
+            "Product 1:",
+            "### Select Base",
+            "**Goal:** Buy the vanilla cake base.",
+            "**Available Options:**",
+            "- A vanilla cake base.",
+          ].join("\n"),
+          [
+            "Product 2:",
+            "### Select Decorations",
+            "**Goal:** Compatibility notes: Vanilla pairs well with Rose.",
+            "**Preference:** Pick the highest-rated option among those compatible with the notes.",
+            "**Available Options:**",
+            "- A Budget Rose Sprinkle Mix.",
+            "- A Premium Rose Sprinkle Mix.",
+          ].join("\n"),
+        ],
+        answers: [
+          {
+            target_asin: "BASE000001",
+            attributes: ["vanilla cake base"],
+          },
+          {
+            target_asin: "B08957C9ZH",
+            attributes: ["premium rose", "sprinkle mix"],
+          },
+        ],
+      }) + "\n",
+      "utf8",
+    );
+    await writeFile(
+      sidecarPath,
+      [
+        JSON.stringify({
+          asin: "BASE000001",
+          name: "Vanilla Cake Base",
+          price: "$3.00",
+        }),
+        JSON.stringify({
+          asin: "BUDGET0001",
+          name: "Budget Rose Sprinkle Mix",
+          product_information: {
+            "Customer Reviews": {
+              stars: "4.1 out of 5 stars",
+              ratings_count: "222 ratings",
+            },
+          },
+        }),
+        JSON.stringify({
+          asin: "B08957C9ZH",
+          name: "Premium Rose Sprinkle Mix",
+          product_information: {
+            "Customer Reviews": {
+              stars: "4.7 out of 5 stars",
+              ratings_count: "1,234 ratings",
+            },
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS = sidecarPath;
+
+    const result = await runMemoryArenaBenchmark({
+      benchmark: memoryArenaDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store(_sessionId, messages) {
+          storedMessages.push(...messages.map((message) => message.content));
+        },
+        async recall() {
+          return storedMessages.join("\n\n");
+        },
+        async search() {
+          return [];
+        },
+        async reset() {
+          storedMessages.length = 0;
+        },
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: storedMessages.length, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond(_question, context) {
+            responderContext = context;
+            return {
+              text: "target_asin: B08957C9ZH; item: A Premium Rose Sprinkle Mix.; attributes: premium rose, sprinkle mix",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "responder-smoke",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 0;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 0,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "judge-smoke",
+            };
+          },
+        },
+      },
+    });
+
+    assert.match(responderContext, /Option 1: A Budget Rose Sprinkle Mix/);
+    assert.match(responderContext, /rating: 4\.1/);
+    assert.match(responderContext, /Option 2: A Premium Rose Sprinkle Mix/);
+    assert.match(responderContext, /rating: 4\.7/);
+    assert.match(responderContext, /Reviews: 1234/);
+    assert.match(
+      responderContext,
+      /Best-supported option by current rules: Option 2: A Premium Rose Sprinkle Mix/,
+    );
+    assert.equal(result.results.tasks[0]?.scores.item_selection_match, 1);
+  } finally {
+    if (previousSidecarPath === undefined) {
+      delete process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+    } else {
+      process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS =
+        previousSidecarPath;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("MemoryArena no-responder runs do not score the live task prompt as recall", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
   const datasetPath = path.join(tempDir, "bundled_shopping.jsonl");
