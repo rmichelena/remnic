@@ -427,3 +427,85 @@ test("LongMemEval search_hits counts recalled evidence when direct search is emp
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("LongMemEval official judge prompt handles numeric question_id", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-lme-numeric-id-"));
+  try {
+    await writeFile(
+      path.join(tempDir, "longmemeval_oracle.json"),
+      JSON.stringify([
+        {
+          question_id: 42,
+          question_type: "single-session-user",
+          question: "What city does the user live in?",
+          answer: "Paris",
+          question_date: "2025-01-01",
+          haystack_sessions: [
+            [{ role: "user", content: "I live in Paris." }],
+          ],
+          haystack_session_ids: ["city-session"],
+          haystack_dates: ["2025-01-01"],
+          answer_session_ids: ["city-session"],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runLongMemEvalBenchmark({
+      benchmark: longMemEvalDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return "I live in Paris.";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond() {
+            return {
+              text: "Paris",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "smoke-responder",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 1;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "smoke-judge",
+            };
+          },
+          async scoreBinaryPrompt() {
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "smoke-judge",
+            };
+          },
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.equal(task.taskId, "q42");
+    assert.equal(task.scores.judge_accuracy, 1);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

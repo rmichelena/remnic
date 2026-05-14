@@ -144,7 +144,7 @@ function buildLongMemEvalOfficialJudgePrompt(
   item: LongMemEvalItem,
   response: string,
 ): string {
-  if (item.question_id.includes("_abs")) {
+  if (String(item.question_id).includes("_abs")) {
     return formatLongMemEvalJudgePrompt(
       "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.",
       item.question,
