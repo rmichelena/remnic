@@ -106,9 +106,7 @@ export interface ParsedBenchArgs {
   retryFailed?: boolean;
 }
 
-export type PublishedBenchmarkName = PublishedBenchmarkId;
-export const PUBLISHED_BENCHMARK_NAMES: readonly PublishedBenchmarkName[] =
-  Object.freeze([
+export const PUBLISHED_BENCHMARK_NAMES = Object.freeze([
     "ama-bench",
     "memory-arena",
     "amemgym",
@@ -118,11 +116,14 @@ export const PUBLISHED_BENCHMARK_NAMES: readonly PublishedBenchmarkName[] =
     "personamem",
     "memoryagentbench",
     "membench",
-  ]);
+  ] as const satisfies readonly PublishedBenchmarkId[]);
+export type PublishedBenchmarkName = (typeof PUBLISHED_BENCHMARK_NAMES)[number];
 type AssertTrue<T extends true> = T;
+type MissingPublishedBenchmarkNames = Exclude<PublishedBenchmarkId, PublishedBenchmarkName>;
+type ExtraPublishedBenchmarkNames = Exclude<PublishedBenchmarkName, PublishedBenchmarkId>;
 type PublishedBenchmarkNamesMatchArtifactIds = AssertTrue<
-  [PublishedBenchmarkId] extends [(typeof PUBLISHED_BENCHMARK_NAMES)[number]]
-    ? [(typeof PUBLISHED_BENCHMARK_NAMES)[number]] extends [PublishedBenchmarkId]
+  [MissingPublishedBenchmarkNames] extends [never]
+    ? [ExtraPublishedBenchmarkNames] extends [never]
       ? true
       : false
     : false
