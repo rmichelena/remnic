@@ -807,7 +807,11 @@ function parseYesNoJudgeScore(raw: string): number {
   if (firstLabel === "no") {
     return 0;
   }
-  return parseScalarJudgeScore(raw) >= 0.5 ? 1 : 0;
+  const scalar = parseScalarJudgeScore(raw);
+  if (scalar < 0) {
+    return -1;
+  }
+  return scalar >= 0.5 ? 1 : 0;
 }
 
 function parseAmaBenchBinaryJudgeScore(raw: string): number {

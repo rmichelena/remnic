@@ -90,6 +90,15 @@ test("responder wrappers adapt a provider instance into answer-generation and ju
     1,
   );
 
+  const invalidBinaryJudge = createProviderBackedJudge(
+    { provider: "openai", model: "gpt-5.4-mini" },
+    createFakeProvider("I cannot determine the answer from the prompt."),
+  );
+  assert.equal(
+    (await invalidBinaryJudge.scoreBinaryPrompt?.("yes/no prompt"))?.score,
+    -1,
+  );
+
   const structuredProvider = createFakeProvider("{\"identity_accuracy\":0.9,\"stance_coherence\":0.8,\"novelty\":0.7,\"calibration\":0.6,\"notes\":\"ok\"}");
   const structuredJudge = createStructuredJudgeFromProvider(structuredProvider);
   const raw = await structuredJudge.evaluate({

@@ -894,12 +894,10 @@ function parseMemoryArenaWebshopSidecarRecords(
   if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
     try {
       return unpackMemoryArenaWebshopRecords(JSON.parse(trimmed));
-    } catch (error) {
-      if (trimmed.startsWith("[")) {
-        throw new Error(
-          `MemoryArena WebShop product sidecar at ${sourcePath} contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    } catch {
+      // Fall through to JSONL parsing. Some compact sidecars use one JSON
+      // array batch per line, so a leading `[` is not enough to prove the
+      // whole file is intended to be a single JSON document.
     }
   }
 
@@ -911,7 +909,9 @@ function parseMemoryArenaWebshopSidecarRecords(
       return;
     }
     try {
-      records.push({ value: JSON.parse(trimmedLine) });
+      records.push(
+        ...unpackMemoryArenaWebshopJsonlRecord(JSON.parse(trimmedLine)),
+      );
     } catch (error) {
       throw new Error(
         `MemoryArena WebShop product sidecar at ${sourcePath} has invalid JSONL on line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
@@ -919,6 +919,23 @@ function parseMemoryArenaWebshopSidecarRecords(
     }
   });
   return records;
+}
+
+function unpackMemoryArenaWebshopJsonlRecord(
+  parsed: unknown,
+): RawMemoryArenaWebshopRecord[] {
+  if (Array.isArray(parsed)) {
+    return parsed.map((value) => ({ value }));
+  }
+  if (isPlainRecord(parsed)) {
+    for (const key of ["products", "records", "items"]) {
+      const value = parsed[key];
+      if (Array.isArray(value) || isPlainRecord(value)) {
+        return unpackMemoryArenaWebshopRecords(parsed);
+      }
+    }
+  }
+  return [{ value: parsed }];
 }
 
 function unpackMemoryArenaWebshopRecords(
