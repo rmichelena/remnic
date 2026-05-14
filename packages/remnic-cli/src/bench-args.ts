@@ -654,8 +654,9 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     }
     publishedTrialLimit = parsed;
   }
-  const trialLimitTargetsLoCoMo =
+  const trialLimitTargetsSupportedBenchmark =
     publishedName === "locomo" ||
+    publishedName === "memoryagentbench" ||
     (
       publishedName === undefined &&
       action === "published"
@@ -665,10 +666,10 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
       action !== "published" &&
       !args.includes("--all") &&
       benchmarks.length === 1 &&
-      benchmarks[0] === "locomo"
+      (benchmarks[0] === "locomo" || benchmarks[0] === "memoryagentbench")
     );
-  if (publishedTrialLimit !== undefined && !trialLimitTargetsLoCoMo) {
-    throw new Error("ERROR: --trial-limit is currently supported only for LoCoMo.");
+  if (publishedTrialLimit !== undefined && !trialLimitTargetsSupportedBenchmark) {
+    throw new Error("ERROR: --trial-limit is currently supported only for LoCoMo and MemoryAgentBench.");
   }
 
   let publishedTaskFilter: string | undefined;

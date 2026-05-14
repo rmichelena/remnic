@@ -399,3 +399,111 @@ test("MemoryAgentBench ReDial datasets require entity mapping before adapter wor
     await rm(datasetDir, { recursive: true, force: true });
   }
 });
+
+test("MemoryAgentBench trialLimit caps scored questions before extra adapter work", async () => {
+  let resetCount = 0;
+
+  const result = await runMemoryAgentBenchBenchmark({
+    benchmark: memoryAgentBenchDefinition,
+    mode: "quick",
+    benchmarkOptions: { trialLimit: 2 },
+    system: {
+      async reset() {
+        resetCount += 1;
+      },
+      async store() {},
+      async recall() {
+        return "";
+      },
+      async search() {
+        return [];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond() {
+          return {
+            text: "unknown",
+            tokens: { input: 1, output: 1 },
+            latencyMs: 1,
+            model: "mab-test-responder",
+          };
+        },
+      },
+      judge: {
+        async score() {
+          return 0;
+        },
+        async scoreWithMetrics() {
+          return {
+            score: 0,
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "mab-test-judge",
+          };
+        },
+      },
+    },
+  });
+
+  assert.equal(result.results.tasks.length, 2);
+  assert.deepEqual(
+    result.results.tasks.map((task) => task.taskId),
+    ["mab-smoke-ar-q1", "mab-smoke-ttl-q1"],
+  );
+  assert.equal(resetCount, 2);
+});
+
+test("MemoryAgentBench trialLimit 0 runs zero scored questions", async () => {
+  let resetCalled = false;
+
+  const result = await runMemoryAgentBenchBenchmark({
+    benchmark: memoryAgentBenchDefinition,
+    mode: "quick",
+    benchmarkOptions: { trialLimit: 0 },
+    system: {
+      async reset() {
+        resetCalled = true;
+      },
+      async store() {},
+      async recall() {
+        return "";
+      },
+      async search() {
+        return [];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond() {
+          return {
+            text: "",
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "mab-test-responder",
+          };
+        },
+      },
+      judge: {
+        async score() {
+          return 0;
+        },
+        async scoreWithMetrics() {
+          return {
+            score: 0,
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "mab-test-judge",
+          };
+        },
+      },
+    },
+  });
+
+  assert.equal(result.results.tasks.length, 0);
+  assert.equal(resetCalled, false);
+});

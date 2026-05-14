@@ -59,3 +59,30 @@ test("resolveDownloadedBenchDatasetDir ignores MemoryArena WebShop sidecars as d
     undefined,
   );
 });
+
+test("resolveDownloadedBenchDatasetDir requires MemoryAgentBench ReDial entity mapping", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-bench-datasets-"));
+  const datasetDir = path.join(root, "memoryagentbench");
+  await mkdir(datasetDir, { recursive: true });
+  await writeFile(path.join(datasetDir, "Test_Time_Learning.json"), "[]\n");
+
+  assert.equal(
+    __benchDatasetTestHooks.resolveDownloadedBenchDatasetDir(
+      "memoryagentbench",
+      false,
+      datasetDir,
+    ),
+    undefined,
+  );
+
+  await writeFile(path.join(datasetDir, "entity2id.json"), "{}\n");
+
+  assert.equal(
+    __benchDatasetTestHooks.resolveDownloadedBenchDatasetDir(
+      "memoryagentbench",
+      false,
+      datasetDir,
+    ),
+    datasetDir,
+  );
+});

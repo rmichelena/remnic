@@ -129,6 +129,22 @@ test("parseBenchArgs accepts published --trial-limit", () => {
   assert.equal(parsed.publishedTrialLimit, 25);
 });
 
+test("parseBenchArgs accepts published --trial-limit for MemoryAgentBench", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "memoryagentbench",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--trial-limit",
+    "4",
+  ]);
+
+  assert.equal(parsed.publishedTrialLimit, 4);
+});
+
 test("parseBenchArgs accepts --trial-limit for bench run locomo", () => {
   const parsed = parseBenchArgs([
     "run",
@@ -138,6 +154,17 @@ test("parseBenchArgs accepts --trial-limit for bench run locomo", () => {
   ]);
 
   assert.equal(parsed.publishedTrialLimit, 3);
+});
+
+test("parseBenchArgs accepts --trial-limit for bench run memoryagentbench", () => {
+  const parsed = parseBenchArgs([
+    "run",
+    "memoryagentbench",
+    "--trial-limit",
+    "2",
+  ]);
+
+  assert.equal(parsed.publishedTrialLimit, 2);
 });
 
 test("parseBenchArgs rejects non-integer --trial-limit", () => {
@@ -158,7 +185,7 @@ test("parseBenchArgs rejects non-integer --trial-limit", () => {
   );
 });
 
-test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks", () => {
+test("parseBenchArgs rejects published --trial-limit for unsupported benchmarks", () => {
   assert.throws(
     () =>
       parseBenchArgs([
@@ -172,7 +199,7 @@ test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks",
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
   assert.throws(
     () =>
@@ -187,11 +214,11 @@ test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks",
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
 });
 
-test("parseBenchArgs rejects --trial-limit when LoCoMo is not the only selected benchmark", () => {
+test("parseBenchArgs rejects --trial-limit when a supported benchmark is not the only selected benchmark", () => {
   assert.throws(
     () =>
       parseBenchArgs([
@@ -201,7 +228,7 @@ test("parseBenchArgs rejects --trial-limit when LoCoMo is not the only selected 
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
 });
 

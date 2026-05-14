@@ -820,7 +820,7 @@ Options:
   --results-dir <path>     Override the stored benchmark results directory
   --baselines-dir <path>   Override the named baseline directory
   --threshold <value>      Regression threshold for compare (default: 0.05)
-  --trial-limit <n>        Cap scored LoCoMo QA trials for staged published runs
+  --trial-limit <n>        Cap scored LoCoMo or MemoryAgentBench QA trials for staged published runs
   --task-filter <pattern>  BEAM diagnostic filter; match task id, ability, or question text
   --detail                 Include per-task details for bench results
   --format <json|csv|html> Output format for bench export
@@ -1167,14 +1167,22 @@ const MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES = [
   "memory-arena-webshop-products.json",
 ] as const;
 
+type DownloadedDatasetMarker = {
+  anyOf?: string[];
+  allOf?: string[];
+  ext?: string;
+  exclude?: readonly string[];
+};
+
 // Required content markers per benchmark. `anyOf` lists the filenames
 // a benchmark runner will accept — a dataset directory is considered
-// "downloaded" as soon as any one of them is present. `ext` matches
-// any file in the directory with the given extension. The filename
-// sets mirror the dataset loaders under packages/bench/src/benchmarks
-// so `datasets status`/`resolveBenchDatasetDir` never disagree with
-// the runner about whether a dataset is ready.
-const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: string; exclude?: readonly string[] }> = {
+// "downloaded" as soon as any one of them is present. `allOf` lists
+// required sidecar files. `ext` matches any file in the directory with
+// the given extension. The filename sets mirror the dataset loaders
+// under packages/bench/src/benchmarks so `datasets status` and
+// `resolveBenchDatasetDir` never disagree with the runner about whether
+// a dataset is ready.
+const DOWNLOADED_DATASET_MARKERS: Record<string, DownloadedDatasetMarker> = {
   "ama-bench": { anyOf: ["open_end_qa_set.jsonl"] },
   longmemeval: {
     // Keep this list in lock-step with `LONG_MEM_EVAL_DATASET_FILENAMES`
@@ -1236,6 +1244,7 @@ const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: strin
     ],
   },
   memoryagentbench: {
+    allOf: ["entity2id.json"],
     anyOf: [
       "memoryagentbench.json",
       "memoryagentbench.jsonl",
@@ -1403,6 +1412,18 @@ function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean 
     try {
       return fs.readdirSync(datasetPath).length > 0;
     } catch {
+      return false;
+    }
+  }
+  if (marker.allOf) {
+    const hasAllRequiredFiles = marker.allOf.every((name) => {
+      try {
+        return fs.statSync(path.join(datasetPath, name)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (!hasAllRequiredFiles) {
       return false;
     }
   }
@@ -2621,14 +2642,18 @@ async function runBenchViaPackage(
   // parsed but dropped, and the harness recorded `ctx.options.seed ?? 0`
   // instead of the user-specified seed, breaking reproducibility.
   const effectiveSeed = parsed.publishedSeed;
+  const trialLimitOptions =
+    parsed.publishedTrialLimit !== undefined
+      ? { trialLimit: parsed.publishedTrialLimit }
+      : undefined;
   const benchmarkOptions =
     benchmarkId === "locomo"
       ? {
-          ...(parsed.publishedTrialLimit !== undefined
-            ? { trialLimit: parsed.publishedTrialLimit }
-            : {}),
+          ...(trialLimitOptions ?? {}),
           replayExtractionMode: "skip",
         }
+      : benchmarkId === "memoryagentbench" && trialLimitOptions !== undefined
+        ? trialLimitOptions
       : benchmarkId === "beam" && parsed.publishedTaskFilter !== undefined
         ? { taskFilter: parsed.publishedTaskFilter }
       : undefined;

@@ -129,7 +129,9 @@ export const memoryAgentBenchDefinition: BenchmarkDefinition = {
 export async function runMemoryAgentBenchBenchmark(
   options: ResolvedRunBenchmarkOptions,
 ): Promise<BenchmarkResult> {
-  const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
+  const rawDataset = await loadDataset(options.mode, options.datasetDir, options.limit);
+  const trialLimit = resolveTrialLimit(options.benchmarkOptions?.trialLimit);
+  const dataset = applyTrialLimit(rawDataset, trialLimit);
   const validateRecsysMappingBeforeExecution =
     options.adapterMode === "dry-run" && hasRecSysRedialItems(dataset);
   let recsysMapping: RecSysEntityMapping | null = validateRecsysMappingBeforeExecution
@@ -349,6 +351,71 @@ export async function runMemoryAgentBenchBenchmark(
       hardware: process.arch,
     },
   };
+}
+
+function resolveTrialLimit(raw: unknown): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      "MemoryAgentBench benchmarkOptions.trialLimit must be a non-negative integer.",
+    );
+  }
+  return parsed;
+}
+
+function applyTrialLimit(
+  dataset: MemoryAgentBenchItem[],
+  trialLimit: number | undefined,
+): MemoryAgentBenchItem[] {
+  if (trialLimit === undefined) {
+    return dataset;
+  }
+  if (trialLimit === 0) {
+    return [];
+  }
+
+  const limited: MemoryAgentBenchItem[] = [];
+  let remaining = trialLimit;
+  for (const item of dataset) {
+    if (remaining <= 0) {
+      break;
+    }
+    const questionCount = Math.min(item.questions.length, remaining);
+    if (questionCount > 0) {
+      limited.push({
+        ...item,
+        questions: item.questions.slice(0, questionCount),
+        answers: item.answers.slice(0, questionCount),
+        metadata: truncateQuestionMetadata(item.metadata, questionCount),
+      });
+      remaining -= questionCount;
+    }
+  }
+  return limited;
+}
+
+function truncateQuestionMetadata(
+  metadata: MemoryAgentBenchMetadata,
+  questionCount: number,
+): MemoryAgentBenchMetadata {
+  return {
+    ...metadata,
+    previous_events: sliceOptional(metadata.previous_events, questionCount),
+    qa_pair_ids: sliceOptional(metadata.qa_pair_ids, questionCount),
+    question_dates: sliceOptional(metadata.question_dates, questionCount),
+    question_ids: sliceOptional(metadata.question_ids, questionCount),
+    question_types: sliceOptional(metadata.question_types, questionCount),
+  };
+}
+
+function sliceOptional<T>(
+  values: T[] | null | undefined,
+  count: number,
+): T[] | null | undefined {
+  return Array.isArray(values) ? values.slice(0, count) : values;
 }
 
 function errorScoresForProtocol(

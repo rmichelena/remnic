@@ -562,11 +562,11 @@ PY
 
 download_memoryagentbench() {
   local dir="$DATASETS_DIR/memoryagentbench"
-  if [[ -f "$dir/Accurate_Retrieval.json" && -f "$dir/Test_Time_Learning.json" && -f "$dir/Long_Range_Understanding.json" && -f "$dir/Conflict_Resolution.json" ]]; then
+  if [[ -f "$dir/Accurate_Retrieval.json" && -f "$dir/Test_Time_Learning.json" && -f "$dir/Long_Range_Understanding.json" && -f "$dir/Conflict_Resolution.json" && -f "$dir/entity2id.json" ]]; then
     echo "[memoryagentbench] Already downloaded at $dir"
     return
   fi
-  echo "[memoryagentbench] Downloading from Hugging Face parquet sources (ai-hyz/MemoryAgentBench)..."
+  echo "[memoryagentbench] Downloading from Hugging Face sources (ai-hyz/MemoryAgentBench)..."
   mkdir -p "$dir"
   require_python_modules huggingface_hub pyarrow
   local python_bin
@@ -606,6 +606,21 @@ for parquet_file, output_name in targets:
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(rows, handle, ensure_ascii=False)
     print(f"[memoryagentbench] Wrote {output_name} ({len(rows)} samples)")
+
+entity_output_path = out_dir / "entity2id.json"
+if entity_output_path.exists() and entity_output_path.stat().st_size > 0:
+    print("[memoryagentbench] Reusing entity2id.json")
+else:
+    entity_path = hf_hub_download(
+        repo_id="ai-hyz/MemoryAgentBench",
+        repo_type="dataset",
+        filename="entity2id.json",
+    )
+    with open(entity_path, "r", encoding="utf-8") as source:
+        entity_mapping = json.load(source)
+    with entity_output_path.open("w", encoding="utf-8") as handle:
+        json.dump(entity_mapping, handle, ensure_ascii=False)
+    print(f"[memoryagentbench] Wrote entity2id.json ({len(entity_mapping)} mappings)")
 PY
   echo "[memoryagentbench] Downloaded to $dir"
 }
