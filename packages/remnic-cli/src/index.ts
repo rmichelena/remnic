@@ -1160,6 +1160,13 @@ const DOWNLOADABLE_BENCHMARK_DATASETS = [
   "memoryagentbench",
 ] as const;
 
+const MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES = [
+  "webshop-products.jsonl",
+  "webshop-products.json",
+  "memory-arena-webshop-products.jsonl",
+  "memory-arena-webshop-products.json",
+] as const;
+
 // Required content markers per benchmark. `anyOf` lists the filenames
 // a benchmark runner will accept — a dataset directory is considered
 // "downloaded" as soon as any one of them is present. `ext` matches
@@ -1167,7 +1174,7 @@ const DOWNLOADABLE_BENCHMARK_DATASETS = [
 // sets mirror the dataset loaders under packages/bench/src/benchmarks
 // so `datasets status`/`resolveBenchDatasetDir` never disagree with
 // the runner about whether a dataset is ready.
-const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: string }> = {
+const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: string; exclude?: readonly string[] }> = {
   "ama-bench": { anyOf: ["open_end_qa_set.jsonl"] },
   longmemeval: {
     // Keep this list in lock-step with `LONG_MEM_EVAL_DATASET_FILENAMES`
@@ -1185,7 +1192,10 @@ const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: strin
     anyOf: ["amemgym-v1-base.json", "amemgym-tasks.json", "data.json"],
   },
   locomo: { anyOf: ["locomo10.json", "locomo.json"] },
-  "memory-arena": { ext: ".jsonl" },
+  "memory-arena": {
+    ext: ".jsonl",
+    exclude: MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES,
+  },
   beam: {
     anyOf: [
       "beam_100k.json",
@@ -1414,7 +1424,9 @@ function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean 
   }
   if (marker.ext) {
     try {
-      return fs.readdirSync(datasetPath).some((name) => name.endsWith(marker.ext!));
+      return fs.readdirSync(datasetPath).some((name) =>
+        name.endsWith(marker.ext!) && !marker.exclude?.includes(name),
+      );
     } catch {
       return false;
     }

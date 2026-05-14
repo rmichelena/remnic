@@ -43,3 +43,19 @@ test("resolveDownloadedBenchDatasetDir accepts explicit dataset paths with bench
     datasetDir,
   );
 });
+
+test("resolveDownloadedBenchDatasetDir ignores MemoryArena WebShop sidecars as dataset markers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-bench-datasets-"));
+  const datasetDir = path.join(root, "memory-arena");
+  await mkdir(datasetDir, { recursive: true });
+  await writeFile(path.join(datasetDir, "webshop-products.jsonl"), "{}\n");
+
+  assert.equal(
+    __benchDatasetTestHooks.resolveDownloadedBenchDatasetDir(
+      "memory-arena",
+      false,
+      datasetDir,
+    ),
+    undefined,
+  );
+});
