@@ -1066,6 +1066,14 @@ function selectMemoryArenaWebshopProductForOption(
   option: VisibleItemOption,
   products: MemoryArenaWebshopProduct[],
 ): MemoryArenaWebshopProduct | undefined {
+  const optionAsin = normalizeMemoryArenaWebshopAsin(option.text);
+  if (optionAsin !== undefined) {
+    const product = products.find((candidate) => candidate.asin === optionAsin);
+    if (product !== undefined) {
+      return product;
+    }
+  }
+
   let bestProduct: MemoryArenaWebshopProduct | undefined;
   let bestScore = 0;
   let tied = false;

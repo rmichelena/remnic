@@ -107,16 +107,16 @@ export interface ParsedBenchArgs {
 }
 
 export const PUBLISHED_BENCHMARK_NAMES = Object.freeze([
-    "ama-bench",
-    "memory-arena",
-    "amemgym",
-    "longmemeval",
-    "locomo",
-    "beam",
-    "personamem",
-    "memoryagentbench",
-    "membench",
-  ] as const satisfies readonly PublishedBenchmarkId[]);
+  "ama-bench",
+  "memory-arena",
+  "amemgym",
+  "longmemeval",
+  "locomo",
+  "beam",
+  "personamem",
+  "memoryagentbench",
+  "membench",
+] as const satisfies readonly PublishedBenchmarkId[]);
 export type PublishedBenchmarkName = (typeof PUBLISHED_BENCHMARK_NAMES)[number];
 type AssertTrue<T extends true> = T;
 type MissingPublishedBenchmarkNames = Exclude<PublishedBenchmarkId, PublishedBenchmarkName>;
@@ -128,6 +128,8 @@ type PublishedBenchmarkNamesMatchArtifactIds = AssertTrue<
       : false
     : false
 >;
+const publishedBenchmarkNamesMatchArtifactIds: PublishedBenchmarkNamesMatchArtifactIds = true;
+void publishedBenchmarkNamesMatchArtifactIds;
 
 function isBenchRuntimeProfile(value: string): value is BenchRuntimeProfile {
   return (

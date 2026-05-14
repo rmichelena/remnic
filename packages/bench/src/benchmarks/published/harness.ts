@@ -38,6 +38,7 @@ import {
   aggregateTaskScores,
   containsAnswer,
   f1Score,
+  llmBinaryJudgeScoreDetailed,
   llmJudgeScoreDetailed,
   rougeL,
   timed,
@@ -484,7 +485,12 @@ async function scoreTrialJudge(
     );
   }
 
-  return judge.scoreBinaryPrompt(prompt);
+  return llmBinaryJudgeScoreDetailed(
+    judge,
+    prompt,
+    answeredText,
+    trial.expected,
+  );
 }
 
 type HarnessAnswerResult = BenchmarkAnswerResult & {
