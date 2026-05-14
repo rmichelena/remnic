@@ -86,3 +86,66 @@ test("resolveDownloadedBenchDatasetDir requires MemoryAgentBench ReDial entity m
     datasetDir,
   );
 });
+
+test("published dry-run validation forwards MemoryAgentBench trial limit", async () => {
+  let captured:
+    | {
+        id: string;
+        options: {
+          benchmarkOptions?: Record<string, unknown>;
+          datasetDir?: string;
+          limit?: number;
+          seed?: number;
+          onTaskComplete?: (
+            task: {
+              taskId: string;
+              scores: Record<string, number>;
+              latencyMs: number;
+              tokens: { input: number; output: number };
+            },
+            completedCount: number,
+            totalCount?: number,
+          ) => void;
+        };
+      }
+    | undefined;
+  const benchModule = {
+    async runBenchmark(id: string, options: NonNullable<typeof captured>["options"]) {
+      captured = { id, options };
+      options.onTaskComplete?.(
+        {
+          taskId: "dry-run-check",
+          scores: {},
+          latencyMs: 0,
+          tokens: { input: 0, output: 0 },
+        },
+        1,
+        1,
+      );
+      throw new Error("dry-run adapter should stop benchmark execution");
+    },
+  };
+
+  const benchmarkOptions =
+    __benchDatasetTestHooks.buildPublishedBenchmarkOptionsForTest(
+      "memoryagentbench",
+      { publishedTrialLimit: 1 },
+    );
+
+  await __benchDatasetTestHooks
+    .validateRunnerManagedPublishedDryRunDatasetWithModuleForTest(
+      benchModule,
+      "memoryagentbench",
+      "full",
+      "/tmp/memoryagentbench",
+      10,
+      123,
+      benchmarkOptions,
+    );
+
+  assert.equal(captured?.id, "memoryagentbench");
+  assert.equal(captured?.options.datasetDir, "/tmp/memoryagentbench");
+  assert.equal(captured?.options.limit, 10);
+  assert.equal(captured?.options.seed, 123);
+  assert.deepEqual(captured?.options.benchmarkOptions, { trialLimit: 1 });
+});

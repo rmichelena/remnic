@@ -1645,7 +1645,35 @@ export const __benchDatasetTestHooks = {
   isDatasetDownloaded,
   resolveBenchDatasetDir,
   resolveDownloadedBenchDatasetDir,
+  buildPublishedBenchmarkOptionsForTest(
+    benchmarkId: string,
+    args: {
+      publishedTrialLimit?: number;
+      publishedTaskFilter?: string;
+    },
+  ) {
+    return buildPublishedBenchmarkOptions(benchmarkId, args);
+  },
   validateRunnerManagedPublishedDryRunDatasetForTest,
+  validateRunnerManagedPublishedDryRunDatasetWithModuleForTest(
+    benchModule: unknown,
+    benchmarkId: string,
+    mode: "quick" | "full",
+    datasetDir: string | undefined,
+    limit: number | undefined,
+    seed: number | undefined,
+    benchmarkOptions: Record<string, unknown> | undefined,
+  ) {
+    return validateRunnerManagedPublishedDryRunDataset(
+      benchModule as PackageBenchModule,
+      benchmarkId,
+      mode,
+      datasetDir,
+      limit,
+      seed,
+      benchmarkOptions,
+    );
+  },
 };
 
 function printBenchPackageSummary(
@@ -2266,6 +2294,10 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
     // sample while the real run loaded only one item.
     const effectiveLimit =
       parsed.publishedLimit ?? (parsed.quick ? 1 : undefined);
+    const benchmarkOptions = buildPublishedBenchmarkOptions(
+      benchmarkId,
+      parsed,
+    );
     let itemCount: number | undefined;
     // Codex P2 review on PR #603: when the loader returns
     // `source: "missing"` (full mode and the dataset file is absent or
@@ -2333,6 +2365,7 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
           parsed.datasetDir,
           effectiveLimit,
           parsed.publishedSeed,
+          benchmarkOptions,
         );
       } catch (error) {
         console.error(
@@ -2452,6 +2485,32 @@ function createDryRunDatasetValidationAdapter(
   };
 }
 
+function buildPublishedBenchmarkOptions(
+  benchmarkId: string,
+  args: {
+    publishedTrialLimit?: number;
+    publishedTaskFilter?: string;
+  },
+): Record<string, unknown> | undefined {
+  const trialLimitOptions =
+    args.publishedTrialLimit !== undefined
+      ? { trialLimit: args.publishedTrialLimit }
+      : undefined;
+  if (benchmarkId === "locomo") {
+    return {
+      ...(trialLimitOptions ?? {}),
+      replayExtractionMode: "skip",
+    };
+  }
+  if (benchmarkId === "memoryagentbench") {
+    return trialLimitOptions;
+  }
+  if (benchmarkId === "beam" && args.publishedTaskFilter !== undefined) {
+    return { taskFilter: args.publishedTaskFilter };
+  }
+  return undefined;
+}
+
 async function validateRunnerManagedPublishedDryRunDataset(
   benchModule: PackageBenchModule,
   benchmarkId: string,
@@ -2459,6 +2518,7 @@ async function validateRunnerManagedPublishedDryRunDataset(
   datasetDir: string | undefined,
   limit: number | undefined,
   seed: number | undefined,
+  benchmarkOptions: Record<string, unknown> | undefined,
 ): Promise<void> {
   if (!benchModule.runBenchmark) {
     throw new Error(
@@ -2478,6 +2538,7 @@ async function validateRunnerManagedPublishedDryRunDataset(
       judgeProvider: null,
       internalProvider: null,
       remnicConfig: {},
+      ...(benchmarkOptions ? { benchmarkOptions } : {}),
       system: createDryRunDatasetValidationAdapter(benchmarkId),
       onTaskComplete: () => {
         throw createDryRunDatasetValidatedError(benchmarkId);
@@ -2496,6 +2557,7 @@ async function validateRunnerManagedPublishedDryRunDatasetForTest(
   mode: "quick" | "full",
   datasetDir: string | undefined,
   limit?: number,
+  benchmarkOptions?: Record<string, unknown>,
 ): Promise<void> {
   const benchModule = (await tryLoadBenchModule()) as
     | PackageBenchModule
@@ -2510,6 +2572,7 @@ async function validateRunnerManagedPublishedDryRunDatasetForTest(
     datasetDir,
     limit,
     undefined,
+    benchmarkOptions,
   );
 }
 
@@ -2642,21 +2705,7 @@ async function runBenchViaPackage(
   // parsed but dropped, and the harness recorded `ctx.options.seed ?? 0`
   // instead of the user-specified seed, breaking reproducibility.
   const effectiveSeed = parsed.publishedSeed;
-  const trialLimitOptions =
-    parsed.publishedTrialLimit !== undefined
-      ? { trialLimit: parsed.publishedTrialLimit }
-      : undefined;
-  const benchmarkOptions =
-    benchmarkId === "locomo"
-      ? {
-          ...(trialLimitOptions ?? {}),
-          replayExtractionMode: "skip",
-        }
-      : benchmarkId === "memoryagentbench" && trialLimitOptions !== undefined
-        ? trialLimitOptions
-      : benchmarkId === "beam" && parsed.publishedTaskFilter !== undefined
-        ? { taskFilter: parsed.publishedTaskFilter }
-      : undefined;
+  const benchmarkOptions = buildPublishedBenchmarkOptions(benchmarkId, parsed);
 
   try {
     const amaBenchProtocol = buildAmaBenchProtocolOptions(
