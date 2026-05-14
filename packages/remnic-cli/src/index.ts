@@ -158,6 +158,7 @@ import {
 } from "./optional-bench.js";
 import type {
   BenchConfig,
+  BenchMemoryAdapter,
   BenchmarkDefinition,
   BenchmarkResult,
   ComparisonResult,
@@ -1611,6 +1612,7 @@ export const __benchDatasetTestHooks = {
   isDatasetDownloaded,
   resolveBenchDatasetDir,
   resolveDownloadedBenchDatasetDir,
+  validateRunnerManagedPublishedDryRunDatasetForTest,
 };
 
 function printBenchPackageSummary(
@@ -2283,17 +2285,6 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
         `[dry-run] beam: source=${preview.source} files=${preview.files.length} items=${preview.items} tasks=${preview.tasks} errors=${preview.errors.length}`,
       );
     } else {
-      const datasetDir = resolveDownloadedBenchDatasetDir(
-        benchmarkId,
-        parsed.quick,
-        parsed.datasetDir,
-      );
-      if (datasetDir === undefined) {
-        console.error(
-          `ERROR: [dry-run] ${benchmarkId}: dataset missing or unreadable under ${parsed.datasetDir}. Provide a valid --dataset path before running without --dry-run.`,
-        );
-        process.exit(1);
-      }
       const definition = benchModule.getBenchmark?.(benchmarkId);
       if (!definition?.runnerAvailable) {
         console.error(
@@ -2301,14 +2292,29 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
         );
         process.exit(1);
       }
+      try {
+        await validateRunnerManagedPublishedDryRunDataset(
+          benchModule,
+          benchmarkId,
+          mode,
+          parsed.datasetDir,
+          effectiveLimit,
+          parsed.publishedSeed,
+        );
+      } catch (error) {
+        console.error(
+          `ERROR: [dry-run] ${benchmarkId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
       loadResult = {
-        source: parsed.quick ? "smoke" : "dataset",
-        filename: datasetDir,
+        source: "dataset",
+        filename: parsed.datasetDir,
         items: [],
         errors: [],
       };
       console.log(
-        `[dry-run] ${benchmarkId}: source=${loadResult.source} datasetDir=${datasetDir} items=<runner-managed> errors=0`,
+        `[dry-run] ${benchmarkId}: source=${loadResult.source} datasetDir=${parsed.datasetDir} items=<runner-managed> errors=0`,
       );
     }
     if (loadResult && loadResult.source === "missing") {
@@ -2369,6 +2375,109 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
       model: parsed.systemModel,
     });
   }
+}
+
+const DRY_RUN_DATASET_VALIDATED_CODE = "REMNIC_BENCH_DRY_RUN_DATASET_VALIDATED";
+
+type DryRunDatasetValidatedError = Error & {
+  code: typeof DRY_RUN_DATASET_VALIDATED_CODE;
+};
+
+function createDryRunDatasetValidatedError(benchmarkId: string): DryRunDatasetValidatedError {
+  const error = new Error(
+    benchmarkId + " dataset validated; dry-run stopped before benchmark execution.",
+  ) as DryRunDatasetValidatedError;
+  error.name = "DryRunDatasetValidated";
+  error.code = DRY_RUN_DATASET_VALIDATED_CODE;
+  return error;
+}
+
+function isDryRunDatasetValidatedError(
+  error: unknown,
+): error is DryRunDatasetValidatedError {
+  return (
+    error instanceof Error
+    && (error as { code?: unknown }).code === DRY_RUN_DATASET_VALIDATED_CODE
+  );
+}
+
+function createDryRunDatasetValidationAdapter(
+  benchmarkId: string,
+): BenchMemoryAdapter {
+  const abort = async (): Promise<never> => {
+    throw createDryRunDatasetValidatedError(benchmarkId);
+  };
+
+  return {
+    store: abort,
+    recall: abort,
+    search: abort,
+    reset: abort,
+    getStats: abort,
+    drain: abort,
+    destroy: async () => {},
+  };
+}
+
+async function validateRunnerManagedPublishedDryRunDataset(
+  benchModule: PackageBenchModule,
+  benchmarkId: string,
+  mode: "quick" | "full",
+  datasetDir: string | undefined,
+  limit: number | undefined,
+  seed: number | undefined,
+): Promise<void> {
+  if (!benchModule.runBenchmark) {
+    throw new Error(
+      "installed @remnic/bench version does not export runBenchmark.",
+    );
+  }
+
+  try {
+    await benchModule.runBenchmark(benchmarkId, {
+      mode,
+      datasetDir,
+      limit,
+      seed,
+      adapterMode: "dry-run",
+      runtimeProfile: null,
+      systemProvider: null,
+      judgeProvider: null,
+      internalProvider: null,
+      remnicConfig: {},
+      system: createDryRunDatasetValidationAdapter(benchmarkId),
+      onTaskComplete: () => {
+        throw createDryRunDatasetValidatedError(benchmarkId);
+      },
+    });
+  } catch (error) {
+    if (isDryRunDatasetValidatedError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function validateRunnerManagedPublishedDryRunDatasetForTest(
+  benchmarkId: string,
+  mode: "quick" | "full",
+  datasetDir: string | undefined,
+  limit?: number,
+): Promise<void> {
+  const benchModule = (await tryLoadBenchModule()) as
+    | PackageBenchModule
+    | undefined;
+  if (!benchModule) {
+    throw new Error("@remnic/bench package is not installed.");
+  }
+  await validateRunnerManagedPublishedDryRunDataset(
+    benchModule,
+    benchmarkId,
+    mode,
+    datasetDir,
+    limit,
+    undefined,
+  );
 }
 
 async function loadPublishedPromotionHelpers() {
