@@ -1177,12 +1177,20 @@ const MEMORY_AGENT_BENCH_BUNDLE_FILENAMES = [
 const MEMORY_AGENT_BENCH_SPLIT_FILENAMES = [
   "Accurate_Retrieval.json",
   "Accurate_Retrieval.jsonl",
+  "accurate_retrieval.json",
+  "accurate_retrieval.jsonl",
   "Test_Time_Learning.json",
   "Test_Time_Learning.jsonl",
+  "test_time_learning.json",
+  "test_time_learning.jsonl",
   "Long_Range_Understanding.json",
   "Long_Range_Understanding.jsonl",
+  "long_range_understanding.json",
+  "long_range_understanding.jsonl",
   "Conflict_Resolution.json",
   "Conflict_Resolution.jsonl",
+  "conflict_resolution.json",
+  "conflict_resolution.jsonl",
 ] as const;
 
 const MEMORY_AGENT_BENCH_ENTITY_MAPPING_CANDIDATES = [
@@ -1430,8 +1438,12 @@ function hasMemoryAgentBenchEntityMapping(datasetPath: string): boolean {
   );
 }
 
-function memoryAgentBenchBundleHasRecSysSamples(datasetPath: string): boolean {
-  return MEMORY_AGENT_BENCH_BUNDLE_FILENAMES.some((filename) => {
+function memoryAgentBenchDatasetHasRecSysSamples(datasetPath: string): boolean {
+  const candidateFilenames = [
+    ...MEMORY_AGENT_BENCH_BUNDLE_FILENAMES,
+    ...MEMORY_AGENT_BENCH_SPLIT_FILENAMES,
+  ];
+  return candidateFilenames.some((filename) => {
     const filePath = path.join(datasetPath, filename);
     try {
       if (!fs.statSync(filePath).isFile()) {
@@ -1449,7 +1461,7 @@ function isMemoryAgentBenchDatasetComplete(datasetPath: string): boolean {
   if (hasMemoryAgentBenchEntityMapping(datasetPath)) {
     return true;
   }
-  return !memoryAgentBenchBundleHasRecSysSamples(datasetPath);
+  return !memoryAgentBenchDatasetHasRecSysSamples(datasetPath);
 }
 
 function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean {

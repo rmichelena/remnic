@@ -181,6 +181,46 @@ test("runner-managed dry-run validates MemoryAgentBench ReDial mappings", async 
   );
 });
 
+test("MemoryAgentBench downloaded markers require ReDial mappings for split files", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-cli-mab-split-redial-status-"));
+  const datasetDir = path.join(tmpDir, "memoryagentbench");
+  await mkdir(datasetDir, { recursive: true });
+  await writeFile(
+    path.join(datasetDir, "Test_Time_Learning.json"),
+    JSON.stringify([
+      {
+        context: "The user asked for cyberpunk action movies.",
+        questions: ["User: I want a cyberpunk action movie. Recommender:"],
+        answers: [["1"]],
+        metadata: {
+          source: "recsys_redial",
+          qa_pair_ids: ["redial-missing-map"],
+          question_types: ["recommendation"],
+        },
+      },
+    ]),
+    "utf8",
+  );
+
+  const cliEntry = pathToFileURL(
+    path.join(process.cwd(), "packages/remnic-cli/src/index.ts"),
+  ).href;
+  const cliModule = await import(`${cliEntry}?memoryagentbench-split-status=${Date.now()}`);
+  const hooks = cliModule.__benchDatasetTestHooks as {
+    isDatasetDownloaded: (datasetPath: string, benchmarkId: string) => boolean;
+  };
+
+  assert.equal(hooks.isDatasetDownloaded(datasetDir, "memoryagentbench"), false);
+
+  await writeFile(
+    path.join(datasetDir, "entity2id.json"),
+    JSON.stringify({ 1: "Blade Runner (1982)" }),
+    "utf8",
+  );
+
+  assert.equal(hooks.isDatasetDownloaded(datasetDir, "memoryagentbench"), true);
+});
+
 test("PersonaMem downloader accepts python3 when python is unavailable", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-cli-personamem-download-"));
   const datasetsDir = path.join(tmpDir, "datasets");
