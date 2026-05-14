@@ -1532,9 +1532,20 @@ function normalizeMemoryArenaWebshopAsin(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
+  const matches = extractMemoryArenaWebshopAsins(value);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function extractMemoryArenaWebshopAsins(value: string): string[] {
   const cleaned = cleanMemoryArenaWebshopString(value).toUpperCase();
-  const match = /[A-Z0-9]{10}/.exec(cleaned);
-  return match?.[0];
+  const matches = new Set<string>();
+  const asinPattern = /(?:^|[^A-Z0-9])([A-Z0-9]{10})(?=$|[^A-Z0-9])/g;
+  for (const match of cleaned.matchAll(asinPattern)) {
+    if (match[1] !== undefined) {
+      matches.add(match[1]);
+    }
+  }
+  return [...matches];
 }
 
 function parseMemoryArenaPrice(value: string): number | undefined {
@@ -1794,7 +1805,7 @@ function itemSelectionExpectationMatches(
       expectation.targetAsin,
     );
     const predictedExplicitAsins =
-      extractExplicitItemSelectionAsins(predictedNormalized);
+      extractItemSelectionAsinReferences(predictedNormalized);
     if (predictedExplicitAsins.length > 0) {
       return predictedExplicitAsins.includes(normalizedExpectedAsin);
     }
@@ -1812,19 +1823,22 @@ function itemSelectionExpectationMatches(
   );
 }
 
-function extractExplicitItemSelectionAsins(
+function extractItemSelectionAsinReferences(
   predictedNormalized: string,
 ): string[] {
-  const explicitAsins: string[] = [];
+  const asinReferences = new Set<string>();
   const asinPattern =
     /\b(?:target\s+asin|asin)\s+([a-z0-9][a-z0-9 ]{1,30}?)(?=\s+(?:attributes?|item|selected|price|rating|reviews|product|title|category)\b|$)/g;
   for (const match of predictedNormalized.matchAll(asinPattern)) {
     const normalizedAsin = match[1]?.trim();
     if (normalizedAsin !== undefined && normalizedAsin.length > 0) {
-      explicitAsins.push(normalizedAsin);
+      asinReferences.add(normalizedAsin);
     }
   }
-  return explicitAsins;
+  for (const match of predictedNormalized.matchAll(/\b[a-z0-9]{10,}\b/g)) {
+    asinReferences.add(match[0]);
+  }
+  return [...asinReferences];
 }
 
 function normalizeItemSelectionText(value: string): string {

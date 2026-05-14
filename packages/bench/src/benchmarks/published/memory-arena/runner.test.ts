@@ -554,6 +554,7 @@ test("MemoryArena matches WebShop sidecar observations for ASIN-only options", a
             "**Goal:** Buy the dessert rose sprinkle mix.",
             "**Available Options:**",
             "- B08957C9ZH",
+            "- B08957C9ZHX",
           ].join("\n"),
         ],
         answers: [
@@ -628,6 +629,7 @@ test("MemoryArena matches WebShop sidecar observations for ASIN-only options", a
 
     assert.match(responderContext, /WebShop environment observations/);
     assert.match(responderContext, /Option 1: B08957C9ZH/);
+    assert.doesNotMatch(responderContext, /Option 2: B08957C9ZHX/);
     assert.match(responderContext, /Dessert Rose Sprinkle Mix/);
     assert.match(responderContext, /\$12\.00/);
     assert.equal(result.results.tasks[0]?.scores.item_selection_match, 1);
@@ -959,7 +961,7 @@ test("MemoryArena rejects conflicting explicit ASINs before attribute fallback",
         responder: {
           async respond() {
             return {
-              text: "target_asin: B000WRONG1; attributes: red, cotton",
+              text: "B000WRONG1; attributes: red, cotton",
               tokens: { input: 1, output: 1 },
               latencyMs: 1,
               model: "memory-arena-test-responder",
