@@ -19,17 +19,17 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { PUBLISHED_BENCHMARK_ARTIFACT_IDS } from "../../packages/bench/src/published-artifact.ts";
 import {
-  PUBLISHED_BENCHMARK_ARTIFACT_IDS,
   listBenchmarkResults,
   loadBenchmarkResult,
-} from "@remnic/bench";
+} from "../../packages/bench/src/results-store.ts";
 import type {
   BenchmarkResult,
   BenchReasoningEffort,
   BenchRuntimeProfile,
   ProviderConfig,
-} from "@remnic/bench";
+} from "../../packages/bench/src/types.ts";
 
 const DEFAULT_MODEL = "gpt-5.5";
 const DEFAULT_REASONING_EFFORT: BenchReasoningEffort = "xhigh";
