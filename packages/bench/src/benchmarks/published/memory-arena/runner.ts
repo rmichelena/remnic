@@ -961,10 +961,32 @@ function unpackMemoryArenaWebshopRecords(
     }
   }
 
+  if (isMemoryArenaWebshopProductRecord(parsed)) {
+    return [{ value: parsed }];
+  }
+
   return Object.entries(parsed).map(([defaultAsin, value]) => ({
     value,
     defaultAsin,
   }));
+}
+
+function isMemoryArenaWebshopProductRecord(
+  record: Record<string, unknown>,
+): boolean {
+  return (
+    normalizeMemoryArenaWebshopAsin(
+      record.asin
+        ?? record.ASIN
+        ?? extractMemoryArenaProductInformationValue(record, "asin"),
+    ) !== undefined
+    && cleanMemoryArenaWebshopString(
+      readMemoryArenaStringField(record, "name")
+        ?? readMemoryArenaStringField(record, "title")
+        ?? readMemoryArenaStringField(record, "product_title")
+        ?? "",
+    ).length > 0
+  );
 }
 
 function parseMemoryArenaWebshopProduct(

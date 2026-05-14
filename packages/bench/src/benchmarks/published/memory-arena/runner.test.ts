@@ -751,6 +751,110 @@ test("MemoryArena loads WebShop sidecar wrapper product maps", async () => {
   }
 });
 
+test("MemoryArena loads single-record WebShop JSON sidecars", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
+  const datasetPath = path.join(tempDir, "bundled_shopping.jsonl");
+  const sidecarPath = path.join(tempDir, "webshop-products.json");
+  const previousSidecarPath =
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+  let responderContext = "";
+
+  try {
+    await writeFile(
+      datasetPath,
+      JSON.stringify({
+        id: 25,
+        category: "bundled_shopping",
+        questions: [
+          [
+            "Product 1:",
+            "### Select Sprinkles",
+            "**Goal:** Buy the dessert rose sprinkle mix.",
+            "**Available Options:**",
+            "- B08957C9ZH",
+          ].join("\n"),
+        ],
+        answers: [
+          {
+            target_asin: "B08957C9ZH",
+            attributes: ["dessert rose", "sprinkle mix"],
+          },
+        ],
+      }) + "\n",
+      "utf8",
+    );
+    await writeFile(
+      sidecarPath,
+      JSON.stringify({
+        asin: "B08957C9ZH",
+        name: "Dessert Rose Sprinkle Mix",
+        price: "$12.00",
+      }),
+      "utf8",
+    );
+    process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS = sidecarPath;
+
+    const result = await runMemoryArenaBenchmark({
+      benchmark: memoryArenaDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return "";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond(_question, context) {
+            responderContext = context;
+            return {
+              text: "target_asin: B08957C9ZH; attributes: dessert rose, sprinkle mix",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "responder-smoke",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 0;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 0,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "judge-smoke",
+            };
+          },
+        },
+      },
+    });
+
+    assert.match(responderContext, /WebShop environment observations/);
+    assert.match(responderContext, /B08957C9ZH/);
+    assert.match(responderContext, /Dessert Rose Sprinkle Mix/);
+    assert.match(responderContext, /\$12\.00/);
+    assert.equal(result.results.tasks[0]?.scores.item_selection_match, 1);
+  } finally {
+    if (previousSidecarPath === undefined) {
+      delete process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS;
+    } else {
+      process.env.REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS =
+        previousSidecarPath;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("MemoryArena loads WebShop JSONL array batches", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
   const datasetPath = path.join(tempDir, "bundled_shopping.jsonl");
