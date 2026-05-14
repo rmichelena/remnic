@@ -1740,11 +1740,19 @@ function extractMemoryArenaStoredLineValue(
   marker: string,
 ): string | undefined {
   const normalizedLine = line.replace(/^Subtask\s+\d+:\s*/i, "");
+  const selectedItemRequestedField =
+    marker === "Selected item ASIN:"
+      ? "asin"
+      : marker === "Selected item attributes:"
+        ? "attributes"
+        : undefined;
   const selectedItemMatch =
     /^Selected item(?: \d+)? (ASIN|attributes):\s*(.+)$/i.exec(normalizedLine);
   if (selectedItemMatch !== null) {
-    const requestedField = marker.includes("ASIN") ? "asin" : "attributes";
-    if (selectedItemMatch[1].toLowerCase() !== requestedField) {
+    if (
+      selectedItemRequestedField === undefined
+      || selectedItemMatch[1].toLowerCase() !== selectedItemRequestedField
+    ) {
       return undefined;
     }
     const value = selectedItemMatch[2].trim();
@@ -1758,6 +1766,10 @@ function extractMemoryArenaStoredLineValue(
   const value = normalizedLine.slice(markerIndex + marker.length).trim();
   return value.length > 0 ? value : undefined;
 }
+
+export const __memoryArenaTestHooks = {
+  extractMemoryArenaStoredLineValue,
+};
 
 function appendUniqueMemoryArenaEvidenceRow(
   rows: string[],

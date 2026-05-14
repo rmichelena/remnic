@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { memoryArenaDefinition, runMemoryArenaBenchmark } from "./runner.ts";
+import {
+  __memoryArenaTestHooks,
+  memoryArenaDefinition,
+  runMemoryArenaBenchmark,
+} from "./runner.ts";
 
 test("MemoryArena derives missing categories from the source filename", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
@@ -63,6 +67,46 @@ test("MemoryArena derives missing categories from the source filename", async ()
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("MemoryArena stored-line parser only maps selected-item markers to selected-item lines", () => {
+  const { extractMemoryArenaStoredLineValue } = __memoryArenaTestHooks;
+
+  assert.equal(
+    extractMemoryArenaStoredLineValue(
+      "Subtask 1: Selected item attributes: vanilla cake base",
+      "Environment result:",
+    ),
+    undefined,
+  );
+  assert.equal(
+    extractMemoryArenaStoredLineValue(
+      "Subtask 1: Selected item attributes: vanilla cake base",
+      "Selected item attributes:",
+    ),
+    "vanilla cake base",
+  );
+  assert.equal(
+    extractMemoryArenaStoredLineValue(
+      "Subtask 1: Selected item ASIN: B00BASE001",
+      "Selected item ASIN:",
+    ),
+    "B00BASE001",
+  );
+  assert.equal(
+    extractMemoryArenaStoredLineValue(
+      "Subtask 1: Selected item attributes: vanilla cake base",
+      "Selected item ASIN:",
+    ),
+    undefined,
+  );
+  assert.equal(
+    extractMemoryArenaStoredLineValue(
+      "Subtask 1: Environment result: B00BASE001",
+      "Environment result:",
+    ),
+    "B00BASE001",
+  );
 });
 
 test("MemoryArena quick fixture seeds prerequisite subtasks before scoring follow-ups", async () => {
