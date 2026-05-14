@@ -140,6 +140,7 @@ export type {
 } from "./repro-manifest.js";
 export {
   BENCHMARK_ARTIFACT_SCHEMA_VERSION,
+  PUBLISHED_BENCHMARK_ARTIFACT_IDS,
   buildBenchmarkArtifact,
   buildBenchmarkArtifactFilename,
   hashBenchmarkArtifact,

@@ -323,3 +323,78 @@ test("MemoryAgentBench ReDial refinement ignores numbered non-recommendation rec
     await rm(datasetDir, { recursive: true, force: true });
   }
 });
+
+test("MemoryAgentBench ReDial datasets require entity mapping before adapter work", async () => {
+  const datasetDir = await mkdtemp(path.join(tmpdir(), "remnic-mab-redial-missing-map-"));
+  let resetCalled = false;
+
+  try {
+    await writeFile(
+      path.join(datasetDir, "memoryagentbench.json"),
+      JSON.stringify([
+        {
+          context: "The user asked for cyberpunk action movies.",
+          questions: ["User: I want a cyberpunk action movie. Recommender:"],
+          answers: [["1"]],
+          metadata: {
+            source: "recsys_redial",
+            qa_pair_ids: ["redial-missing-map"],
+            question_types: ["recommendation"],
+          },
+        },
+      ]),
+      "utf8",
+    );
+
+    await assert.rejects(
+      runMemoryAgentBenchBenchmark({
+        benchmark: memoryAgentBenchDefinition,
+        mode: "full",
+        datasetDir,
+        system: {
+          async reset() {
+            resetCalled = true;
+          },
+          async store() {},
+          async recall() {
+            return "";
+          },
+          async search() {
+            return [];
+          },
+          async destroy() {},
+          async getStats() {
+            return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+          },
+          responder: {
+            async respond() {
+              return {
+                text: "",
+                tokens: { input: 0, output: 0 },
+                latencyMs: 0,
+                model: "mab-test-responder",
+              };
+            },
+          },
+          judge: {
+            async score() {
+              return 0;
+            },
+            async scoreWithMetrics() {
+              return {
+                score: 0,
+                tokens: { input: 0, output: 0 },
+                latencyMs: 0,
+                model: "mab-test-judge",
+              };
+            },
+          },
+        },
+      }),
+      /ReDial samples require a valid ReDial entity mapping/,
+    );
+    assert.equal(resetCalled, false);
+  } finally {
+    await rm(datasetDir, { recursive: true, force: true });
+  }
+});

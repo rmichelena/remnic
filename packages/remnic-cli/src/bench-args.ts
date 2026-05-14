@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { BuiltInProvider } from "@remnic/bench";
+import type { BuiltInProvider, PublishedBenchmarkId } from "@remnic/bench";
 import { expandTilde } from "./path-utils.js";
 
 export type BenchAction =
@@ -106,16 +106,7 @@ export interface ParsedBenchArgs {
   retryFailed?: boolean;
 }
 
-export type PublishedBenchmarkName =
-  | "ama-bench"
-  | "memory-arena"
-  | "amemgym"
-  | "longmemeval"
-  | "locomo"
-  | "beam"
-  | "personamem"
-  | "memoryagentbench"
-  | "membench";
+export type PublishedBenchmarkName = PublishedBenchmarkId;
 export const PUBLISHED_BENCHMARK_NAMES: readonly PublishedBenchmarkName[] =
   Object.freeze([
     "ama-bench",
@@ -128,6 +119,14 @@ export const PUBLISHED_BENCHMARK_NAMES: readonly PublishedBenchmarkName[] =
     "memoryagentbench",
     "membench",
   ]);
+type AssertTrue<T extends true> = T;
+type PublishedBenchmarkNamesMatchArtifactIds = AssertTrue<
+  [PublishedBenchmarkId] extends [(typeof PUBLISHED_BENCHMARK_NAMES)[number]]
+    ? [(typeof PUBLISHED_BENCHMARK_NAMES)[number]] extends [PublishedBenchmarkId]
+      ? true
+      : false
+    : false
+>;
 
 function isBenchRuntimeProfile(value: string): value is BenchRuntimeProfile {
   return (

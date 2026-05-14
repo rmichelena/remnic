@@ -136,6 +136,51 @@ test("runner-managed dry-run validation uses MemoryArena loader rules", async ()
   );
 });
 
+test("runner-managed dry-run validates MemoryAgentBench ReDial mappings", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-cli-mab-redial-dry-run-"));
+  const datasetDir = path.join(tmpDir, "memoryagentbench");
+  await mkdir(datasetDir, { recursive: true });
+  await writeFile(
+    path.join(datasetDir, "memoryagentbench.json"),
+    JSON.stringify([
+      {
+        context: "The user asked for cyberpunk action movies.",
+        questions: ["User: I want a cyberpunk action movie. Recommender:"],
+        answers: [["1"]],
+        metadata: {
+          source: "recsys_redial",
+          qa_pair_ids: ["redial-missing-map"],
+          question_types: ["recommendation"],
+        },
+      },
+    ]),
+    "utf8",
+  );
+
+  const cliEntry = pathToFileURL(
+    path.join(process.cwd(), "packages/remnic-cli/src/index.ts"),
+  ).href;
+  const cliModule = await import(`${cliEntry}?memoryagentbench-dry-run=${Date.now()}`);
+  const hooks = cliModule.__benchDatasetTestHooks as {
+    validateRunnerManagedPublishedDryRunDatasetForTest: (
+      benchmarkId: string,
+      mode: "quick" | "full",
+      datasetDir: string | undefined,
+      limit?: number,
+    ) => Promise<void>;
+  };
+
+  await assert.rejects(
+    hooks.validateRunnerManagedPublishedDryRunDatasetForTest(
+      "memoryagentbench",
+      "full",
+      datasetDir,
+      1,
+    ),
+    /ReDial samples require a valid ReDial entity mapping/,
+  );
+});
+
 test("PersonaMem downloader accepts python3 when python is unavailable", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-cli-personamem-download-"));
   const datasetsDir = path.join(tmpDir, "datasets");

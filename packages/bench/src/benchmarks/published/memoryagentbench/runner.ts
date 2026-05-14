@@ -130,8 +130,10 @@ export async function runMemoryAgentBenchBenchmark(
   options: ResolvedRunBenchmarkOptions,
 ): Promise<BenchmarkResult> {
   const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
-  let recsysMappingLoaded = false;
-  let recsysMapping: RecSysEntityMapping | null = null;
+  let recsysMapping: RecSysEntityMapping | null = hasRecSysRedialItems(dataset)
+    ? await requireRecSysEntityMapping(options.datasetDir)
+    : null;
+  let recsysMappingLoaded = recsysMapping !== null;
   const tasks: TaskResult[] = [];
 
   const totalQuestions = dataset.reduce(
@@ -372,6 +374,12 @@ function errorScoresForProtocol(
     scores.recsys_recall_at_10 = -1;
   }
   return scores;
+}
+
+function hasRecSysRedialItems(dataset: MemoryAgentBenchItem[]): boolean {
+  return dataset.some((item) =>
+    item.metadata.source.toLowerCase().startsWith("recsys_"),
+  );
 }
 
 function getProtocolForSource(source: string): MemoryAgentBenchProtocol {
@@ -1192,6 +1200,19 @@ async function loadRecSysEntityMapping(
     };
   }
   return null;
+}
+
+async function requireRecSysEntityMapping(
+  datasetDir: string | undefined,
+): Promise<RecSysEntityMapping> {
+  const mapping = await loadRecSysEntityMapping(datasetDir);
+  if (!mapping) {
+    throw new Error(
+      "MemoryAgentBench ReDial samples require a valid ReDial entity mapping. " +
+        `Expected one of: ${recsysEntityMappingCandidates(datasetDir).join(", ") || "entity2id.json under the dataset directory"}.`,
+    );
+  }
+  return mapping;
 }
 
 function recsysEntityMappingCandidates(datasetDir: string | undefined): string[] {
