@@ -343,7 +343,7 @@ test("runPublishedHarness supports benchmark-owned binary judge prompts", async 
             expected: "a",
             recallSessionIds: ["s"],
             binaryJudgePrompt: ({ answeredText }) =>
-              `Is this correct? ${answeredText}`,
+              `Official binary prompt\nMODEL_RESPONSE:\n${answeredText}`,
           },
         ],
       },
@@ -353,10 +353,9 @@ test("runPublishedHarness supports benchmark-owned binary judge prompts", async 
   const task = result.results.tasks[0]!;
   assert.equal(task.scores.llm_judge, 0.8);
   assert.equal(task.scores.judge_accuracy, 1);
-  assert.ok(
-    calls.some((call) => call.kind === "binaryJudge"),
-    "binary judge prompt should be used",
-  );
+  const binaryJudgeCall = calls.find((call) => call.kind === "binaryJudge");
+  assert.ok(binaryJudgeCall, "binary judge prompt should be used");
+  assert.match(binaryJudgeCall.prompt, /^Official binary prompt\nMODEL_RESPONSE:\nanswer:/);
   assert.ok(
     !calls.some((call) => call.kind === "judge"),
     "generic judge rubric should not be used",

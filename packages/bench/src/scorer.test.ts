@@ -82,8 +82,10 @@ test("llmBinaryJudgeScoreDetailed falls back deterministically after prompt judg
       },
     },
     "Official yes/no prompt",
-    "The answer is 7 May 2023.",
-    "7 May 2023",
+    {
+      predicted: "The answer is 7 May 2023.",
+      expected: "7 May 2023",
+    },
   );
 
   assert.equal(result.score, 1);

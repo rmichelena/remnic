@@ -180,8 +180,10 @@ export async function llmBinaryJudgeScoreDetailed(
     }
     | undefined,
   prompt: string,
-  predicted: string,
-  expected: string,
+  fallback: {
+    predicted: string;
+    expected: unknown;
+  },
 ): Promise<BenchJudgeResult> {
   if (!judge) {
     return {
@@ -196,7 +198,7 @@ export async function llmBinaryJudgeScoreDetailed(
     return await judge.scoreBinaryPrompt(prompt);
   } catch {
     return {
-      score: deterministicJudgeFallback(predicted, expected),
+      score: deterministicJudgeFallback(fallback.predicted, fallback.expected),
       tokens: { input: 0, output: 0 },
       latencyMs: Math.round(performance.now() - startedAt),
       model: "deterministic-fallback",

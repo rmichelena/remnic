@@ -491,8 +491,10 @@ async function scoreTrialJudge(
   return llmBinaryJudgeScoreDetailed(
     binaryJudge,
     prompt,
-    answeredText,
-    trial.expected,
+    {
+      predicted: answeredText,
+      expected: trial.expected,
+    },
   );
 }
 
