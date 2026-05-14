@@ -277,7 +277,7 @@ test("codex-cli provider falls back to Responses API when CLI health probe fails
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(body.model, "gpt-5.5");
     assert.deepEqual(body.reasoning, { effort: "xhigh" });
-    assert.equal(body.service_tier, "priority");
+    assert.equal(body.service_tier, "fast");
     assert.equal(body.max_output_tokens, 12);
     assert.equal(body.store, false);
     assert.match(String(body.instructions), /benchmark LLM completion endpoint/);
