@@ -285,6 +285,14 @@ function validateResultEnvelope(
         "negative-aggregate-metric",
         `Aggregate ${metric}.mean is negative (${aggregate.mean}); public evidence must not contain failure sentinels.`,
       );
+    } else if (metric === "official_protocol_ready" && aggregate.mean < 1) {
+      addIssue(
+        options.issues,
+        benchmark,
+        resultPath,
+        "official-protocol-not-ready",
+        `Aggregate ${metric}.mean is ${aggregate.mean}; public evidence must include official protocol scoring.`,
+      );
     }
   }
 
@@ -330,6 +338,16 @@ function validateTaskScores(
           resultPath,
           "negative-task-score",
           `Task ${task.taskId} metric ${metric} is negative (${score}); public evidence must not contain failure sentinels.`,
+        );
+        continue;
+      }
+      if (metric === "official_protocol_ready" && score < 1) {
+        addIssue(
+          issues,
+          benchmark,
+          resultPath,
+          "official-protocol-not-ready",
+          `Task ${task.taskId} metric ${metric} is ${score}; public evidence must include official protocol scoring.`,
         );
       }
     }

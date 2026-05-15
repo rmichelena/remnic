@@ -411,6 +411,57 @@ test("rejects task-level failure sentinels even when aggregates are finite", asy
   assert.equal(issueCodes.has("negative-aggregate-metric"), true);
 });
 
+test("rejects MemoryAgentBench tasks without official protocol scoring", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-public-matrix-protocol-"));
+  t.after(() => rm(tmpDir, { recursive: true, force: true }));
+
+  const resultsDir = path.join(tmpDir, "results");
+  const diagnosticsDir = path.join(resultsDir, "codex-cli-diagnostics");
+  const benchmark = "memoryagentbench";
+  await writeResult(
+    resultsDir,
+    benchmarkResult(benchmark, {
+      results: {
+        tasks: [
+          {
+            taskId: `${benchmark}-redial-missing-mapping`,
+            question: "Which movie should be recommended?",
+            expected: "The Matrix",
+            actual: "The Matrix",
+            scores: {
+              official_protocol_ready: 0,
+            },
+            latencyMs: 1,
+            tokens: { input: 2, output: 1 },
+          },
+        ],
+        aggregates: {
+          official_protocol_ready: {
+            mean: 0,
+            median: 0,
+            stdDev: 0,
+            min: 0,
+            max: 0,
+          },
+        },
+      },
+    }),
+  );
+  await writeManifest(resultsDir, [benchmark]);
+  await writeDiagnostic(diagnosticsDir);
+
+  const verifyPublicMatrixEvidence = await loadVerifier();
+  const report = await verifyPublicMatrixEvidence({
+    resultsDir,
+    benchmarks: [benchmark],
+    expectedGitSha: "abc123",
+  });
+  const issueCodes = new Set(report.issues.map((issue) => issue.code));
+
+  assert.equal(report.ok, false);
+  assert.equal(issueCodes.has("official-protocol-not-ready"), true);
+});
+
 test("fails closed when the current git sha cannot be resolved", async (t) => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-public-matrix-no-git-"));
   t.after(() => rm(tmpDir, { recursive: true, force: true }));
