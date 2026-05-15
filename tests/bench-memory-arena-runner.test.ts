@@ -205,6 +205,76 @@ test("runBenchmark preserves array-form memory-arena answers in full mode datase
   );
 });
 
+test("runBenchmark honors reverse WebShop avoid rules before adding compatibility support", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-bench-memory-arena-webshop-avoid-"));
+  const datasetDir = path.join(tmpDir, "datasets", "memory-arena");
+  const adapter = new FakeMemoryAdapter(
+    new FixedResponder("item: Rose candle; attributes: Rose"),
+  );
+  await mkdir(datasetDir, { recursive: true });
+  await writeFile(
+    path.join(datasetDir, "webshop-products.jsonl"),
+    [
+      {
+        asin: "AAAA000001",
+        name: "Vanilla candle",
+        price: "$5.00",
+        attributes: ["Vanilla"],
+      },
+      {
+        asin: "BBBB000002",
+        name: "Chocolate candle",
+        price: "$30.00",
+        attributes: ["Chocolate"],
+      },
+      {
+        asin: "CCCC000003",
+        name: "Rose candle",
+        price: "$10.00",
+        attributes: ["Rose"],
+      },
+    ].map((record) => JSON.stringify(record)).join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(datasetDir, "bundled_shopping.jsonl"),
+    `${JSON.stringify({
+      id: 1,
+      category: "bundled_shopping",
+      questions: [
+        "Select the starter candle.\n**Available Options:**\n- Vanilla candle",
+        [
+          "Vanilla pairs well with Rose or Chocolate. Chocolate avoids Vanilla.",
+          "Choose the highest priced compatible option.",
+          "**Available Options:**",
+          "- Chocolate candle",
+          "- Rose candle",
+        ].join("\n"),
+      ],
+      answers: [
+        { target_asin: "AAAA000001", attributes: ["Vanilla"] },
+        { target_asin: "CCCC000003", attributes: ["Rose"] },
+      ],
+    })}\n`,
+    "utf8",
+  );
+
+  const result = await runBenchmark("memory-arena", {
+    mode: "full",
+    datasetDir,
+    system: adapter,
+  });
+
+  const task = result.results.tasks[0]!;
+  const answerContext = String(task.details?.answerContext ?? "");
+  assert.match(
+    answerContext,
+    /Best-supported option by current rules: Option 2: Rose candle/,
+  );
+  assert.doesNotMatch(answerContext, /support: Vanilla -> Chocolate/);
+  assert.equal(task.scores.item_selection_match, 1);
+});
+
 test("runBenchmark seeds memory-arena group travel with the base traveler plan", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-bench-memory-arena-base-"));
   const datasetDir = path.join(tmpDir, "datasets", "memory-arena");

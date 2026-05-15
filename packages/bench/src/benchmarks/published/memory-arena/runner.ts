@@ -1366,13 +1366,32 @@ function computeMemoryArenaCompatibilitySupport(
     }
     const avoidedLabels = rules.avoids.get(normalizedPriorLabel) ?? new Set<string>();
     for (const pairedLabel of pairedLabels) {
-      if (!candidateLabelSet.has(pairedLabel) || avoidedLabels.has(pairedLabel)) {
+      if (
+        !candidateLabelSet.has(pairedLabel)
+        || avoidedLabels.has(pairedLabel)
+        || memoryArenaCompatibilityLabelsAvoidEachOther(
+          normalizedPriorLabel,
+          pairedLabel,
+          rules.avoids,
+        )
+      ) {
         continue;
       }
       support.push(`${priorLabel} -> ${lookupMemoryArenaLabel(rules.labels, pairedLabel)}`);
     }
   }
   return support;
+}
+
+function memoryArenaCompatibilityLabelsAvoidEachOther(
+  leftLabel: string,
+  rightLabel: string,
+  avoids: Map<string, Set<string>>,
+): boolean {
+  return Boolean(
+    avoids.get(leftLabel)?.has(rightLabel)
+      || avoids.get(rightLabel)?.has(leftLabel),
+  );
 }
 
 function lookupMemoryArenaLabel(labels: string[], normalizedLabel: string): string {
