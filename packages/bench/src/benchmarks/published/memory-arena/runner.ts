@@ -1977,7 +1977,7 @@ function extractItemSelectionAsinReferences(
       asinReferences.add(normalizedAsin);
     }
   }
-  for (const match of predictedNormalized.matchAll(/\b(?=[a-z0-9]*\d)(?=[a-z0-9]*[a-z])[a-z0-9]{10}\b/g)) {
+  for (const match of predictedNormalized.matchAll(/\b(?=[a-z0-9]*\d)[a-z0-9]{10}\b/g)) {
     const normalizedAsin = normalizeMemoryArenaWebshopAsinReference(match[0]);
     if (normalizedAsin !== undefined) {
       asinReferences.add(normalizedAsin);
