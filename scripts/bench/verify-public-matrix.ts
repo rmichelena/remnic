@@ -267,6 +267,7 @@ function validateResultEnvelope(
   if (Object.keys(result.results.aggregates).length === 0) {
     addIssue(options.issues, benchmark, resultPath, "empty-aggregates", "Result has no aggregate metrics.");
   }
+  validateTaskScores(result, resultPath, options.issues);
   validateFullDatasetRunOptions(
     benchmark,
     resultPath,
@@ -276,6 +277,14 @@ function validateResultEnvelope(
   for (const [metric, aggregate] of Object.entries(result.results.aggregates)) {
     if (!Number.isFinite(aggregate.mean)) {
       addIssue(options.issues, benchmark, resultPath, "non-finite-metric", `Aggregate ${metric}.mean is not finite.`);
+    } else if (aggregate.mean < 0) {
+      addIssue(
+        options.issues,
+        benchmark,
+        resultPath,
+        "negative-aggregate-metric",
+        `Aggregate ${metric}.mean is negative (${aggregate.mean}); public evidence must not contain failure sentinels.`,
+      );
     }
   }
 
@@ -283,6 +292,47 @@ function validateResultEnvelope(
   validateProviderRole(result, resultPath, "judgeProvider", result.config.judgeProvider, options);
   if (options.requireInternalProvider || result.config.internalProvider) {
     validateProviderRole(result, resultPath, "internalProvider", result.config.internalProvider ?? null, options);
+  }
+}
+
+function validateTaskScores(
+  result: BenchmarkResult,
+  resultPath: string,
+  issues: PublicMatrixEvidenceIssue[],
+): void {
+  const benchmark = result.meta.benchmark;
+  for (const task of result.results.tasks) {
+    const error = task.details?.error;
+    if (typeof error === "string" && error.trim().length > 0) {
+      addIssue(
+        issues,
+        benchmark,
+        resultPath,
+        "task-error",
+        `Task ${task.taskId} includes an error detail: ${error.trim()}.`,
+      );
+    }
+    for (const [metric, score] of Object.entries(task.scores)) {
+      if (!Number.isFinite(score)) {
+        addIssue(
+          issues,
+          benchmark,
+          resultPath,
+          "non-finite-task-score",
+          `Task ${task.taskId} metric ${metric} is not finite.`,
+        );
+        continue;
+      }
+      if (score < 0) {
+        addIssue(
+          issues,
+          benchmark,
+          resultPath,
+          "negative-task-score",
+          `Task ${task.taskId} metric ${metric} is negative (${score}); public evidence must not contain failure sentinels.`,
+        );
+      }
+    }
   }
 }
 

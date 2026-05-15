@@ -359,6 +359,58 @@ test("reports missing and wrong public matrix evidence", async (t) => {
   assert.equal(issueCodes.has("manifest-result-unreadable"), true);
 });
 
+test("rejects task-level failure sentinels even when aggregates are finite", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-public-matrix-sentinel-"));
+  t.after(() => rm(tmpDir, { recursive: true, force: true }));
+
+  const resultsDir = path.join(tmpDir, "results");
+  const diagnosticsDir = path.join(resultsDir, "codex-cli-diagnostics");
+  const benchmark = "longmemeval";
+  await writeResult(
+    resultsDir,
+    benchmarkResult(benchmark, {
+      results: {
+        tasks: [
+          {
+            taskId: `${benchmark}-task-1`,
+            question: "What should be recalled?",
+            expected: "answer",
+            actual: "",
+            scores: { judge_accuracy: -1 },
+            latencyMs: 1,
+            tokens: { input: 2, output: 1 },
+            details: { error: "judge failed" },
+          },
+        ],
+        aggregates: {
+          judge_accuracy: {
+            mean: -1,
+            median: -1,
+            stdDev: 0,
+            min: -1,
+            max: -1,
+          },
+        },
+      },
+    }),
+  );
+  await writeManifest(resultsDir, [benchmark]);
+  await writeDiagnostic(diagnosticsDir);
+
+  const verifyPublicMatrixEvidence = await loadVerifier();
+  const report = await verifyPublicMatrixEvidence({
+    resultsDir,
+    benchmarks: [benchmark],
+    expectedGitSha: "abc123",
+  });
+  const issueCodes = new Set(report.issues.map((issue) => issue.code));
+
+  assert.equal(report.ok, false);
+  assert.equal(issueCodes.has("task-error"), true);
+  assert.equal(issueCodes.has("negative-task-score"), true);
+  assert.equal(issueCodes.has("negative-aggregate-metric"), true);
+});
+
 test("fails closed when the current git sha cannot be resolved", async (t) => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-public-matrix-no-git-"));
   t.after(() => rm(tmpDir, { recursive: true, force: true }));
