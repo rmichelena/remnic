@@ -145,6 +145,22 @@ test("parseBenchArgs accepts published --trial-concurrency for LoCoMo", () => {
   assert.equal(parsed.publishedTrialConcurrency, 8);
 });
 
+test("parseBenchArgs accepts published --ingest-concurrency for LoCoMo", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "locomo",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--ingest-concurrency",
+    "6",
+  ]);
+
+  assert.equal(parsed.publishedIngestConcurrency, 6);
+});
+
 test("parseBenchArgs rejects invalid or unsupported --trial-concurrency", () => {
   assert.throws(
     () =>
@@ -175,6 +191,39 @@ test("parseBenchArgs rejects invalid or unsupported --trial-concurrency", () => 
         "2",
       ]),
     /--trial-concurrency is currently supported only for LoCoMo/,
+  );
+});
+
+test("parseBenchArgs rejects invalid or unsupported --ingest-concurrency", () => {
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "locomo",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--ingest-concurrency",
+        "0",
+      ]),
+    /--ingest-concurrency must be an integer from 1 to 64/,
+  );
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "longmemeval",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--ingest-concurrency",
+        "2",
+      ]),
+    /--ingest-concurrency is currently supported only for LoCoMo/,
   );
 });
 

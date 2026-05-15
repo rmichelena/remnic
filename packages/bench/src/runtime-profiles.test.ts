@@ -26,6 +26,16 @@ test("baseline runtime profile keeps the stripped retrieval-only config", async 
   assert.equal(resolved.remnicConfig.knowledgeIndexEnabled, false);
 });
 
+test("runtime profile forwards LCM observe concurrency override", async () => {
+  const resolved = await resolveBenchRuntimeProfile({
+    runtimeProfile: "baseline",
+    lcmObserveConcurrency: 4,
+  });
+
+  assert.equal(resolved.remnicConfig.lcmObserveConcurrency, 4);
+  assert.equal(resolved.effectiveRemnicConfig.lcmObserveConcurrency, 4);
+});
+
 test("runtime assistant hook applies assistant prompt contract and neutralizes unsupported pronouns", async () => {
   const received: { question?: string; recalledText?: string } = {};
   const agent = createAssistantAgentFromResponder({

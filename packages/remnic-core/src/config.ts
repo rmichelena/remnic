@@ -2838,6 +2838,8 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.lcmArchiveRetentionDays === "number"
         ? Math.max(1, Math.floor(cfg.lcmArchiveRetentionDays))
         : 90,
+    lcmObserveConcurrency:
+      parseIntegerAtLeast(cfg.lcmObserveConcurrency, 1, 1, "lcmObserveConcurrency"),
     messagePartsEnabled: coerceBooleanLike(cfg.messagePartsEnabled) === true,
     messagePartsRecallMaxResults:
       typeof cfg.messagePartsRecallMaxResults === "number"

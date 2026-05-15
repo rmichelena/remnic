@@ -743,7 +743,9 @@ Commands:
   published --name <benchmark> --dataset <path> --model <id>
                            Run a published benchmark with leaderboard-friendly flags
                            (see issue #566 slice 4). Accepts --limit, --seed,
-                           --trial-limit, --out, --dry-run, --provider, --base-url.
+                           --trial-limit, --trial-concurrency,
+                           --ingest-concurrency, --out, --dry-run,
+                           --provider, --base-url.
   datasets download [benchmark...]
                            Download local datasets for supported published benchmarks
   datasets status          Show local dataset availability for supported benchmarks
@@ -921,6 +923,7 @@ export function buildBenchRuntimeProfileRequest(
     drainTimeout: parsed.drainTimeout,
     max429WaitMs: parsed.max429WaitMs,
     disableThinking: parsed.disableThinking,
+    lcmObserveConcurrency: parsed.publishedIngestConcurrency,
   };
 }
 

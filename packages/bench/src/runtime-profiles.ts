@@ -57,6 +57,7 @@ export interface ResolveBenchRuntimeProfileOptions {
   internalApiKey?: string;
   internalDisableThinking?: boolean;
   internalCodexReasoningEffort?: ProviderConfig["reasoningEffort"];
+  lcmObserveConcurrency?: number;
   requestTimeout?: number;
   drainTimeout?: number;
   max429WaitMs?: number;
@@ -135,6 +136,8 @@ export async function resolveBenchRuntimeProfile(
     internalProvider,
     { disableThinking: options.internalDisableThinking === true },
   );
+  const lcmObserveConcurrencyOverrides =
+    buildLcmObserveConcurrencyOverrides(options.lcmObserveConcurrency);
   const drainTimeoutMs = normalizeDrainTimeoutMs(
     options.drainTimeout ?? options.requestTimeout,
   );
@@ -163,6 +166,7 @@ export async function resolveBenchRuntimeProfile(
     const baselineWithInternalLlm = {
       ...baselineConfig,
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     };
     const effectiveRemnicConfig = withAssistantHooks(
       baselineWithInternalLlm,
@@ -200,6 +204,7 @@ export async function resolveBenchRuntimeProfile(
         ? { fastGatewayAgentId: options.fastGatewayAgentId }
         : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     };
     const persistedRemnicConfig = sanitizePersistedConfig({
       ...fileConfig,
@@ -252,6 +257,7 @@ export async function resolveBenchRuntimeProfile(
       ...(gatewayAgentId ? { gatewayAgentId } : {}),
       ...(fastGatewayAgentId ? { fastGatewayAgentId } : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     },
   );
   const effectiveRemnicConfig = withAssistantHooks(
@@ -263,6 +269,7 @@ export async function resolveBenchRuntimeProfile(
       ...(gatewayAgentId ? { gatewayAgentId } : {}),
       ...(fastGatewayAgentId ? { fastGatewayAgentId } : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     },
     gatewayResponder,
     structuredJudge,
@@ -449,6 +456,20 @@ function normalizeDrainTimeoutMs(value: number | undefined): number | undefined 
     );
   }
   return value;
+}
+
+function buildLcmObserveConcurrencyOverrides(
+  value: number | undefined,
+): Record<string, unknown> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!Number.isInteger(value) || value <= 0 || value > 64) {
+    throw new Error(
+      `benchmark LCM observe concurrency must be an integer from 1 to 64; received ${value}`,
+    );
+  }
+  return { lcmObserveConcurrency: value };
 }
 
 function applyInternalProviderDefaults(

@@ -1608,6 +1608,8 @@ export interface PluginConfig {
   lcmRecallBudgetShare: number;
   lcmDeterministicMaxTokens: number;
   lcmArchiveRetentionDays: number;
+  /** Max independent LCM observe jobs to process concurrently. Default 1. */
+  lcmObserveConcurrency: number;
   /** Opt-in structured message-part capture/recall sidecar for LCM. Default false. */
   messagePartsEnabled: boolean;
   /** Max structured file/tool matches injected into recall. */

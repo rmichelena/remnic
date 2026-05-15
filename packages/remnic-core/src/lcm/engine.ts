@@ -17,6 +17,7 @@ export interface LcmEngineConfig {
   deterministicMaxTokens: number;
   archiveRetentionDays: number;
   recallBudgetShare: number;
+  observeConcurrency: number;
   telemetryPrefilterEnabled: boolean;
   messagePartsEnabled: boolean;
   messagePartsRecallMaxResults: number;
@@ -32,6 +33,11 @@ export function extractLcmConfig(cfg: PluginConfig): LcmEngineConfig {
     deterministicMaxTokens: (cfg as any).lcmDeterministicMaxTokens ?? 512,
     archiveRetentionDays: (cfg as any).lcmArchiveRetentionDays ?? 90,
     recallBudgetShare: (cfg as any).lcmRecallBudgetShare ?? 0.15,
+    observeConcurrency:
+      typeof (cfg as any).lcmObserveConcurrency === "number" &&
+        Number.isFinite((cfg as any).lcmObserveConcurrency)
+        ? Math.max(1, Math.floor((cfg as any).lcmObserveConcurrency))
+        : 1,
     telemetryPrefilterEnabled: (cfg as any).lcmTelemetryPrefilterEnabled !== false,
     messagePartsEnabled: (cfg as any).messagePartsEnabled === true,
     messagePartsRecallMaxResults:
@@ -101,7 +107,7 @@ export class LcmEngine {
       },
     );
     const observeQueue = new LcmWorkQueue({
-      concurrency: 1,
+      concurrency: this.config.observeConcurrency,
       worker: async (sessionId, messages) => {
         await this.processObserveMessages(sessionId, messages);
       },

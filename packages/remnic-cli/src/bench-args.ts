@@ -97,6 +97,8 @@ export interface ParsedBenchArgs {
   publishedTrialLimit?: number;
   /** `bench published` — max independent trials to execute at once when supported. */
   publishedTrialConcurrency?: number;
+  /** `bench published` — max independent ingest sessions to summarize at once when supported. */
+  publishedIngestConcurrency?: number;
   /** `bench published` — benchmark-specific task/ability filter for diagnostic runs. */
   publishedTaskFilter?: string;
   /** `bench published` — published artifact output directory. */
@@ -260,6 +262,7 @@ export function collectBenchmarks(argv: string[]): string[] {
       arg === "--limit" ||
       arg === "--trial-limit" ||
       arg === "--trial-concurrency" ||
+      arg === "--ingest-concurrency" ||
       arg === "--task-filter" ||
       arg === "--seed" ||
       arg === "--out" ||
@@ -640,6 +643,10 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     args,
     "--trial-concurrency",
   );
+  const publishedIngestConcurrencyRaw = readBenchOptionValue(
+    args,
+    "--ingest-concurrency",
+  );
   const publishedTaskFilterRaw = readBenchOptionValue(args, "--task-filter");
   const publishedSeedRaw = readBenchOptionValue(args, "--seed");
   const publishedOutRaw = readBenchOptionValue(args, "--out");
@@ -725,6 +732,36 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     !trialConcurrencyTargetsSupportedBenchmark
   ) {
     throw new Error("ERROR: --trial-concurrency is currently supported only for LoCoMo.");
+  }
+
+  let publishedIngestConcurrency: number | undefined;
+  if (publishedIngestConcurrencyRaw !== undefined) {
+    const parsed = Number(publishedIngestConcurrencyRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 64) {
+      throw new Error(
+        "ERROR: --ingest-concurrency must be an integer from 1 to 64.",
+      );
+    }
+    publishedIngestConcurrency = parsed;
+  }
+  const ingestConcurrencyTargetsSupportedBenchmark =
+    publishedName === "locomo" ||
+    (
+      publishedName === undefined &&
+      action === "published"
+    ) ||
+    (
+      publishedName === undefined &&
+      action !== "published" &&
+      !args.includes("--all") &&
+      benchmarks.length === 1 &&
+      benchmarks[0] === "locomo"
+    );
+  if (
+    publishedIngestConcurrency !== undefined &&
+    !ingestConcurrencyTargetsSupportedBenchmark
+  ) {
+    throw new Error("ERROR: --ingest-concurrency is currently supported only for LoCoMo.");
   }
 
   let publishedTaskFilter: string | undefined;
@@ -940,6 +977,7 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     publishedLimit,
     publishedTrialLimit,
     publishedTrialConcurrency,
+    publishedIngestConcurrency,
     publishedTaskFilter,
     publishedOut: publishedOutRaw
       ? path.resolve(expandTilde(publishedOutRaw))

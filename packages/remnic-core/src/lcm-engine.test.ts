@@ -116,6 +116,7 @@ function createPluginConfig(memoryDir: string): PluginConfig {
     lcmTelemetryPrefilterEnabled: true,
     lcmArchiveRetentionDays: 90,
     lcmRecallBudgetShare: 0.15,
+    lcmObserveConcurrency: 1,
     messagePartsEnabled: true,
     messagePartsRecallMaxResults: 6,
   } as unknown as PluginConfig;
@@ -264,6 +265,57 @@ test("observeMessages resolves before summarize finishes and background worker p
     assert.equal(summary?.depth, 0);
   } finally {
     releaseSummarize.resolve();
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("observe queue honors configured concurrency across sessions", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-lcm-engine-concurrency-"),
+  );
+  const releaseSummaries = deferred<void>();
+  const twoSummariesStarted = deferred<void>();
+  const startedFor = new Set<string>();
+
+  try {
+    const engine = new LcmEngine(
+      {
+        ...createPluginConfig(memoryDir),
+        lcmObserveConcurrency: 2,
+      },
+      async (text) => {
+        if (text.includes("alpha")) {
+          startedFor.add("session-1");
+        }
+        if (text.includes("bravo")) {
+          startedFor.add("session-2");
+        }
+        if (startedFor.size === 2) {
+          twoSummariesStarted.resolve();
+        }
+        await releaseSummaries.promise;
+        return "summary";
+      },
+    );
+
+    await engine.observeMessages("session-1", [
+      { role: "user", content: "alpha" },
+    ]);
+    await engine.observeMessages("session-2", [
+      { role: "user", content: "bravo" },
+    ]);
+
+    await twoSummariesStarted.promise;
+    assert.equal(engine.observeQueueInFlightCount, 2);
+
+    releaseSummaries.resolve();
+    await engine.waitForObserveQueueIdle();
+
+    assert.deepEqual([...startedFor].sort(), ["session-1", "session-2"]);
+    assert.equal(engine.observeQueueInFlightCount, 0);
+    assert.equal(engine.observeQueueDepth, 0);
+  } finally {
+    releaseSummaries.resolve();
     await rm(memoryDir, { recursive: true, force: true });
   }
 });
