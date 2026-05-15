@@ -54,6 +54,8 @@ interface CodexDiagnosticRecord {
 }
 
 interface ReproManifest {
+  schemaVersion?: number;
+  generatedAt?: string;
   git?: {
     commit?: string;
     shortCommit?: string;
@@ -81,6 +83,19 @@ interface ReproManifest {
     gitSha?: string;
     taskCount?: number;
   }>;
+  command?: {
+    argv?: string[];
+    envKeys?: string[];
+  };
+  environment?: {
+    platform?: string;
+    arch?: string;
+    nodeVersion?: string;
+    packageManager?: string;
+  };
+  qmd?: unknown;
+  configFiles?: unknown;
+  artifactHash?: string;
 }
 
 type ReproManifestResult = NonNullable<ReproManifest["results"]>[number];
@@ -322,6 +337,44 @@ function validateResultEnvelope(
   }
 }
 
+function buildManifestArtifactHashIdentity(manifest: ReproManifest): unknown {
+  return {
+    schemaVersion: manifest.schemaVersion,
+    run: {
+      id: manifest.run?.id,
+      ...(manifest.run?.mode ? { mode: manifest.run.mode } : {}),
+      selectedBenchmarks: manifest.run?.selectedBenchmarks,
+      runtimeProfiles: manifest.run?.runtimeProfiles,
+      ...(manifest.run && Object.prototype.hasOwnProperty.call(manifest.run, "limit")
+        ? { limit: manifest.run.limit }
+        : {}),
+      ...(manifest.run && Object.prototype.hasOwnProperty.call(manifest.run, "seed")
+        ? { seed: (manifest.run as { seed?: unknown }).seed }
+        : {}),
+    },
+    git: {
+      commit: manifest.git?.commit,
+      shortCommit: manifest.git?.shortCommit,
+    },
+    command: {
+      argv: manifest.command?.argv,
+      envKeys: manifest.command?.envKeys,
+    },
+    environment: {
+      platform: manifest.environment?.platform,
+      arch: manifest.environment?.arch,
+      nodeVersion: manifest.environment?.nodeVersion,
+      ...(manifest.environment?.packageManager
+        ? { packageManager: manifest.environment.packageManager }
+        : {}),
+    },
+    ...(manifest.qmd ? { qmd: manifest.qmd } : {}),
+    configFiles: manifest.configFiles,
+    datasets: manifest.datasets,
+    results: manifest.results,
+  };
+}
+
 function validateTaskScores(
   result: BenchmarkResult,
   resultPath: string,
@@ -458,6 +511,24 @@ function validateManifest(
     issues: PublicMatrixEvidenceIssue[];
   },
 ): void {
+  if (!isSha256(manifest.artifactHash)) {
+    options.issues.push({
+      code: "manifest-missing-artifact-hash",
+      path: manifestPath,
+      message: "Repro manifest must include a SHA-256 artifactHash before diagnostics can be trusted.",
+    });
+  } else {
+    const actualArtifactHash = sha256String(
+      stableStringify(buildManifestArtifactHashIdentity(manifest)),
+    );
+    if (actualArtifactHash !== manifest.artifactHash.toLowerCase()) {
+      options.issues.push({
+        code: "manifest-artifact-hash-mismatch",
+        path: manifestPath,
+        message: `Manifest artifactHash mismatch: expected ${manifest.artifactHash.toLowerCase()}, got ${actualArtifactHash}.`,
+      });
+    }
+  }
   if (manifest.git?.dirty !== false) {
     options.issues.push({
       code: "dirty-manifest-git",
@@ -848,6 +919,23 @@ function isNonEmptyString(value: unknown): value is string {
 async function sha256File(filePath: string): Promise<string> {
   const bytes = await readFile(filePath);
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function sha256String(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
 }
 
 function resolveCurrentGitSha(cwd: string): string | undefined {

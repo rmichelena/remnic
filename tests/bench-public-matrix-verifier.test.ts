@@ -186,6 +186,72 @@ async function manifestResultEntryForPath(
   }
 }
 
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function manifestArtifactHashIdentity(manifest: Record<string, unknown>): unknown {
+  const run = manifest.run as Record<string, unknown> | undefined;
+  const git = manifest.git as Record<string, unknown> | undefined;
+  const command = manifest.command as Record<string, unknown> | undefined;
+  const environment = manifest.environment as Record<string, unknown> | undefined;
+  return {
+    schemaVersion: manifest.schemaVersion,
+    run: {
+      id: run?.id,
+      ...(run?.mode ? { mode: run.mode } : {}),
+      selectedBenchmarks: run?.selectedBenchmarks,
+      runtimeProfiles: run?.runtimeProfiles,
+      ...(run && Object.prototype.hasOwnProperty.call(run, "limit")
+        ? { limit: run.limit }
+        : {}),
+      ...(run && Object.prototype.hasOwnProperty.call(run, "seed")
+        ? { seed: run.seed }
+        : {}),
+    },
+    git: {
+      commit: git?.commit,
+      shortCommit: git?.shortCommit,
+    },
+    command: {
+      argv: command?.argv,
+      envKeys: command?.envKeys,
+    },
+    environment: {
+      platform: environment?.platform,
+      arch: environment?.arch,
+      nodeVersion: environment?.nodeVersion,
+      ...(environment?.packageManager
+        ? { packageManager: environment.packageManager }
+        : {}),
+    },
+    ...(manifest.qmd ? { qmd: manifest.qmd } : {}),
+    configFiles: manifest.configFiles,
+    datasets: manifest.datasets,
+    results: manifest.results,
+  };
+}
+
+function withManifestArtifactHash(
+  manifest: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...manifest,
+    artifactHash: createHash("sha256")
+      .update(stableStringify(manifestArtifactHashIdentity(manifest)))
+      .digest("hex"),
+  };
+}
+
 async function writeManifest(
   resultsDir: string,
   benchmarks: readonly string[],
@@ -193,9 +259,11 @@ async function writeManifest(
   limit?: number,
   runId = "test-public-matrix-run",
 ): Promise<void> {
-  await writeJson(path.join(resultsDir, "MANIFEST.json"), {
+  const manifest = {
+    schemaVersion: 1,
     git: {
       commit: gitSha,
+      shortCommit: gitSha,
       dirty: false,
     },
     run: {
@@ -214,7 +282,8 @@ async function writeManifest(
     results: await Promise.all(
       benchmarks.map((benchmark) => manifestResultEntry(resultsDir, benchmark, gitSha)),
     ),
-  });
+  };
+  await writeJson(path.join(resultsDir, "MANIFEST.json"), withManifestArtifactHash(manifest));
 }
 
 async function writeDiagnostic(
@@ -309,9 +378,11 @@ test("selects the expected runtime profile from multi-profile manifests", async 
     }),
   );
   await writeResult(resultsDir, benchmarkResult(benchmark));
-  await writeJson(path.join(resultsDir, "MANIFEST.json"), {
+  await writeJson(path.join(resultsDir, "MANIFEST.json"), withManifestArtifactHash({
+    schemaVersion: 1,
     git: {
       commit: "abc123",
+      shortCommit: "abc123",
       dirty: false,
     },
     run: {
@@ -342,7 +413,7 @@ test("selects the expected runtime profile from multi-profile manifests", async 
         "abc123",
       ),
     ],
-  });
+  }));
   await writeDiagnostic(diagnosticsDir);
 
   const verifyPublicMatrixEvidence = await loadVerifier();
@@ -408,6 +479,38 @@ test("rejects manifest result files swapped after manifest generation", async (t
   assert.equal(report.ok, false);
   assert.equal(issueCodes.has("manifest-result-hash-mismatch"), true);
   assert.equal(issueCodes.has("manifest-result-id-mismatch"), true);
+});
+
+test("rejects tampered manifest run ids before trusting diagnostics", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "remnic-public-matrix-runid-"));
+  t.after(() => rm(tmpDir, { recursive: true, force: true }));
+
+  const resultsDir = path.join(tmpDir, "results");
+  const diagnosticsDir = path.join(resultsDir, "codex-cli-diagnostics");
+  const benchmark = "longmemeval";
+  await writeResult(resultsDir, benchmarkResult(benchmark));
+  await writeManifest(resultsDir, [benchmark], "abc123", undefined, "original-run");
+
+  const manifestPath = path.join(resultsDir, "MANIFEST.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    run: { id: string };
+  };
+  manifest.run.id = "borrowed-fast-run";
+  await writeJson(manifestPath, manifest);
+  await writeDiagnostic(diagnosticsDir, {
+    runId: "borrowed-fast-run",
+  });
+
+  const verifyPublicMatrixEvidence = await loadVerifier();
+  const report = await verifyPublicMatrixEvidence({
+    resultsDir,
+    benchmarks: [benchmark],
+    expectedGitSha: "abc123",
+  });
+  const issueCodes = new Set(report.issues.map((issue) => issue.code));
+
+  assert.equal(report.ok, false);
+  assert.equal(issueCodes.has("manifest-artifact-hash-mismatch"), true);
 });
 
 test("reports missing and wrong public matrix evidence", async (t) => {

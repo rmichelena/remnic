@@ -225,6 +225,7 @@ function buildArtifactHashIdentity(manifest: Omit<BenchmarkReproManifest, "artif
   return {
     schemaVersion: manifest.schemaVersion,
     run: {
+      id: manifest.run.id,
       ...(manifest.run.mode ? { mode: manifest.run.mode } : {}),
       selectedBenchmarks: manifest.run.selectedBenchmarks,
       runtimeProfiles: manifest.run.runtimeProfiles,
