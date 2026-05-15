@@ -14,7 +14,7 @@ const BENCHMARK_TIMEOUT_ABORT_GRACE_MS = 1_500;
 
 export interface TimeoutGuardOptions {
   benchmarkId: string;
-  timeoutMs: number;
+  timeoutMs?: number;
   drainTimeoutMs?: number;
   logProgress?: boolean;
   log?: (message: string) => void;
@@ -66,23 +66,32 @@ export function createTimeoutGuardedAdapter(
   adapter: BenchMemoryAdapter,
   options: TimeoutGuardOptions,
 ): BenchMemoryAdapter {
-  assertPositiveTimeout(options.timeoutMs, "benchmark phase timeout");
+  if (options.timeoutMs !== undefined) {
+    assertPositiveTimeout(options.timeoutMs, "benchmark phase timeout");
+  }
   if (options.drainTimeoutMs !== undefined) {
     assertPositiveTimeout(options.drainTimeoutMs, "benchmark drain timeout");
   }
-  const drainTimeoutMs = options.drainTimeoutMs ?? options.timeoutMs;
+  const phaseTimeoutMs = options.timeoutMs;
+  const drainTimeoutMs = options.drainTimeoutMs ?? phaseTimeoutMs;
 
   const run = async <T>(
     phase: string,
     fn: (signal: AbortSignal) => Promise<T>,
-    timeoutMs = options.timeoutMs,
+    timeoutMs = phaseTimeoutMs,
   ): Promise<T> => {
+    if (timeoutMs === undefined) {
+      return fn(new AbortController().signal);
+    }
     const label = `${options.benchmarkId}:${phase}`;
     return runWithBenchmarkPhaseTimeout(label, timeoutMs, fn, options);
   };
 
   const wrapped: BenchMemoryAdapter = {
     store(sessionId: string, messages: Message[]): Promise<void> {
+      if (phaseTimeoutMs === undefined) {
+        return adapter.store(sessionId, messages);
+      }
       return run(`store session=${sessionId} messages=${messages.length}`, () =>
         adapter.store(sessionId, messages),
       );
@@ -93,6 +102,9 @@ export function createTimeoutGuardedAdapter(
       budgetChars?: number,
       recallOptions?: BenchRecallOptions,
     ): Promise<string> {
+      if (phaseTimeoutMs === undefined) {
+        return adapter.recall(sessionId, query, budgetChars, recallOptions);
+      }
       return run(`recall session=${sessionId}`, () =>
         adapter.recall(sessionId, query, budgetChars, recallOptions),
       );
@@ -102,16 +114,25 @@ export function createTimeoutGuardedAdapter(
       limit: number,
       sessionId?: string,
     ): Promise<SearchResult[]> {
+      if (phaseTimeoutMs === undefined) {
+        return adapter.search(query, limit, sessionId);
+      }
       return run(`search session=${sessionId ?? "all"} limit=${limit}`, () =>
         adapter.search(query, limit, sessionId),
       );
     },
     reset(sessionId?: string): Promise<void> {
+      if (phaseTimeoutMs === undefined) {
+        return adapter.reset(sessionId);
+      }
       return run(`reset session=${sessionId ?? "all"}`, () =>
         adapter.reset(sessionId),
       );
     },
     getStats(sessionId?: string): Promise<MemoryStats> {
+      if (phaseTimeoutMs === undefined) {
+        return adapter.getStats(sessionId);
+      }
       return run(`stats session=${sessionId ?? "all"}`, () =>
         adapter.getStats(sessionId),
       );
@@ -123,13 +144,19 @@ export function createTimeoutGuardedAdapter(
 
   if (adapter.drain) {
     wrapped.drain = (): Promise<void> =>
-      run("drain", () => adapter.drain!(), drainTimeoutMs);
+      drainTimeoutMs === undefined
+        ? adapter.drain!()
+        : run("drain", () => adapter.drain!(), drainTimeoutMs);
   }
   if (adapter.responder) {
-    wrapped.responder = wrapResponder(adapter.responder, run);
+    wrapped.responder =
+      phaseTimeoutMs === undefined
+        ? adapter.responder
+        : wrapResponder(adapter.responder, run);
   }
   if (adapter.judge) {
-    wrapped.judge = wrapJudge(adapter.judge, run);
+    wrapped.judge =
+      phaseTimeoutMs === undefined ? adapter.judge : wrapJudge(adapter.judge, run);
   }
 
   return wrapped;
@@ -137,7 +164,7 @@ export function createTimeoutGuardedAdapter(
 
 export function createTimeoutGuardedIngestionAdapter(
   adapter: IngestionBenchAdapter,
-  options: TimeoutGuardOptions,
+  options: TimeoutGuardOptions & { timeoutMs: number },
 ): IngestionBenchAdapter {
   assertPositiveTimeout(options.timeoutMs, "benchmark phase timeout");
 

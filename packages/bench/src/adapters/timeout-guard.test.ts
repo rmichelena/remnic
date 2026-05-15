@@ -205,6 +205,36 @@ test("timeout guard uses a separate drain timeout", async () => {
   );
 });
 
+test("timeout guard supports a drain-only timeout", async () => {
+  const adapter = makeAdapter();
+  let responderReceivedSignal = false;
+  adapter.drain = async () => new Promise<void>(() => {});
+  adapter.responder = {
+    async respond(_question, _recalledText, control) {
+      responderReceivedSignal = control?.signal !== undefined;
+      return {
+        text: "answer",
+        tokens: { input: 1, output: 1 },
+        latencyMs: 1,
+        model: "fake",
+      };
+    },
+  };
+
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    drainTimeoutMs: 5,
+  });
+
+  assert.equal(await guarded.recall("s", "q"), "ok");
+  assert.equal((await guarded.responder?.respond("q", "r"))?.text, "answer");
+  assert.equal(responderReceivedSignal, false);
+  await assert.rejects(
+    () => guarded.drain!(),
+    /benchmark phase timed out after 5ms: timeout-test:drain/,
+  );
+});
+
 test("resolveBenchmarkPhaseTimeoutMs prefers explicit benchmark config", () => {
   assert.equal(
     resolveBenchmarkPhaseTimeoutMs({

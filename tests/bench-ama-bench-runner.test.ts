@@ -91,6 +91,12 @@ class SlowRecallMemoryAdapter extends FakeMemoryAdapter {
   }
 }
 
+class StuckDrainMemoryAdapter extends FakeMemoryAdapter {
+  async drain(): Promise<void> {
+    return new Promise<void>(() => {});
+  }
+}
+
 test("runBenchmark executes ama-bench in quick mode through the phase-1 package API", async () => {
   const adapter = new FakeMemoryAdapter();
 
@@ -208,6 +214,20 @@ test("runBenchmark applies AMA-Bench trialConcurrency without reordering tasks",
   assert.deepEqual(
     result.results.tasks.map((task) => task.taskId),
     ["ama-smoke-q1", "ama-smoke-q2"],
+  );
+});
+
+test("runBenchmark honors AMA-Bench drainTimeoutMs without a phase timeout", async () => {
+  const adapter = new StuckDrainMemoryAdapter();
+
+  await assert.rejects(
+    () =>
+      runBenchmark("ama-bench", {
+        mode: "quick",
+        system: adapter,
+        drainTimeoutMs: 5,
+      }),
+    /benchmark phase timed out after 5ms: ama-bench:drain/,
   );
 });
 
