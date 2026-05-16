@@ -23,6 +23,18 @@ Both interfaces connect to the same [`@remnic/core`](https://www.npmjs.com/packa
 
 ## Usage
 
+Run the standalone server:
+
+```bash
+npx remnic-server --help
+npx remnic-server --port 4318
+```
+
+The package also ships the legacy `engram-server` binary for compatibility.
+The bin wrappers are source-controlled so package managers can link them during
+workspace installs; release builds verify that both targets have Node shebangs
+and can start their help command before publish.
+
 ```typescript
 import { createServer } from "@remnic/server";
 

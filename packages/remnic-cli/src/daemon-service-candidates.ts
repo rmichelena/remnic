@@ -111,7 +111,9 @@ export function findCommandOnPath(command: string, pathEnv = process.env.PATH ??
 }
 
 export function resolveServerBinPath(importMetaDir: string, pathEnv = process.env.PATH ?? ""): string {
+  const binPath = path.resolve(importMetaDir, "../../remnic-server/bin/remnic-server.js");
   const distPath = path.resolve(importMetaDir, "../../remnic-server/dist/index.js");
+  if (fs.existsSync(binPath) && fs.existsSync(distPath)) return binPath;
   if (fs.existsSync(distPath)) return distPath;
 
   const pathBin = findCommandOnPath("remnic-server", pathEnv);

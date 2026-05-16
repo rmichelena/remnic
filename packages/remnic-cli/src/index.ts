@@ -6644,7 +6644,7 @@ function daemonInstall(): void {
   }
   if (!serverBinDetails.loadableByNode) {
     console.error("Error: @remnic/server has not been built. Run 'pnpm run build --filter=@remnic/server' first.");
-    console.error(`  Found:    ${serverBin} (TypeScript source — not loadable by launchd/systemd node)`);
+    console.error(`  Found:    ${serverBin} (not loadable by launchd/systemd node)`);
     process.exit(1);
   }
 

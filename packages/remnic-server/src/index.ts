@@ -316,14 +316,12 @@ Environment:
 }
 
 // Auto-run when executed directly
-// Matches: `node .../remnic-server/dist/index.js`, `node .../remnic-server/src/index.ts`,
-// `npx remnic-server`, `npx engram-server`, but NOT test files under those directories
+// Matches direct execution of `node .../remnic-server/dist/index.js` or
+// `node .../remnic-server/src/index.ts`. Package command names are handled by
+// the bin wrappers in ../bin so importing this module cannot start twice.
 if (
   process.argv[1] &&
-  (/remnic-server[\\/](?:dist|src)[\\/]index\.[jt]s$/.test(process.argv[1]) ||
-   /engram-server[\\/](?:dist|src)[\\/]index\.[jt]s$/.test(process.argv[1]) ||
-   process.argv[1].endsWith("remnic-server") ||
-   process.argv[1].endsWith("engram-server"))
+  /(?:remnic-server|engram-server)[\\/](?:dist|src)[\\/]index\.[jt]s$/.test(process.argv[1])
 ) {
   cliMain().catch((err) => {
     process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);

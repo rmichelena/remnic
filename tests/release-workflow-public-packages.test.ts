@@ -82,6 +82,91 @@ test("release workflow verifies the OpenClaw ClawHub packlist after build", asyn
   );
 });
 
+test("@remnic/server build verifies declared bin artifacts", async () => {
+  const packageJson = JSON.parse(await readFile("packages/remnic-server/package.json", "utf8"));
+
+  assert.deepEqual(packageJson.bin, {
+    "remnic-server": "./bin/remnic-server.js",
+    "engram-server": "./bin/engram-server.js",
+  });
+  assert.ok(
+    packageJson.files.includes("bin/*.js"),
+    "@remnic/server package must include source-controlled bin wrappers",
+  );
+  assert.match(
+    packageJson.scripts.build,
+    /node scripts\/verify-bin\.mjs/,
+    "@remnic/server build must verify the generated bin files before publish",
+  );
+  assert.equal(packageJson.scripts["verify:bin"], "node scripts/verify-bin.mjs");
+});
+
+test("@remnic/server bin verifier accepts Node executable bin targets", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-server-bin-ok-"));
+  try {
+    await mkdir(path.join(tempDir, "dist", "bin"), { recursive: true });
+    await writeFile(
+      path.join(tempDir, "package.json"),
+      JSON.stringify({
+        name: "@remnic/server",
+        type: "module",
+        bin: {
+          "remnic-server": "./dist/bin/remnic-server.js",
+        },
+      }),
+    );
+    await writeFile(
+      path.join(tempDir, "dist", "bin", "remnic-server.js"),
+      [
+        "#!/usr/bin/env node",
+        "if (process.argv.includes('--help')) {",
+        "  console.log('remnic-server help');",
+        "  process.exit(0);",
+        "}",
+        "process.exit(1);",
+      ].join("\n"),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      ["packages/remnic-server/scripts/verify-bin.mjs", tempDir],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Verified 1 @remnic\/server bin entries/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("@remnic/server bin verifier rejects missing bin targets", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-server-bin-missing-"));
+  try {
+    await writeFile(
+      path.join(tempDir, "package.json"),
+      JSON.stringify({
+        name: "@remnic/server",
+        type: "module",
+        bin: {
+          "remnic-server": "./dist/bin/remnic-server.js",
+        },
+      }),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      ["packages/remnic-server/scripts/verify-bin.mjs", tempDir],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /points to missing file/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("OpenClaw security scan wrapper handles minified scanner exports", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-openclaw-scan-"));
   try {

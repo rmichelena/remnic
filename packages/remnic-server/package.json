@@ -10,10 +10,11 @@
     }
   },
   "bin": {
-    "remnic-server": "./dist/bin/remnic-server.js",
-    "engram-server": "./dist/bin/engram-server.js"
+    "remnic-server": "./bin/remnic-server.js",
+    "engram-server": "./bin/engram-server.js"
   },
   "files": [
+    "bin/*.js",
     "dist"
   ],
   "publishConfig": {
@@ -21,7 +22,8 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --target es2022 --platform node --outDir dist && tsup bin/remnic-server.ts bin/engram-server.ts --format esm --target es2022 --platform node --outDir dist/bin",
+    "build": "tsup src/index.ts --format esm --target es2022 --platform node --outDir dist && node scripts/verify-bin.mjs",
+    "verify:bin": "node scripts/verify-bin.mjs",
     "check-types": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },

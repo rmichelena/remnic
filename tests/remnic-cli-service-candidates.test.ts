@@ -49,7 +49,7 @@ test("daemon server binary resolution falls back to remnic-server on PATH before
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-server-bin-"));
   const packageDir = path.join(tempDir, "packages", "remnic-cli", "dist");
   const binDir = path.join(tempDir, "bin");
-  const globalServer = path.join(tempDir, "lib", "node_modules", "@remnic", "server", "dist", "bin", "remnic-server.js");
+  const globalServer = path.join(tempDir, "lib", "node_modules", "@remnic", "server", "bin", "remnic-server.js");
   const pathServer = path.join(binDir, "remnic-server");
 
   fs.mkdirSync(path.dirname(globalServer), { recursive: true });
@@ -70,7 +70,7 @@ test("daemon server binary resolution unwraps shell shims to runnable JavaScript
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-server-shim-"));
   const packageDir = path.join(tempDir, "packages", "remnic-cli", "dist");
   const binDir = path.join(tempDir, "bin");
-  const globalServer = path.join(tempDir, "lib", "node_modules", "@remnic", "server", "dist", "bin", "remnic-server.js");
+  const globalServer = path.join(tempDir, "lib", "node_modules", "@remnic", "server", "bin", "remnic-server.js");
   const pathServer = path.join(binDir, "remnic-server");
 
   fs.mkdirSync(path.dirname(globalServer), { recursive: true });
@@ -84,7 +84,7 @@ test("daemon server binary resolution unwraps shell shims to runnable JavaScript
       "#!/bin/sh",
       "export REMNIC_SERVER_ENV=test",
       "basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")",
-      "exec node \"$basedir/../lib/node_modules/@remnic/server/dist/bin/remnic-server.js\" \"$@\"",
+      "exec node \"$basedir/../lib/node_modules/@remnic/server/bin/remnic-server.js\" \"$@\"",
       "",
     ].join("\n"),
     "utf8",
