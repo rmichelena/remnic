@@ -352,16 +352,26 @@ function artifactHashIdentity(manifest) {
   };
 }
 
+function parseTimestampMs(value) {
+  const ms = Date.parse(value ?? '');
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 function buildDiagnosticsSummary(resultsDir, runId, benchmark, startedAt, finishedAt, generatedAt) {
   const diagDir = path.join(resultsDir, 'codex-cli-diagnostics');
   if (!fs.existsSync(diagDir)) {
     return undefined;
   }
+  const startedAtMs = parseTimestampMs(startedAt);
+  const finishedAtMs = parseTimestampMs(finishedAt);
+  assert(startedAtMs !== undefined, 'diagnostics summary start timestamp must be valid');
+  assert(finishedAtMs !== undefined, 'diagnostics summary finish timestamp must be valid');
   const files = fs.readdirSync(diagDir).filter((name) => name.endsWith('.json'));
   const checked = [];
   let inFlight = 0;
   let beforeStart = 0;
   let afterCutoff = 0;
+  let invalidTimestamps = 0;
   for (const name of files) {
     const record = readJson(path.join(diagDir, name));
     if (runId && record.runId !== runId) {
@@ -371,11 +381,17 @@ function buildDiagnosticsSummary(resultsDir, runId, benchmark, startedAt, finish
       inFlight += 1;
       continue;
     }
-    if (Date.parse(record.startedAt ?? '') < Date.parse(startedAt)) {
+    const recordStartedAtMs = parseTimestampMs(record.startedAt);
+    const recordFinishedAtMs = parseTimestampMs(record.finishedAt);
+    if (recordStartedAtMs === undefined || recordFinishedAtMs === undefined) {
+      invalidTimestamps += 1;
+      continue;
+    }
+    if (recordStartedAtMs < startedAtMs) {
       beforeStart += 1;
       continue;
     }
-    if (Date.parse(record.finishedAt) > Date.parse(finishedAt)) {
+    if (recordFinishedAtMs > finishedAtMs) {
       afterCutoff += 1;
       continue;
     }
@@ -405,6 +421,7 @@ function buildDiagnosticsSummary(resultsDir, runId, benchmark, startedAt, finish
     inFlight,
     beforeStart,
     afterCutoff,
+    invalidTimestamps,
     errored: checked.filter((record) => record.error).length,
     nonzero: checked.filter((record) => record.result && record.result.status !== 0).length,
     providers: distribution((record) => record.provider ?? '<missing>'),
@@ -563,6 +580,7 @@ async function main() {
   assert(diagnostics.checked > 0, 'diagnostics must include at least one completed record');
   assert(diagnostics.inFlight === 0, 'diagnostics must not include in-flight records at evidence cutoff');
   assert(diagnostics.afterCutoff === 0, 'diagnostics must not include records after evidence cutoff');
+  assert(diagnostics.invalidTimestamps === 0, 'diagnostics must have zero invalid timestamps');
   assert(diagnostics.errored === 0, 'diagnostics must have zero errors');
   assert(diagnostics.nonzero === 0, 'diagnostics must have zero nonzero exits');
   assert(diagnostics.providers?.['codex-cli'] === diagnostics.checked, 'diagnostics provider distribution must be all codex-cli');

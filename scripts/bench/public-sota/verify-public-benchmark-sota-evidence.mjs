@@ -300,6 +300,7 @@ assert(diagnostics.checked > 0, 'diagnostics must include at least one completed
 assert(diagnostics.complete === diagnostics.checked, 'diagnostics complete count must match checked records');
 assert(diagnostics.inFlight === 0, 'diagnostics must have zero in-flight records');
 assert(diagnostics.afterCutoff === 0, 'diagnostics must have zero after-cutoff records');
+assert(diagnostics.invalidTimestamps === 0, 'diagnostics must have zero invalid timestamps');
 assert(diagnostics.errored === 0, 'diagnostics must have zero errors');
 assert(diagnostics.nonzero === 0, 'diagnostics must have zero nonzero exits');
 assert(diagnostics.providers?.['codex-cli'] === diagnostics.checked, 'diagnostics provider distribution must be all codex-cli');

@@ -181,6 +181,7 @@ diagnostic summary.
 
 - Diagnostic records checked: \`${diagnostics.checked}\`
 - In-flight records at cutoff: \`${diagnostics.inFlight}\`
+- Invalid timestamp records excluded: \`${diagnostics.invalidTimestamps ?? 0}\`
 - Errors: \`${diagnostics.errored}\`
 - Nonzero exits: \`${diagnostics.nonzero}\`
 - Providers: \`${JSON.stringify(diagnostics.providers)}\`
