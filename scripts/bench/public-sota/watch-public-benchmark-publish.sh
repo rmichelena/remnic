@@ -39,11 +39,10 @@ trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
 stale_baseline_run() {
   local run_id="$1"
-  local status_file="${RESULTS_ROOT}/${run_id}/status.tsv"
   if tmux has-session -t "${run_id}" 2>/dev/null; then
     return 1
   fi
-  [[ -f "${status_file}" ]] && grep -Eq $'\t(success|fail:[0-9]+)\t' "${status_file}"
+  return 0
 }
 
 BASELINE_RUNS_FILE="$(mktemp "${TMP_ROOT}/remnic-${BENCHMARK}-publish-baseline.XXXXXX")"

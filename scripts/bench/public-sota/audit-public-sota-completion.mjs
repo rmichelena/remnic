@@ -23,6 +23,14 @@ const branchRef = process.env.BRANCH_REF ?? 'origin/bench/public-matrix-codex';
 const auditWorktree = process.env.AUDIT_WORKTREE ?? path.join(os.tmpdir(), 'remnic-public-sota-completion-audit');
 const targetMapPath = process.env.TARGET_MAP ?? path.join(scriptDir, 'current-target-map.json');
 
+function fetchBranchRef() {
+  if (!branchRef.startsWith('origin/')) {
+    return;
+  }
+  const branch = branchRef.slice('origin/'.length);
+  execFileSync('git', ['-C', repoRoot, 'fetch', 'origin', branch], { stdio: ['ignore', 'ignore', 'ignore'] });
+}
+
 const benchmarks = [
   {
     benchmark: 'ama-bench',
@@ -57,6 +65,8 @@ function gitLsTree(prefix) {
     return [];
   }
 }
+
+fetchBranchRef();
 
 const branchFiles = [
   ...gitLsTree('docs/benchmarks'),
