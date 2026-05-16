@@ -109,15 +109,18 @@ function fetchReviewThreads() {
   const threads = [];
   let after;
   for (;;) {
-    const raw = execFileSync('gh', [
+    const command = [
       'api',
       'graphql',
       '-f', `owner=${owner}`,
       '-f', `name=${name}`,
       '-F', `number=${prNumber}`,
-      ...(after ? ['-f', `after=${after}`] : ['-f', 'after=']),
       '-f', `query=${reviewThreadsQuery}`,
-    ], { encoding: 'utf8' });
+    ];
+    if (after) {
+      command.push('-f', `after=${after}`);
+    }
+    const raw = execFileSync('gh', command, { encoding: 'utf8' });
     const payload = JSON.parse(raw);
     const page = payload.data?.repository?.pullRequest?.reviewThreads;
     if (!page) {
