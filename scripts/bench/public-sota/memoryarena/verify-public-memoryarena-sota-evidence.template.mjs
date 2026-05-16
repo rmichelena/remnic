@@ -259,6 +259,7 @@ function manifestArtifactHashIdentity(manifest) {
       ...(manifest.run?.mode ? { mode: manifest.run.mode } : {}),
       selectedBenchmarks: manifest.run?.selectedBenchmarks,
       runtimeProfiles: manifest.run?.runtimeProfiles,
+      ...(Object.prototype.hasOwnProperty.call(manifest.run ?? {}, 'limit') ? { limit: manifest.run.limit } : {}),
       ...(Object.prototype.hasOwnProperty.call(manifest.run ?? {}, 'seed') ? { seed: manifest.run.seed } : {}),
     },
     git: {

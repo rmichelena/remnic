@@ -116,9 +116,7 @@ function compareLoCoMo(result, targets) {
 function normalizeSplit(value) {
   return String(value ?? '')
     .trim()
-    .toLowerCase()
-    .replace(/m$/, 'm')
-    .replace(/k$/, 'k');
+    .toLowerCase();
 }
 
 function compareBeam(result, targets) {

@@ -132,7 +132,7 @@ function sourceMatches(task, pattern) {
 }
 
 function normalizeSplit(value) {
-  return String(value ?? '').trim().toLowerCase().replace(/m$/, 'm').replace(/k$/, 'k');
+  return String(value ?? '').trim().toLowerCase();
 }
 
 function compareAMemGym(result, targets) {

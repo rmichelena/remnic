@@ -39,15 +39,18 @@ function bestBySplitFromExternal(external, dataset) {
     return {};
   }
   return Object.fromEntries(
-    Object.entries(bySplit).map(([split, rows]) => {
+    Object.entries(bySplit).flatMap(([split, rows]) => {
       const row = best(rows);
-      return [split, {
+      if (!row) {
+        return [];
+      }
+      return [[split, {
         score: row.accuracy,
         method: row.memory,
         sourceLabel: row.source_label,
         sourceUrl: row.source_url,
         comment: row.comment,
-      }];
+      }]];
     }),
   );
 }
