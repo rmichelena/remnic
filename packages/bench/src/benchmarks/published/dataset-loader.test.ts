@@ -54,6 +54,55 @@ test("loadLongMemEvalS loads the first probed filename that parses", async () =>
   });
 });
 
+test("loadLongMemEvalS prefers oracle when alternate cleaned split also exists", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "longmemeval_oracle.json"),
+      JSON.stringify([
+        {
+          question_id: "oracle",
+          question_type: "single-session-user",
+          question: "Which source should load?",
+          answer: "oracle",
+          question_date: "2025-01-01",
+          haystack_dates: [],
+          haystack_session_ids: [],
+          haystack_sessions: [],
+          answer_session_ids: [],
+        },
+      ]),
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "longmemeval_s_cleaned.json"),
+      JSON.stringify([
+        {
+          question_id: "cleaned",
+          question_type: "single-session-user",
+          question: "Which source should not load?",
+          answer: "cleaned",
+          question_date: "2025-01-01",
+          haystack_dates: [],
+          haystack_session_ids: [],
+          haystack_sessions: [],
+          answer_session_ids: [],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await loadLongMemEvalS({
+      mode: "full",
+      datasetDir: dir,
+    });
+
+    assert.equal(result.source, "dataset");
+    assert.equal(result.filename, "longmemeval_oracle.json");
+    assert.equal(result.items[0]?.question_id, "oracle");
+    assert.deepEqual(result.errors, []);
+  });
+});
+
 test("loadLongMemEvalS falls back from unreadable file to next probed filename", async () => {
   await withTempDir(async (dir) => {
     // longmemeval_oracle.json intentionally has invalid JSON; loader should

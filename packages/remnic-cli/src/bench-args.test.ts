@@ -62,25 +62,37 @@ test("parseBenchArgs rejects unknown published --name", () => {
         "--model",
         "m",
       ]),
-    /--name must be one of longmemeval, locomo, beam/,
+    /--name must be one of ama-bench, memory-arena, amemgym, longmemeval, locomo, beam, personamem, memoryagentbench, membench/,
   );
 });
 
-test("parseBenchArgs accepts BEAM as a published benchmark", () => {
-  const parsed = parseBenchArgs([
-    "published",
-    "--name",
+test("parseBenchArgs accepts every public benchmark for published runs", () => {
+  for (const benchmarkId of [
+    "ama-bench",
+    "memory-arena",
+    "amemgym",
+    "longmemeval",
+    "locomo",
     "beam",
-    "--dataset",
-    "/tmp/bench-datasets/beam",
-    "--model",
-    "gpt-5.5",
-  ]);
+    "personamem",
+    "memoryagentbench",
+    "membench",
+  ] as const) {
+    const parsed = parseBenchArgs([
+      "published",
+      "--name",
+      benchmarkId,
+      "--dataset",
+      `/tmp/bench-datasets/${benchmarkId}`,
+      "--model",
+      "gpt-5.5",
+    ]);
 
-  assert.equal(parsed.action, "published");
-  assert.equal(parsed.publishedName, "beam");
-  assert.equal(parsed.datasetDir, "/tmp/bench-datasets/beam");
-  assert.equal(parsed.systemModel, "gpt-5.5");
+    assert.equal(parsed.action, "published");
+    assert.equal(parsed.publishedName, benchmarkId);
+    assert.equal(parsed.datasetDir, `/tmp/bench-datasets/${benchmarkId}`);
+    assert.equal(parsed.systemModel, "gpt-5.5");
+  }
 });
 
 test("parseBenchArgs rejects non-integer --limit", () => {
@@ -117,6 +129,174 @@ test("parseBenchArgs accepts published --trial-limit", () => {
   assert.equal(parsed.publishedTrialLimit, 25);
 });
 
+test("parseBenchArgs accepts published --trial-concurrency for LoCoMo", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "locomo",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--trial-concurrency",
+    "8",
+  ]);
+
+  assert.equal(parsed.publishedTrialConcurrency, 8);
+});
+
+test("parseBenchArgs accepts published --trial-concurrency for AMA-Bench", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "ama-bench",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--trial-concurrency",
+    "8",
+  ]);
+
+  assert.equal(parsed.publishedTrialConcurrency, 8);
+});
+
+test("parseBenchArgs accepts published --ingest-concurrency for LoCoMo", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "locomo",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--ingest-concurrency",
+    "6",
+  ]);
+
+  assert.equal(parsed.publishedIngestConcurrency, 6);
+});
+
+test("parseBenchArgs rejects invalid or unsupported --trial-concurrency", () => {
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "locomo",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--trial-concurrency",
+        "0",
+      ]),
+    /--trial-concurrency must be an integer from 1 to 64/,
+  );
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "longmemeval",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--trial-concurrency",
+        "2",
+      ]),
+    /--trial-concurrency is currently supported only for LoCoMo and AMA-Bench/,
+  );
+});
+
+test("parseBenchArgs rejects invalid or unsupported --ingest-concurrency", () => {
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "locomo",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--ingest-concurrency",
+        "0",
+      ]),
+    /--ingest-concurrency must be an integer from 1 to 64/,
+  );
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "published",
+        "--name",
+        "longmemeval",
+        "--dataset",
+        "/tmp",
+        "--model",
+        "m",
+        "--ingest-concurrency",
+        "2",
+      ]),
+    /--ingest-concurrency is currently supported only for LoCoMo/,
+  );
+});
+
+test("parseBenchArgs accepts independent provider and drain timeouts", () => {
+  const parsed = parseBenchArgs([
+    "run",
+    "locomo",
+    "--request-timeout",
+    "120000",
+    "--drain-timeout",
+    "600000",
+  ]);
+
+  assert.deepEqual(parsed.benchmarks, ["locomo"]);
+  assert.equal(parsed.requestTimeout, 120000);
+  assert.equal(parsed.drainTimeout, 600000);
+});
+
+test("parseBenchArgs rejects invalid --drain-timeout", () => {
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "run",
+        "locomo",
+        "--drain-timeout",
+        "0",
+      ]),
+    /--drain-timeout must be a positive integer/,
+  );
+  assert.throws(
+    () =>
+      parseBenchArgs([
+        "run",
+        "locomo",
+        "--drain-timeout",
+        "1.5",
+      ]),
+    /--drain-timeout must be a positive integer/,
+  );
+});
+
+test("parseBenchArgs accepts published --trial-limit for MemoryAgentBench", () => {
+  const parsed = parseBenchArgs([
+    "published",
+    "--name",
+    "memoryagentbench",
+    "--dataset",
+    "/tmp",
+    "--model",
+    "m",
+    "--trial-limit",
+    "4",
+  ]);
+
+  assert.equal(parsed.publishedTrialLimit, 4);
+});
+
 test("parseBenchArgs accepts --trial-limit for bench run locomo", () => {
   const parsed = parseBenchArgs([
     "run",
@@ -126,6 +306,17 @@ test("parseBenchArgs accepts --trial-limit for bench run locomo", () => {
   ]);
 
   assert.equal(parsed.publishedTrialLimit, 3);
+});
+
+test("parseBenchArgs accepts --trial-limit for bench run memoryagentbench", () => {
+  const parsed = parseBenchArgs([
+    "run",
+    "memoryagentbench",
+    "--trial-limit",
+    "2",
+  ]);
+
+  assert.equal(parsed.publishedTrialLimit, 2);
 });
 
 test("parseBenchArgs rejects non-integer --trial-limit", () => {
@@ -146,7 +337,7 @@ test("parseBenchArgs rejects non-integer --trial-limit", () => {
   );
 });
 
-test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks", () => {
+test("parseBenchArgs rejects published --trial-limit for unsupported benchmarks", () => {
   assert.throws(
     () =>
       parseBenchArgs([
@@ -160,7 +351,7 @@ test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks",
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
   assert.throws(
     () =>
@@ -175,11 +366,11 @@ test("parseBenchArgs rejects published --trial-limit for non-LoCoMo benchmarks",
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
 });
 
-test("parseBenchArgs rejects --trial-limit when LoCoMo is not the only selected benchmark", () => {
+test("parseBenchArgs rejects --trial-limit when a supported benchmark is not the only selected benchmark", () => {
   assert.throws(
     () =>
       parseBenchArgs([
@@ -189,7 +380,7 @@ test("parseBenchArgs rejects --trial-limit when LoCoMo is not the only selected 
         "--trial-limit",
         "1",
       ]),
-    /--trial-limit is currently supported only for LoCoMo/,
+    /--trial-limit is currently supported only for LoCoMo and MemoryAgentBench/,
   );
 });
 

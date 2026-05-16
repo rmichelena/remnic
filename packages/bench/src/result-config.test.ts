@@ -89,3 +89,19 @@ test("finalizeBenchmarkResultConfig records internal provider when missing", () 
     reasoningEffort: "xhigh",
   });
 });
+
+test("finalizeBenchmarkResultConfig records generic run limit in benchmark options", () => {
+  const result = buildResult();
+
+  const finalized = finalizeBenchmarkResultConfig(result, {
+    limit: 3,
+    benchmarkOptions: {
+      trialLimit: 2,
+    },
+  });
+
+  assert.deepEqual(finalized.config.benchmarkOptions, {
+    limit: 3,
+    trialLimit: 2,
+  });
+});

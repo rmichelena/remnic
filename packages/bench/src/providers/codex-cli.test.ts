@@ -65,6 +65,8 @@ test("codex-cli provider invokes codex exec in an isolated benchmark mode", asyn
     "--config",
     'model_reasoning_effort="xhigh"',
     "--config",
+    'service_tier="fast"',
+    "--config",
     'approval_policy="never"',
     "--disable",
     "codex_hooks",
@@ -114,6 +116,7 @@ test("codex-cli provider defaults reasoning effort to xhigh", async () => {
     args[args.indexOf("--config") + 1],
     'model_reasoning_effort="xhigh"',
   );
+  assert.ok(args.includes('service_tier="fast"'));
 });
 
 test("codex-cli provider can use a benchmark-scoped executable env override", async () => {
@@ -274,6 +277,7 @@ test("codex-cli provider falls back to Responses API when CLI health probe fails
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(body.model, "gpt-5.5");
     assert.deepEqual(body.reasoning, { effort: "xhigh" });
+    assert.equal(Object.hasOwn(body, "service_tier"), false);
     assert.equal(body.max_output_tokens, 12);
     assert.equal(body.store, false);
     assert.match(String(body.instructions), /benchmark LLM completion endpoint/);
@@ -404,6 +408,8 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
   const diagnosticsDir = await mkdtemp(
     path.join(os.tmpdir(), "remnic-codex-cli-diag-"),
   );
+  const previousRunId = process.env.REMNIC_BENCH_RUN_ID;
+  process.env.REMNIC_BENCH_RUN_ID = "test-public-matrix-run";
 
   try {
     const provider = createCodexCliProvider(
@@ -438,13 +444,20 @@ test("codex-cli provider writes metadata diagnostics without full prompt text", 
     ) as Record<string, unknown>;
 
     assert.equal(diagnostic.provider, "codex-cli");
+    assert.equal(diagnostic.runId, "test-public-matrix-run");
     assert.equal(diagnostic.model, "gpt-5.5");
     assert.equal(diagnostic.reasoningEffort, "xhigh");
+    assert.equal(diagnostic.serviceTier, "fast");
     assert.equal(diagnostic.timeoutMs, 1234);
     assert.equal("fullPrompt" in diagnostic, false);
     assert.equal((diagnostic.prompt as { userPromptChars: number }).userPromptChars, 19);
     assert.equal((diagnostic.result as { status: number }).status, 0);
   } finally {
+    if (previousRunId === undefined) {
+      delete process.env.REMNIC_BENCH_RUN_ID;
+    } else {
+      process.env.REMNIC_BENCH_RUN_ID = previousRunId;
+    }
     await rm(diagnosticsDir, { force: true, recursive: true });
   }
 });

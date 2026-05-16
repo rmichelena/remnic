@@ -27,9 +27,11 @@ function makeFakeSystem(opts?: {
   const calls: Array<
     | { kind: "reset" }
     | { kind: "store"; sessionId: string; messageCount: number }
+    | { kind: "drain" }
     | { kind: "recall"; sessionId: string; question: string }
     | { kind: "search"; query: string; limit: number }
     | { kind: "judge"; question: string; predicted: string; expected: string }
+    | { kind: "binaryJudge"; prompt: string }
     | { kind: "respond"; question: string }
   > = [];
 
@@ -39,6 +41,9 @@ function makeFakeSystem(opts?: {
     },
     async store(sessionId: string, messages: Array<unknown>) {
       calls.push({ kind: "store", sessionId, messageCount: messages.length });
+    },
+    async drain() {
+      calls.push({ kind: "drain" });
     },
     async recall(sessionId: string, question: string) {
       calls.push({ kind: "recall", sessionId, question });
@@ -73,6 +78,15 @@ function makeFakeSystem(opts?: {
         expected: string,
       ) {
         calls.push({ kind: "judge", question, predicted, expected });
+        return {
+          score: opts?.judgeScore ?? 1,
+          tokens: { input: 0, output: 0 },
+          latencyMs: 0,
+          model: opts?.judgeModel ?? "smoke-judge",
+        };
+      },
+      async scoreBinaryPrompt(prompt: string) {
+        calls.push({ kind: "binaryJudge", prompt });
         return {
           score: opts?.judgeScore ?? 1,
           tokens: { input: 0, output: 0 },
@@ -170,6 +184,44 @@ test("runPublishedHarness resets once per plan and stores every non-empty sessio
   assert.equal(result.config.adapterMode, "direct");
 });
 
+test("runPublishedHarness rejects drain failure before scoring trials", async () => {
+  const { system, calls } = makeFakeSystem();
+  system.drain = async () => {
+    calls.push({ kind: "drain" });
+    throw new Error("drain timed out");
+  };
+
+  await assert.rejects(
+    () =>
+      runPublishedHarness({
+        options: makeOptions(system),
+        metricsSpec: { metrics: ["f1"] },
+        plans: [
+          {
+            ingestSessions: [
+              { sessionId: "s", messages: [{ role: "user", content: "x" }] },
+            ],
+            trials: [
+              {
+                taskId: "must-not-score",
+                question: "Q",
+                expected: "A",
+                recallSessionIds: ["s"],
+              },
+            ],
+          },
+        ],
+      }),
+    /drain failed before scoring.*drain timed out/,
+  );
+
+  assert.ok(calls.some((call) => call.kind === "store"));
+  assert.ok(calls.some((call) => call.kind === "drain"));
+  assert.equal(calls.some((call) => call.kind === "recall"), false);
+  assert.equal(calls.some((call) => call.kind === "respond"), false);
+  assert.equal(calls.some((call) => call.kind === "judge"), false);
+});
+
 test("runPublishedHarness recalls from ALL recallSessionIds per trial", async () => {
   const { system, calls } = makeFakeSystem();
   const plans: HarnessPlan[] = [
@@ -207,6 +259,83 @@ test("runPublishedHarness recalls from ALL recallSessionIds per trial", async ()
   for (const recall of recalls) {
     assert.equal(recall.question, "who");
   }
+});
+
+test("runPublishedHarness executes independent trials concurrently with stable output order", async () => {
+  const { system } = makeFakeSystem();
+  let activeResponders = 0;
+  let maxActiveResponders = 0;
+  const originalRespond = system.responder.respond.bind(system.responder);
+  system.responder.respond = async (...args) => {
+    activeResponders += 1;
+    maxActiveResponders = Math.max(maxActiveResponders, activeResponders);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return await originalRespond(...args);
+    } finally {
+      activeResponders -= 1;
+    }
+  };
+  const completedTaskIds: string[] = [];
+
+  const result = await runPublishedHarness({
+    options: makeOptions(system, {
+      benchmarkOptions: { trialConcurrency: 2 },
+      onTaskComplete: (task) => {
+        completedTaskIds.push(task.taskId);
+      },
+    }),
+    metricsSpec: { metrics: ["f1"] },
+    plans: [
+      {
+        ingestSessions: [
+          { sessionId: "s", messages: [{ role: "user", content: "x" }] },
+        ],
+        trials: [
+          {
+            taskId: "t1",
+            question: "Q1",
+            expected: "A1",
+            recallSessionIds: ["s"],
+          },
+          {
+            taskId: "t2",
+            question: "Q2",
+            expected: "A2",
+            recallSessionIds: ["s"],
+          },
+          {
+            taskId: "t3",
+            question: "Q3",
+            expected: "A3",
+            recallSessionIds: ["s"],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(maxActiveResponders, 2);
+  assert.deepEqual(
+    result.results.tasks.map((task) => task.taskId),
+    ["t1", "t2", "t3"],
+  );
+  assert.deepEqual(completedTaskIds, ["t1", "t2", "t3"]);
+});
+
+test("runPublishedHarness rejects invalid trialConcurrency", async () => {
+  const { system } = makeFakeSystem();
+  await assert.rejects(
+    () =>
+      runPublishedHarness({
+        options: makeOptions(system, {
+          benchmarkOptions: { trialConcurrency: 0 },
+        }),
+        metricsSpec: { metrics: ["f1"] },
+        plans: [],
+      }),
+    /trialConcurrency must be an integer from 1 to 64/,
+  );
 });
 
 test("runPublishedHarness postAnswerHook runs between answer and judge", async () => {
@@ -313,6 +442,109 @@ test("runPublishedHarness llm_judge metric suppressed when judge score negative"
   assert.ok(
     !("llm_judge" in task.scores),
     "llm_judge should be omitted when judge returns negative",
+  );
+});
+
+test("runPublishedHarness records failed judge_accuracy when judge score is negative", async () => {
+  const { system } = makeFakeSystem({ judgeScore: -1 });
+  const result = await runPublishedHarness({
+    options: makeOptions(system),
+    metricsSpec: { metrics: ["llm_judge", "judge_accuracy"] },
+    plans: [
+      {
+        ingestSessions: [
+          { sessionId: "s", messages: [{ role: "user", content: "h" }] },
+        ],
+        trials: [
+          {
+            taskId: "invalid-binary-judge",
+            question: "q",
+            expected: "a",
+            recallSessionIds: ["s"],
+            binaryJudgePrompt: () => "official yes/no prompt",
+          },
+        ],
+      },
+    ],
+  });
+
+  const task = result.results.tasks[0]!;
+  assert.ok(!("llm_judge" in task.scores));
+  assert.equal(task.scores.judge_accuracy, -1);
+  assert.equal(result.results.aggregates.judge_accuracy?.mean, -1);
+});
+
+test("runPublishedHarness supports benchmark-owned binary judge prompts", async () => {
+  const { system, calls } = makeFakeSystem({ judgeScore: 0.8 });
+  const result = await runPublishedHarness({
+    options: makeOptions(system),
+    metricsSpec: { metrics: ["llm_judge", "judge_accuracy"] },
+    plans: [
+      {
+        ingestSessions: [
+          { sessionId: "s", messages: [{ role: "user", content: "h" }] },
+        ],
+        trials: [
+          {
+            taskId: "binary-judge",
+            question: "q",
+            expected: "a",
+            recallSessionIds: ["s"],
+            binaryJudgePrompt: ({ answeredText }) =>
+              `Official binary prompt\nMODEL_RESPONSE:\n${answeredText}`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const task = result.results.tasks[0]!;
+  assert.equal(task.scores.llm_judge, 0.8);
+  assert.equal(task.scores.judge_accuracy, 1);
+  const binaryJudgeCall = calls.find((call) => call.kind === "binaryJudge");
+  assert.ok(binaryJudgeCall, "binary judge prompt should be used");
+  assert.match(binaryJudgeCall.prompt, /^Official binary prompt\nMODEL_RESPONSE:\nanswer:/);
+  assert.ok(
+    !calls.some((call) => call.kind === "judge"),
+    "generic judge rubric should not be used",
+  );
+});
+
+test("runPublishedHarness falls back when judge lacks binary prompt support", async () => {
+  const { system, calls } = makeFakeSystem({ judgeScore: 0.4 });
+  delete (system.judge as { scoreBinaryPrompt?: unknown }).scoreBinaryPrompt;
+
+  const result = await runPublishedHarness({
+    options: makeOptions(system),
+    metricsSpec: { metrics: ["llm_judge", "judge_accuracy"] },
+    plans: [
+      {
+        ingestSessions: [
+          { sessionId: "s", messages: [{ role: "user", content: "h" }] },
+        ],
+        trials: [
+          {
+            taskId: "binary-judge-fallback",
+            question: "q",
+            expected: "a",
+            recallSessionIds: ["s"],
+            binaryJudgePrompt: () => "official yes/no prompt",
+          },
+        ],
+      },
+    ],
+  });
+
+  const task = result.results.tasks[0]!;
+  assert.equal(task.scores.llm_judge, 0.4);
+  assert.equal(task.scores.judge_accuracy, 0);
+  assert.ok(
+    calls.some((call) => call.kind === "judge"),
+    "generic judge rubric should be used as the compatibility fallback",
+  );
+  assert.ok(
+    !calls.some((call) => call.kind === "binaryJudge"),
+    "binary judge should not be called when unavailable",
   );
 });
 

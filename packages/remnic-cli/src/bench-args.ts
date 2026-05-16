@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { BuiltInProvider } from "@remnic/bench";
+import type { BuiltInProvider, PublishedBenchmarkId } from "@remnic/bench";
 import { expandTilde } from "./path-utils.js";
 
 export type BenchAction =
@@ -75,6 +75,7 @@ export interface ParsedBenchArgs {
   custom?: string;
   target?: BenchPublishTarget;
   requestTimeout?: number;
+  drainTimeout?: number;
   /** Max wall-clock time (ms) to keep retrying 429 rate-limit responses. */
   max429WaitMs?: number;
   /** Suppress thinking/reasoning tokens for thinking-capable models (Gemma 4, Qwen 3.5, DeepSeek). */
@@ -86,7 +87,7 @@ export interface ParsedBenchArgs {
   amaBenchCrossJudgeBaseUrl?: string;
   amaBenchCrossJudgeApiKey?: string;
   amaBenchCrossJudgeCodexReasoningEffort?: BenchCodexReasoningEffort;
-  /** `bench published` — specific benchmark to run (longmemeval|locomo|beam). */
+  /** `bench published` — specific benchmark to run. */
   publishedName?: PublishedBenchmarkName;
   /** `bench published` — seed forwarded into the harness context. */
   publishedSeed?: number;
@@ -94,6 +95,10 @@ export interface ParsedBenchArgs {
   publishedLimit?: number;
   /** `bench published` — scored trial cap forwarded into benchmark-specific options. */
   publishedTrialLimit?: number;
+  /** `bench published` — max independent trials to execute at once when supported. */
+  publishedTrialConcurrency?: number;
+  /** `bench published` — max independent ingest sessions to summarize at once when supported. */
+  publishedIngestConcurrency?: number;
   /** `bench published` — benchmark-specific task/ability filter for diagnostic runs. */
   publishedTaskFilter?: string;
   /** `bench published` — published artifact output directory. */
@@ -106,9 +111,30 @@ export interface ParsedBenchArgs {
   retryFailed?: boolean;
 }
 
-export type PublishedBenchmarkName = "longmemeval" | "locomo" | "beam";
-export const PUBLISHED_BENCHMARK_NAMES: readonly PublishedBenchmarkName[] =
-  Object.freeze(["longmemeval", "locomo", "beam"]);
+export const PUBLISHED_BENCHMARK_NAMES = Object.freeze([
+  "ama-bench",
+  "memory-arena",
+  "amemgym",
+  "longmemeval",
+  "locomo",
+  "beam",
+  "personamem",
+  "memoryagentbench",
+  "membench",
+] as const satisfies readonly PublishedBenchmarkId[]);
+export type PublishedBenchmarkName = (typeof PUBLISHED_BENCHMARK_NAMES)[number];
+type AssertTrue<T extends true> = T;
+type MissingPublishedBenchmarkNames = Exclude<PublishedBenchmarkId, PublishedBenchmarkName>;
+type ExtraPublishedBenchmarkNames = Exclude<PublishedBenchmarkName, PublishedBenchmarkId>;
+type PublishedBenchmarkNamesMatchArtifactIds = AssertTrue<
+  [MissingPublishedBenchmarkNames] extends [never]
+    ? [ExtraPublishedBenchmarkNames] extends [never]
+      ? true
+      : false
+    : false
+>;
+const publishedBenchmarkNamesMatchArtifactIds: PublishedBenchmarkNamesMatchArtifactIds = true;
+void publishedBenchmarkNamesMatchArtifactIds;
 
 function isBenchRuntimeProfile(value: string): value is BenchRuntimeProfile {
   return (
@@ -235,12 +261,15 @@ export function collectBenchmarks(argv: string[]): string[] {
       arg === "--model" ||
       arg === "--limit" ||
       arg === "--trial-limit" ||
+      arg === "--trial-concurrency" ||
+      arg === "--ingest-concurrency" ||
       arg === "--task-filter" ||
       arg === "--seed" ||
       arg === "--out" ||
       arg === "--provider" ||
       arg === "--base-url" ||
       arg === "--request-timeout" ||
+      arg === "--drain-timeout" ||
       arg === "--max-429-wait" ||
       arg === "--ama-bench-judge-protocol" ||
       arg === "--ama-bench-cross-judge-provider" ||
@@ -392,6 +421,7 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
   const output = readBenchOptionValue(args, "--output");
   const targetRaw = readBenchOptionValue(args, "--target");
   const requestTimeoutRaw = readBenchOptionValue(args, "--request-timeout");
+  const drainTimeoutRaw = readBenchOptionValue(args, "--drain-timeout");
   const max429WaitRaw = readBenchOptionValue(args, "--max-429-wait");
   const amaBenchJudgeProtocolRaw = readBenchOptionValue(args, "--ama-bench-judge-protocol");
   const amaBenchCrossJudgeProviderRaw = readBenchOptionValue(args, "--ama-bench-cross-judge-provider");
@@ -536,6 +566,21 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     }
   }
 
+  let drainTimeout: number | undefined;
+  if (drainTimeoutRaw !== undefined) {
+    drainTimeout = Number(drainTimeoutRaw);
+    if (!Number.isInteger(drainTimeout) || drainTimeout <= 0) {
+      throw new Error(
+        "ERROR: --drain-timeout must be a positive integer (milliseconds).",
+      );
+    }
+    if (drainTimeout > 3600_000) {
+      throw new Error(
+        "ERROR: --drain-timeout must not exceed 3,600,000 ms (1 hour).",
+      );
+    }
+  }
+
   let max429WaitMs: number | undefined;
   if (max429WaitRaw !== undefined) {
     max429WaitMs = Number(max429WaitRaw);
@@ -594,6 +639,14 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
   const publishedModelRaw = readBenchOptionValue(args, "--model");
   const publishedLimitRaw = readBenchOptionValue(args, "--limit");
   const publishedTrialLimitRaw = readBenchOptionValue(args, "--trial-limit");
+  const publishedTrialConcurrencyRaw = readBenchOptionValue(
+    args,
+    "--trial-concurrency",
+  );
+  const publishedIngestConcurrencyRaw = readBenchOptionValue(
+    args,
+    "--ingest-concurrency",
+  );
   const publishedTaskFilterRaw = readBenchOptionValue(args, "--task-filter");
   const publishedSeedRaw = readBenchOptionValue(args, "--seed");
   const publishedOutRaw = readBenchOptionValue(args, "--out");
@@ -633,7 +686,66 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     }
     publishedTrialLimit = parsed;
   }
-  const trialLimitTargetsLoCoMo =
+  const trialLimitTargetsSupportedBenchmark =
+    publishedName === "locomo" ||
+    publishedName === "memoryagentbench" ||
+    (
+      publishedName === undefined &&
+      action === "published"
+    ) ||
+    (
+      publishedName === undefined &&
+      action !== "published" &&
+      !args.includes("--all") &&
+      benchmarks.length === 1 &&
+      (benchmarks[0] === "locomo" || benchmarks[0] === "memoryagentbench")
+    );
+  if (publishedTrialLimit !== undefined && !trialLimitTargetsSupportedBenchmark) {
+    throw new Error("ERROR: --trial-limit is currently supported only for LoCoMo and MemoryAgentBench.");
+  }
+
+  let publishedTrialConcurrency: number | undefined;
+  if (publishedTrialConcurrencyRaw !== undefined) {
+    const parsed = Number(publishedTrialConcurrencyRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 64) {
+      throw new Error(
+        "ERROR: --trial-concurrency must be an integer from 1 to 64.",
+      );
+    }
+    publishedTrialConcurrency = parsed;
+  }
+  const trialConcurrencyTargetsSupportedBenchmark =
+    publishedName === "locomo" ||
+    publishedName === "ama-bench" ||
+    (
+      publishedName === undefined &&
+      action === "published"
+    ) ||
+    (
+      publishedName === undefined &&
+      action !== "published" &&
+      !args.includes("--all") &&
+      benchmarks.length === 1 &&
+      (benchmarks[0] === "locomo" || benchmarks[0] === "ama-bench")
+    );
+  if (
+    publishedTrialConcurrency !== undefined &&
+    !trialConcurrencyTargetsSupportedBenchmark
+  ) {
+    throw new Error("ERROR: --trial-concurrency is currently supported only for LoCoMo and AMA-Bench.");
+  }
+
+  let publishedIngestConcurrency: number | undefined;
+  if (publishedIngestConcurrencyRaw !== undefined) {
+    const parsed = Number(publishedIngestConcurrencyRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 64) {
+      throw new Error(
+        "ERROR: --ingest-concurrency must be an integer from 1 to 64.",
+      );
+    }
+    publishedIngestConcurrency = parsed;
+  }
+  const ingestConcurrencyTargetsSupportedBenchmark =
     publishedName === "locomo" ||
     (
       publishedName === undefined &&
@@ -646,8 +758,11 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
       benchmarks.length === 1 &&
       benchmarks[0] === "locomo"
     );
-  if (publishedTrialLimit !== undefined && !trialLimitTargetsLoCoMo) {
-    throw new Error("ERROR: --trial-limit is currently supported only for LoCoMo.");
+  if (
+    publishedIngestConcurrency !== undefined &&
+    !ingestConcurrencyTargetsSupportedBenchmark
+  ) {
+    throw new Error("ERROR: --ingest-concurrency is currently supported only for LoCoMo.");
   }
 
   let publishedTaskFilter: string | undefined;
@@ -862,12 +977,15 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
     publishedSeed,
     publishedLimit,
     publishedTrialLimit,
+    publishedTrialConcurrency,
+    publishedIngestConcurrency,
     publishedTaskFilter,
     publishedOut: publishedOutRaw
       ? path.resolve(expandTilde(publishedOutRaw))
       : undefined,
     publishedDryRun: args.includes("--dry-run"),
     requestTimeout,
+    drainTimeout,
     max429WaitMs,
     disableThinking: args.includes("--disable-thinking"),
     amaBenchJudgeProtocol,

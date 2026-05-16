@@ -167,6 +167,14 @@ function parseLongMemEvalFile(raw: string, filename: string): LongMemEvalItem[] 
       );
     }
     const record = entry as Record<string, unknown>;
+    if (
+      typeof record.question_id !== "string" &&
+      typeof record.question_id !== "number"
+    ) {
+      throw new Error(
+        `${filename} entry ${index} is missing a string or numeric question_id field.`,
+      );
+    }
     if (typeof record.question !== "string") {
       throw new Error(
         `${filename} entry ${index} is missing a string question field.`,

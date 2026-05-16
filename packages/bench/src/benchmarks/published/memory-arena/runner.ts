@@ -3,8 +3,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { expandTildePath } from "@remnic/core";
 import {
   MEMORY_ARENA_SMOKE_FIXTURE,
   type ArenaAnswer,
@@ -47,10 +48,23 @@ export const memoryArenaDefinition: BenchmarkDefinition = {
   },
 };
 
+const MEMORY_ARENA_WEBSHOP_PRODUCTS_ENV =
+  "REMNIC_BENCH_MEMORY_ARENA_WEBSHOP_PRODUCTS";
+const MEMORY_ARENA_WEBSHOP_PRODUCTS_MAX_BYTES = 100 * 1024 * 1024;
+const MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES = [
+  "webshop-products.jsonl",
+  "webshop-products.json",
+  "memory-arena-webshop-products.jsonl",
+  "memory-arena-webshop-products.json",
+];
+
 export async function runMemoryArenaBenchmark(
   options: ResolvedRunBenchmarkOptions,
 ): Promise<BenchmarkResult> {
   const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
+  const webshopCatalog = await loadMemoryArenaWebshopProductCatalog(
+    options.datasetDir,
+  );
   const tasks: TaskResult[] = [];
 
   const totalTasks = dataset.reduce(
@@ -119,6 +133,7 @@ export async function runMemoryArenaBenchmark(
               question,
               expected,
               expectedAnswer,
+              webshopCatalog,
             );
             continue;
           }
@@ -138,6 +153,10 @@ export async function runMemoryArenaBenchmark(
           const answerContext = buildMemoryArenaAnswerContext(
             recalledText,
             question,
+            {
+              itemSelection: hasItemSelectionExpectation(expectedAnswer),
+              webshopCatalog,
+            },
           );
           const answered = await answerBenchmarkQuestion({
             question: benchmarkQuestion,
@@ -149,6 +168,7 @@ export async function runMemoryArenaBenchmark(
             task.category,
             answered.finalAnswer,
             expectedAnswer,
+            question,
           );
           const judgeResult = await llmJudgeScoreDetailed(
             options.system.judge,
@@ -193,6 +213,9 @@ export async function runMemoryArenaBenchmark(
                 : { initialSeedError }),
               recalledLength: recalledText.length,
               answerContextLength: answerContext.length,
+              ...(webshopCatalog === undefined
+                ? {}
+                : { webshopProductCatalog: webshopCatalog.sourcePath }),
               answeredLength: answered.finalAnswer.length,
               recalledText,
               answerContext,
@@ -210,6 +233,7 @@ export async function runMemoryArenaBenchmark(
               question,
               expected,
               expectedAnswer,
+              webshopCatalog,
             );
           } catch (storeErr) {
             console.error(`  [WARN] memory-arena store failed for ${taskResultId}: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`);
@@ -334,7 +358,10 @@ async function loadDataset(
     }
 
     const domainFiles = directoryEntries
-      .filter((filename) => filename.endsWith(".jsonl"))
+      .filter((filename) =>
+        filename.endsWith(".jsonl")
+        && !MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES.includes(filename),
+      )
       .sort();
     if (domainFiles.length === 0) {
       throw new Error(
@@ -651,6 +678,24 @@ function formatMemoryArenaQuestion(
   question: string,
   expectedAnswer: ArenaExpectedAnswer,
 ): string {
+  if (hasItemSelectionExpectation(expectedAnswer)) {
+    return [
+      "You are completing a MemoryArena item-selection task.",
+      "Use the supplied memory context and current task prompt to select the exact item requested.",
+      "Use WebShop environment observations when present for price, rating, review count, and product identity comparisons.",
+      "Derive the prior selected item's compatibility label from prior selected product facts; filter current options by compatibility and avoid rules; then apply the stated price or rating preference.",
+      "If the answer context includes 'Best-supported option by current rules', return that option; it is computed from the current rules plus observed WebShop facts.",
+      "Return only the selected visible option text, item identifiers that are explicitly shown, and distinguishing attributes from the task or memory context.",
+      "If the current options do not show an ASIN, omit target_asin instead of answering unknown.",
+      "Do not answer unknown merely because the ASIN is hidden; choose the best-supported visible option from Available Options.",
+      "Use this format when identifiers are available: target_asin: <ASIN>; attributes: <attribute1>, <attribute2>.",
+      "Use this format when identifiers are not available: item: <visible option text>; attributes: <attribute1>, <attribute2>.",
+      "",
+      "Current item-selection request:",
+      question,
+    ].join("\n");
+  }
+
   if (!shouldUseGroupTravelPlanProtocol(category, expectedAnswer)) {
     return question;
   }
@@ -681,38 +726,1104 @@ function formatMemoryArenaQuestion(
 function buildMemoryArenaAnswerContext(
   recalledText: string,
   currentQuestion: string,
+  options: {
+    itemSelection?: boolean;
+    webshopCatalog?: MemoryArenaWebshopProductCatalog;
+  } = {},
 ): string {
   const trimmedQuestion = currentQuestion.trim();
   const trimmedRecall = recalledText.trim();
+  const priorEnvironmentResults = options.itemSelection
+    ? extractMemoryArenaEnvironmentResults(trimmedRecall)
+    : "";
+  const webshopObservations = options.itemSelection
+    ? formatMemoryArenaWebshopOptionContext(
+        trimmedQuestion,
+        options.webshopCatalog,
+      )
+    : "";
+  const webshopDecisionSupport = options.itemSelection
+    ? formatMemoryArenaWebshopDecisionSupport(
+        trimmedQuestion,
+        priorEnvironmentResults,
+        options.webshopCatalog,
+      )
+    : "";
+  const includeRawRecall = !options.itemSelection
+    || priorEnvironmentResults.length === 0;
   if (trimmedQuestion.length === 0) {
-    return trimmedRecall;
+    return [
+      webshopObservations,
+      includeRawRecall ? trimmedRecall : priorEnvironmentResults,
+    ].filter((part) => part.length > 0).join("\n\n");
   }
   return [
     "## Current MemoryArena task prompt",
     trimmedQuestion,
-    trimmedRecall.length > 0 ? "## Remnic memory context" : "",
-    trimmedRecall,
+    webshopObservations,
+    webshopDecisionSupport,
+    priorEnvironmentResults.length > 0
+      ? "## Prior completed MemoryArena subtasks"
+      : "",
+    priorEnvironmentResults,
+    includeRawRecall && trimmedRecall.length > 0
+      ? "## Remnic memory context"
+      : "",
+    includeRawRecall ? trimmedRecall : "",
   ].filter((part) => part.length > 0).join("\n\n");
+}
+
+interface MemoryArenaWebshopProductCatalog {
+  sourcePath: string;
+  products: MemoryArenaWebshopProduct[];
+}
+
+interface MemoryArenaWebshopProduct {
+  asin: string;
+  name: string;
+  normalizedName: string;
+  nameTokens: Set<string>;
+  searchTokens: Set<string>;
+  attributes: string[];
+  priceText?: string;
+  price?: number;
+  averageRating?: number;
+  totalReviews?: number;
+  productCategory?: string;
+  brand?: string;
+  labelText: string;
+}
+
+interface RawMemoryArenaWebshopRecord {
+  value: unknown;
+  defaultAsin?: string;
+}
+
+async function loadMemoryArenaWebshopProductCatalog(
+  datasetDir: string | undefined,
+): Promise<MemoryArenaWebshopProductCatalog | undefined> {
+  const sourcePath = await resolveMemoryArenaWebshopProductCatalogPath(datasetDir);
+  if (sourcePath === undefined) {
+    return undefined;
+  }
+
+  let sourceStat;
+  try {
+    sourceStat = await stat(sourcePath);
+  } catch (error) {
+    throw new Error(
+      `MemoryArena WebShop product sidecar not found at ${sourcePath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (!sourceStat.isFile()) {
+    throw new Error(
+      `MemoryArena WebShop product sidecar must be a file: ${sourcePath}`,
+    );
+  }
+  if (sourceStat.size > MEMORY_ARENA_WEBSHOP_PRODUCTS_MAX_BYTES) {
+    throw new Error(
+      `MemoryArena WebShop product sidecar is ${sourceStat.size} bytes; provide a compact JSON/JSONL sidecar smaller than ${MEMORY_ARENA_WEBSHOP_PRODUCTS_MAX_BYTES} bytes instead of the full WebShop catalog.`,
+    );
+  }
+
+  const raw = await readFile(sourcePath, "utf8");
+  const records = parseMemoryArenaWebshopSidecarRecords(raw, sourcePath);
+  const byAsin = new Map<string, MemoryArenaWebshopProduct>();
+  for (const record of records) {
+    const product = parseMemoryArenaWebshopProduct(record);
+    if (product !== undefined && !byAsin.has(product.asin)) {
+      byAsin.set(product.asin, product);
+    }
+  }
+
+  const products = [...byAsin.values()];
+  if (products.length === 0) {
+    throw new Error(
+      `MemoryArena WebShop product sidecar at ${sourcePath} did not contain any usable product records.`,
+    );
+  }
+  return { sourcePath, products };
+}
+
+async function resolveMemoryArenaWebshopProductCatalogPath(
+  datasetDir: string | undefined,
+): Promise<string | undefined> {
+  const configuredPath = process.env[MEMORY_ARENA_WEBSHOP_PRODUCTS_ENV]?.trim();
+  if (configuredPath && configuredPath.length > 0) {
+    return path.resolve(expandTildePath(configuredPath));
+  }
+
+  if (datasetDir === undefined) {
+    return undefined;
+  }
+
+  const candidatePaths = [
+    ...MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES,
+  ].map((filename) => path.join(datasetDir, filename));
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      const candidateStat = await stat(candidatePath);
+      if (candidateStat.isFile()) {
+        return candidatePath;
+      }
+    } catch (error) {
+      if (!isNodeErrorCode(error, "ENOENT")) {
+        throw new Error(
+          `Unable to inspect MemoryArena WebShop sidecar candidate ${candidatePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function parseMemoryArenaWebshopSidecarRecords(
+  raw: string,
+  sourcePath: string,
+): RawMemoryArenaWebshopRecord[] {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new Error(
+      `MemoryArena WebShop product sidecar at ${sourcePath} is empty.`,
+    );
+  }
+
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try {
+      return unpackMemoryArenaWebshopRecords(JSON.parse(trimmed));
+    } catch {
+      // Fall through to JSONL parsing. Some compact sidecars use one JSON
+      // array batch per line, so a leading `[` is not enough to prove the
+      // whole file is intended to be a single JSON document.
+    }
+  }
+
+  const records: RawMemoryArenaWebshopRecord[] = [];
+  const lines = raw.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (trimmedLine.length === 0) {
+      return;
+    }
+    try {
+      records.push(
+        ...unpackMemoryArenaWebshopJsonlRecord(JSON.parse(trimmedLine)),
+      );
+    } catch (error) {
+      throw new Error(
+        `MemoryArena WebShop product sidecar at ${sourcePath} has invalid JSONL on line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  });
+  return records;
+}
+
+function unpackMemoryArenaWebshopJsonlRecord(
+  parsed: unknown,
+): RawMemoryArenaWebshopRecord[] {
+  if (Array.isArray(parsed)) {
+    return parsed.map((value) => ({ value }));
+  }
+  if (isPlainRecord(parsed)) {
+    for (const key of ["products", "records", "items"]) {
+      const value = parsed[key];
+      if (Array.isArray(value) || isPlainRecord(value)) {
+        return unpackMemoryArenaWebshopRecords(parsed);
+      }
+    }
+  }
+  return [{ value: parsed }];
+}
+
+function unpackMemoryArenaWebshopRecords(
+  parsed: unknown,
+): RawMemoryArenaWebshopRecord[] {
+  if (Array.isArray(parsed)) {
+    return parsed.map((value) => ({ value }));
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error("top-level value must be a JSON array, object, or JSONL records");
+  }
+
+  for (const key of ["products", "records", "items"]) {
+    const value = parsed[key];
+    if (Array.isArray(value)) {
+      return value.map((item) => ({ value: item }));
+    }
+    if (isPlainRecord(value)) {
+      return Object.entries(value).map(([defaultAsin, item]) => ({
+        value: item,
+        defaultAsin,
+      }));
+    }
+  }
+
+  if (isMemoryArenaWebshopProductRecord(parsed)) {
+    return [{ value: parsed }];
+  }
+
+  return Object.entries(parsed).map(([defaultAsin, value]) => ({
+    value,
+    defaultAsin,
+  }));
+}
+
+function isMemoryArenaWebshopProductRecord(
+  record: Record<string, unknown>,
+): boolean {
+  return (
+    normalizeMemoryArenaWebshopAsin(
+      record.asin
+        ?? record.ASIN
+        ?? extractMemoryArenaProductInformationValue(record, "asin"),
+    ) !== undefined
+    && cleanMemoryArenaWebshopString(
+      readMemoryArenaStringField(record, "name")
+        ?? readMemoryArenaStringField(record, "title")
+        ?? readMemoryArenaStringField(record, "product_title")
+        ?? "",
+    ).length > 0
+  );
+}
+
+function parseMemoryArenaWebshopProduct(
+  raw: RawMemoryArenaWebshopRecord,
+): MemoryArenaWebshopProduct | undefined {
+  if (!isPlainRecord(raw.value)) {
+    return undefined;
+  }
+  const record = raw.value;
+  const asin = normalizeMemoryArenaWebshopAsin(
+    record.asin
+      ?? record.ASIN
+      ?? extractMemoryArenaProductInformationValue(record, "asin")
+      ?? raw.defaultAsin,
+  );
+  const name = cleanMemoryArenaWebshopString(
+    readMemoryArenaStringField(record, "name")
+      ?? readMemoryArenaStringField(record, "title")
+      ?? readMemoryArenaStringField(record, "product_title")
+      ?? "",
+  );
+  if (asin === undefined || name.length === 0) {
+    return undefined;
+  }
+
+  const selectedCustomization = extractSelectedMemoryArenaCustomization(record);
+  const priceText = cleanMemoryArenaWebshopString(
+    readMemoryArenaStringField(record, "pricing")
+      ?? readMemoryArenaStringField(record, "price_string")
+      ?? readMemoryArenaPriceTextField(record, "price")
+      ?? selectedCustomization?.priceText
+      ?? "",
+  );
+  const price = readMemoryArenaPriceField(record, "price")
+    ?? parseMemoryArenaPrice(priceText)
+    ?? selectedCustomization?.price;
+  const averageRating =
+    readMemoryArenaNumberField(record, "average_rating")
+    ?? readMemoryArenaNumberField(record, "averageRating")
+    ?? readMemoryArenaProductCustomerReviewNumber(record, "stars");
+  const totalReviews =
+    readMemoryArenaNumberField(record, "total_reviews")
+    ?? readMemoryArenaNumberField(record, "totalReviews")
+    ?? readMemoryArenaProductCustomerReviewNumber(record, "ratings_count");
+  const productCategory = cleanMemoryArenaWebshopString(
+    readMemoryArenaStringField(record, "product_category")
+      ?? readMemoryArenaStringField(record, "category")
+      ?? "",
+  );
+  const brand = cleanMemoryArenaWebshopString(
+    readMemoryArenaStringField(record, "brand") ?? "",
+  );
+  const attributes = readMemoryArenaStringArrayField(record, "attributes");
+  const descriptions = [
+    readMemoryArenaStringField(record, "full_description") ?? "",
+    readMemoryArenaStringField(record, "small_description_old") ?? "",
+    ...readMemoryArenaStringArrayField(record, "small_description"),
+  ].map(cleanMemoryArenaWebshopString).filter((value) => value.length > 0);
+  const nameTokens = new Set(tokenizeItemSelectionText(name));
+  const labelText = [
+    name,
+    productCategory,
+    brand,
+    ...attributes,
+    ...descriptions,
+  ].join(" ");
+  const searchTokens = new Set(
+    tokenizeItemSelectionText(labelText),
+  );
+
+  return {
+    asin,
+    name,
+    normalizedName: normalizeItemSelectionText(name),
+    nameTokens,
+    searchTokens,
+    attributes,
+    ...(priceText.length > 0 ? { priceText } : {}),
+    ...(price === undefined ? {} : { price }),
+    ...(averageRating === undefined ? {} : { averageRating }),
+    ...(totalReviews === undefined ? {} : { totalReviews }),
+    ...(productCategory.length > 0 ? { productCategory } : {}),
+    ...(brand.length > 0 ? { brand } : {}),
+    labelText,
+  };
+}
+
+function formatMemoryArenaWebshopOptionContext(
+  question: string,
+  catalog: MemoryArenaWebshopProductCatalog | undefined,
+): string {
+  if (catalog === undefined) {
+    return "";
+  }
+
+  const options = extractMemoryArenaVisibleOptions(question);
+  if (options.length === 0) {
+    return "";
+  }
+
+  const observations: string[] = [];
+  for (const option of options) {
+    const product = selectMemoryArenaWebshopProductForOption(
+      option,
+      catalog.products,
+    );
+    if (product === undefined) {
+      continue;
+    }
+    observations.push(formatMemoryArenaWebshopObservation(option, product));
+  }
+
+  if (observations.length === 0) {
+    return "";
+  }
+  return [
+    "## WebShop environment observations for current options",
+    ...observations,
+  ].join("\n\n");
+}
+
+function selectMemoryArenaWebshopProductForOption(
+  option: VisibleItemOption,
+  products: MemoryArenaWebshopProduct[],
+): MemoryArenaWebshopProduct | undefined {
+  const optionAsin = normalizeMemoryArenaWebshopAsin(option.text);
+  if (optionAsin !== undefined) {
+    const product = products.find((candidate) => candidate.asin === optionAsin);
+    if (product !== undefined) {
+      return product;
+    }
+  }
+
+  let bestProduct: MemoryArenaWebshopProduct | undefined;
+  let bestScore = 0;
+  let tied = false;
+  for (const product of products) {
+    let score = countTokenOverlap(option.tokens, product.nameTokens) * 2;
+    score += countTokenOverlap(option.tokens, product.searchTokens);
+    if (
+      option.normalized.length > 0
+      && product.normalizedName.includes(option.normalized)
+    ) {
+      score += Math.max(4, option.tokens.size);
+    }
+    if (score > bestScore) {
+      bestProduct = product;
+      bestScore = score;
+      tied = false;
+    } else if (score === bestScore && score > 0) {
+      tied = true;
+    }
+  }
+
+  const threshold = Math.max(
+    5,
+    Math.ceil(Math.min(option.tokens.size, 10) * 1.4),
+  );
+  if (tied || bestScore < threshold) {
+    return undefined;
+  }
+  return bestProduct;
+}
+
+function formatMemoryArenaWebshopObservation(
+  option: VisibleItemOption,
+  product: MemoryArenaWebshopProduct,
+): string {
+  return [
+    `Option ${option.index + 1}: ${option.text}`,
+    `- ASIN: ${product.asin}`,
+    `- Product title: ${product.name}`,
+    product.priceText !== undefined
+      ? `- Price: ${product.priceText}`
+      : product.price !== undefined
+        ? `- Price: ${formatMemoryArenaNumber(product.price)}`
+        : "",
+    product.averageRating === undefined
+      ? ""
+      : `- Average rating: ${formatMemoryArenaNumber(product.averageRating)}`,
+    product.totalReviews === undefined
+      ? ""
+      : `- Reviews: ${formatMemoryArenaNumber(product.totalReviews)}`,
+    product.productCategory === undefined
+      ? ""
+      : `- Product category: ${product.productCategory}`,
+    product.brand === undefined ? "" : `- Brand: ${product.brand}`,
+    product.attributes.length === 0
+      ? ""
+      : `- Attributes: ${product.attributes.join(", ")}`,
+  ].filter((part) => part.length > 0).join("\n");
+}
+
+interface MemoryArenaCompatibilityRules {
+  labels: string[];
+  pairs: Map<string, Set<string>>;
+  avoids: Map<string, Set<string>>;
+}
+
+interface MemoryArenaWebshopCandidate {
+  option: VisibleItemOption;
+  product: MemoryArenaWebshopProduct;
+  labels: string[];
+  support: string[];
+}
+
+function formatMemoryArenaWebshopDecisionSupport(
+  question: string,
+  priorEnvironmentResults: string,
+  catalog: MemoryArenaWebshopProductCatalog | undefined,
+): string {
+  if (catalog === undefined) {
+    return "";
+  }
+  const options = extractMemoryArenaVisibleOptions(question);
+  if (options.length === 0) {
+    return "";
+  }
+  const rules = extractMemoryArenaCompatibilityRules(question);
+  if (rules.labels.length === 0 || rules.pairs.size === 0) {
+    return "";
+  }
+
+  const priorLabels = detectMemoryArenaCompatibilityLabelsInText(
+    priorEnvironmentResults,
+    rules.labels,
+  );
+  if (priorLabels.length === 0) {
+    return "";
+  }
+
+  const preference = extractMemoryArenaSelectionPreference(question);
+  const candidates: MemoryArenaWebshopCandidate[] = [];
+  for (const option of options) {
+    const product = selectMemoryArenaWebshopProductForOption(
+      option,
+      catalog.products,
+    );
+    if (product === undefined) {
+      continue;
+    }
+    const labels = detectMemoryArenaCompatibilityLabelsInText(
+      `${option.text} ${product.labelText}`,
+      rules.labels,
+    );
+    const support = computeMemoryArenaCompatibilitySupport(
+      priorLabels,
+      labels,
+      rules,
+    );
+    if (support.length > 0) {
+      candidates.push({ option, product, labels, support });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return "";
+  }
+  const ranked = rankMemoryArenaWebshopCandidates(candidates, preference);
+  const best = ranked[0];
+  return [
+    "## WebShop derived decision support",
+    `Prior selected rule labels detected: ${priorLabels.join(", ")}`,
+    `Preference detected: ${preference}`,
+    "Compatible candidates from current rules and WebShop observations:",
+    ...ranked.map((candidate) => formatMemoryArenaDecisionCandidate(candidate)),
+    best === undefined
+      ? ""
+      : `Best-supported option by current rules: Option ${best.option.index + 1}: ${best.option.text} (ASIN: ${best.product.asin})`,
+  ].filter((part) => part.length > 0).join("\n");
+}
+
+function extractMemoryArenaCompatibilityRules(
+  question: string,
+): MemoryArenaCompatibilityRules {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  const pairs = new Map<string, Set<string>>();
+  const avoids = new Map<string, Set<string>>();
+  const appendLabel = (label: string): string | undefined => {
+    const cleaned = cleanMemoryArenaWebshopString(label)
+      .replace(/^one of:\s*/i, "")
+      .replace(/\.$/, "")
+      .trim();
+    const normalized = normalizeItemSelectionText(cleaned);
+    if (normalized.length === 0) {
+      return undefined;
+    }
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      labels.push(cleaned);
+    }
+    return cleaned;
+  };
+  const splitLabels = (value: string): string[] =>
+    value
+      .replace(/^one of:\s*/i, "")
+      .split(/,|\bor\b/i)
+      .map((part) => part.replace(/\.$/, "").trim())
+      .filter((part) => part.length > 0);
+  const appendRule = (
+    rules: Map<string, Set<string>>,
+    source: string,
+    targets: string[],
+  ): void => {
+    const cleanedSource = appendLabel(source);
+    if (cleanedSource === undefined) {
+      return;
+    }
+    const normalizedSource = normalizeItemSelectionText(cleanedSource);
+    const normalizedTargets = rules.get(normalizedSource) ?? new Set<string>();
+    for (const target of targets) {
+      const cleanedTarget = appendLabel(target);
+      if (cleanedTarget !== undefined) {
+        normalizedTargets.add(normalizeItemSelectionText(cleanedTarget));
+      }
+    }
+    if (normalizedTargets.size > 0) {
+      rules.set(normalizedSource, normalizedTargets);
+    }
+  };
+
+  const compatibilityRegex =
+    /([A-Za-z][A-Za-z ]{0,40}?)\s+pairs well with\s+([^.\n]+)/gi;
+  for (const match of question.matchAll(compatibilityRegex)) {
+    appendRule(pairs, match[1] ?? "", splitLabels(match[2] ?? ""));
+  }
+
+  const avoidRegex = /([A-Za-z][A-Za-z ]{0,40}?)\s+avoids\s+([^.\n]+)/gi;
+  for (const match of question.matchAll(avoidRegex)) {
+    appendRule(avoids, match[1] ?? "", splitLabels(match[2] ?? ""));
+  }
+
+  return { labels, pairs, avoids };
+}
+
+function detectMemoryArenaCompatibilityLabelsInText(
+  text: string,
+  labels: string[],
+): string[] {
+  if (labels.length === 0) {
+    return [];
+  }
+  const normalizedText = ` ${normalizeItemSelectionText(text)} `;
+  const found = labels.filter((label) => {
+    const normalizedLabel = normalizeItemSelectionText(label);
+    return normalizedLabel.length > 0
+      && normalizedText.includes(` ${normalizedLabel} `);
+  });
+  if (/\b8\s+colors?\b/i.test(text)) {
+    for (const color of ["Red", "Blue", "Green", "Yellow", "Pink"]) {
+      if (
+        labels.some((label) => normalizeItemSelectionText(label) === normalizeItemSelectionText(color))
+        && !found.some((label) => normalizeItemSelectionText(label) === normalizeItemSelectionText(color))
+      ) {
+        found.push(color);
+      }
+    }
+  }
+  return found;
+}
+
+function computeMemoryArenaCompatibilitySupport(
+  priorLabels: string[],
+  candidateLabels: string[],
+  rules: MemoryArenaCompatibilityRules,
+): string[] {
+  const candidateLabelSet = new Set(
+    candidateLabels.map(normalizeItemSelectionText),
+  );
+  const support: string[] = [];
+  for (const priorLabel of priorLabels) {
+    const normalizedPriorLabel = normalizeItemSelectionText(priorLabel);
+    const pairedLabels = rules.pairs.get(normalizedPriorLabel);
+    if (pairedLabels === undefined) {
+      continue;
+    }
+    const avoidedLabels = rules.avoids.get(normalizedPriorLabel) ?? new Set<string>();
+    for (const pairedLabel of pairedLabels) {
+      if (
+        !candidateLabelSet.has(pairedLabel)
+        || avoidedLabels.has(pairedLabel)
+        || memoryArenaCompatibilityLabelsAvoidEachOther(
+          normalizedPriorLabel,
+          pairedLabel,
+          rules.avoids,
+        )
+      ) {
+        continue;
+      }
+      support.push(`${priorLabel} -> ${lookupMemoryArenaLabel(rules.labels, pairedLabel)}`);
+    }
+  }
+  return support;
+}
+
+function memoryArenaCompatibilityLabelsAvoidEachOther(
+  leftLabel: string,
+  rightLabel: string,
+  avoids: Map<string, Set<string>>,
+): boolean {
+  return Boolean(
+    avoids.get(leftLabel)?.has(rightLabel)
+      || avoids.get(rightLabel)?.has(leftLabel),
+  );
+}
+
+function lookupMemoryArenaLabel(labels: string[], normalizedLabel: string): string {
+  return labels.find((label) =>
+    normalizeItemSelectionText(label) === normalizedLabel,
+  ) ?? normalizedLabel;
+}
+
+function extractMemoryArenaSelectionPreference(question: string): "highest-priced" | "lowest-priced" | "highest-rated" | "listed-order" {
+  const normalizedQuestion = normalizeItemSelectionText(question);
+  if (normalizedQuestion.includes("lowest priced")) {
+    return "lowest-priced";
+  }
+  if (normalizedQuestion.includes("highest rated")) {
+    return "highest-rated";
+  }
+  if (normalizedQuestion.includes("highest priced")) {
+    return "highest-priced";
+  }
+  return "listed-order";
+}
+
+function rankMemoryArenaWebshopCandidates(
+  candidates: MemoryArenaWebshopCandidate[],
+  preference: "highest-priced" | "lowest-priced" | "highest-rated" | "listed-order",
+): MemoryArenaWebshopCandidate[] {
+  return [...candidates].sort((left, right) => {
+    if (preference === "highest-priced") {
+      return compareOptionalNumberDesc(left.product.price, right.product.price)
+        || left.option.index - right.option.index;
+    }
+    if (preference === "lowest-priced") {
+      return compareOptionalNumberAsc(left.product.price, right.product.price)
+        || left.option.index - right.option.index;
+    }
+    if (preference === "highest-rated") {
+      return compareOptionalNumberDesc(left.product.averageRating, right.product.averageRating)
+        || compareOptionalNumberDesc(left.product.totalReviews, right.product.totalReviews)
+        || left.option.index - right.option.index;
+    }
+    return left.option.index - right.option.index;
+  });
+}
+
+function compareOptionalNumberDesc(
+  left: number | undefined,
+  right: number | undefined,
+): number {
+  if (left === undefined && right === undefined) {
+    return 0;
+  }
+  if (left === undefined) {
+    return 1;
+  }
+  if (right === undefined) {
+    return -1;
+  }
+  return right - left;
+}
+
+function compareOptionalNumberAsc(
+  left: number | undefined,
+  right: number | undefined,
+): number {
+  if (left === undefined && right === undefined) {
+    return 0;
+  }
+  if (left === undefined) {
+    return 1;
+  }
+  if (right === undefined) {
+    return -1;
+  }
+  return left - right;
+}
+
+function formatMemoryArenaDecisionCandidate(
+  candidate: MemoryArenaWebshopCandidate,
+): string {
+  return [
+    `- Option ${candidate.option.index + 1}: ${candidate.option.text}`,
+    `ASIN: ${candidate.product.asin}`,
+    candidate.product.priceText !== undefined
+      ? `price: ${candidate.product.priceText}`
+      : candidate.product.price !== undefined
+        ? `price: ${formatMemoryArenaNumber(candidate.product.price)}`
+        : "price: unavailable",
+    candidate.product.averageRating !== undefined
+      ? `rating: ${formatMemoryArenaNumber(candidate.product.averageRating)}`
+      : "rating: unavailable",
+    candidate.labels.length > 0
+      ? `labels: ${candidate.labels.join(", ")}`
+      : "",
+    `support: ${candidate.support.join("; ")}`,
+  ].filter((part) => part.length > 0).join("; ");
+}
+
+function extractSelectedMemoryArenaCustomization(
+  record: Record<string, unknown>,
+): { priceText?: string; price?: number } | undefined {
+  const customizationOptions = record.customization_options;
+  if (!isPlainRecord(customizationOptions)) {
+    return undefined;
+  }
+
+  for (const optionGroup of Object.values(customizationOptions)) {
+    if (!Array.isArray(optionGroup)) {
+      continue;
+    }
+    for (const option of optionGroup) {
+      if (!isPlainRecord(option) || option.is_selected !== true) {
+        continue;
+      }
+      const priceText = cleanMemoryArenaWebshopString(
+        readMemoryArenaStringField(option, "price_string")
+          ?? readMemoryArenaPriceTextField(option, "price")
+          ?? "",
+      );
+      const price = readMemoryArenaPriceField(option, "price")
+        ?? parseMemoryArenaPrice(priceText);
+      return {
+        ...(priceText.length > 0 ? { priceText } : {}),
+        ...(price === undefined ? {} : { price }),
+      };
+    }
+  }
+  return undefined;
+}
+
+function extractMemoryArenaProductInformationValue(
+  record: Record<string, unknown>,
+  requestedKey: string,
+): unknown {
+  const productInformation = record.product_information;
+  if (!isPlainRecord(productInformation)) {
+    return undefined;
+  }
+
+  const normalizedRequestedKey = normalizeItemSelectionText(requestedKey);
+  for (const [key, value] of Object.entries(productInformation)) {
+    if (normalizeItemSelectionText(cleanMemoryArenaWebshopString(key)) === normalizedRequestedKey) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readMemoryArenaProductCustomerReviewNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const productInformation = record.product_information;
+  if (!isPlainRecord(productInformation)) {
+    return undefined;
+  }
+  const customerReviews = Object.entries(productInformation)
+    .find(([entryKey]) =>
+      normalizeItemSelectionText(cleanMemoryArenaWebshopString(entryKey))
+        === "customer reviews",
+    )?.[1];
+  if (!isPlainRecord(customerReviews)) {
+    return undefined;
+  }
+  return readMemoryArenaNumberField(customerReviews, key);
+}
+
+function readMemoryArenaStringField(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readMemoryArenaStringArrayField(
+  record: Record<string, unknown>,
+  key: string,
+): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map(cleanMemoryArenaWebshopString)
+    .filter((item) => item.length > 0);
+}
+
+function readMemoryArenaNumberField(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = record[key];
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return parseMemoryArenaNumber(value);
+  }
+  return undefined;
+}
+
+function parseMemoryArenaNumber(value: string): number | undefined {
+  const match =
+    /[-+]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?/.exec(value.trim());
+  if (match?.[0] === undefined) {
+    return undefined;
+  }
+  const parsed = Number(match[0].replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readMemoryArenaPriceField(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  return readMemoryArenaNumberField(record, key)
+    ?? parseMemoryArenaPrice(readMemoryArenaStringField(record, key) ?? "");
+}
+
+function readMemoryArenaPriceTextField(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = readMemoryArenaStringField(record, key);
+  return value !== undefined && parseMemoryArenaPrice(value) !== undefined
+    ? value
+    : undefined;
+}
+
+function normalizeMemoryArenaWebshopAsin(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const matches = extractMemoryArenaWebshopAsins(value);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function extractMemoryArenaWebshopAsins(value: string): string[] {
+  const cleaned = cleanMemoryArenaWebshopString(value).toUpperCase();
+  const matches = new Set<string>();
+  const asinPattern = /(?:^|[^A-Z0-9])([A-Z0-9]{10})(?=$|[^A-Z0-9])/g;
+  for (const match of cleaned.matchAll(asinPattern)) {
+    if (match[1] !== undefined) {
+      matches.add(match[1]);
+    }
+  }
+  return [...matches];
+}
+
+function parseMemoryArenaPrice(value: string): number | undefined {
+  const match =
+    /\$?\s*((?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?)/.exec(value);
+  if (match?.[1] === undefined) {
+    return undefined;
+  }
+  const parsed = Number(match[1].replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function cleanMemoryArenaWebshopString(value: string): string {
+  return value
+    .replace(/[^\x20-\x7E]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatMemoryArenaNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNodeErrorCode(error: unknown, code: string): boolean {
+  return Boolean(
+    error
+      && typeof error === "object"
+      && "code" in error
+      && (error as { code?: unknown }).code === code,
+  );
+}
+
+function extractMemoryArenaEnvironmentResults(recalledText: string): string {
+  const rows: string[] = [];
+  const seen = new Set<string>();
+  let currentSubtask = "";
+  for (const rawLine of recalledText.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")) {
+    const line = rawLine.trim();
+    const subtaskMatch = /MemoryArena completed subtask\s+(\d+)/i.exec(line);
+    if (subtaskMatch?.[1]) {
+      currentSubtask = subtaskMatch[1];
+    }
+
+    const selectedAttributes = extractMemoryArenaStoredLineValue(line, "Selected item attributes:");
+    if (selectedAttributes !== undefined) {
+      const label = currentSubtask.length > 0
+        ? `Subtask ${currentSubtask}`
+        : "Prior subtask";
+      appendUniqueMemoryArenaEvidenceRow(
+        rows,
+        seen,
+        `${label}: Selected item attributes: ${selectedAttributes}`,
+      );
+      continue;
+    }
+
+    const selectedAsin = extractMemoryArenaStoredLineValue(line, "Selected item ASIN:");
+    if (selectedAsin !== undefined) {
+      const label = currentSubtask.length > 0
+        ? `Subtask ${currentSubtask}`
+        : "Prior subtask";
+      appendUniqueMemoryArenaEvidenceRow(
+        rows,
+        seen,
+        `${label}: Selected item ASIN: ${selectedAsin}`,
+      );
+      continue;
+    }
+
+    const environmentResult = extractMemoryArenaStoredLineValue(line, "Environment result:");
+    if (environmentResult !== undefined) {
+      const label = currentSubtask.length > 0
+        ? `Subtask ${currentSubtask}`
+        : "Prior subtask";
+      appendUniqueMemoryArenaEvidenceRow(
+        rows,
+        seen,
+        `${label}: Environment result: ${environmentResult}`,
+      );
+      continue;
+    }
+
+    const selectedWebshopLine = extractSelectedMemoryArenaWebshopLine(line);
+    if (selectedWebshopLine !== undefined) {
+      const label = currentSubtask.length > 0
+        ? `Subtask ${currentSubtask}`
+        : "Prior subtask";
+      appendUniqueMemoryArenaEvidenceRow(
+        rows,
+        seen,
+        `${label}: ${selectedWebshopLine}`,
+      );
+    }
+  }
+  return rows.join("\n");
+}
+
+function extractSelectedMemoryArenaWebshopLine(line: string): string | undefined {
+  const normalizedLine = line.replace(/^Subtask\s+\d+:\s*/i, "");
+  const match =
+    /^Selected WebShop product(?: \d+)? (title|ASIN|price|average rating|reviews|category):\s*(.+)$/i.exec(normalizedLine);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return undefined;
+  }
+  const value = match[2].trim();
+  return value.length > 0
+    ? `Selected WebShop product ${match[1].toLowerCase()}: ${value}`
+    : undefined;
+}
+
+function extractMemoryArenaStoredLineValue(
+  line: string,
+  marker: string,
+): string | undefined {
+  const normalizedLine = line.replace(/^Subtask\s+\d+:\s*/i, "");
+  const selectedItemRequestedField =
+    marker === "Selected item ASIN:"
+      ? "asin"
+      : marker === "Selected item attributes:"
+        ? "attributes"
+        : undefined;
+  const selectedItemMatch =
+    /^Selected item(?: \d+)? (ASIN|attributes):\s*(.+)$/i.exec(normalizedLine);
+  if (selectedItemMatch !== null) {
+    if (
+      selectedItemRequestedField === undefined
+      || selectedItemMatch[1].toLowerCase() !== selectedItemRequestedField
+    ) {
+      return undefined;
+    }
+    const value = selectedItemMatch[2].trim();
+    return value.length > 0 ? value : undefined;
+  }
+
+  const markerIndex = normalizedLine.indexOf(marker);
+  if (markerIndex < 0) {
+    return undefined;
+  }
+  const value = normalizedLine.slice(markerIndex + marker.length).trim();
+  return value.length > 0 ? value : undefined;
+}
+
+export const __memoryArenaTestHooks = {
+  extractMemoryArenaStoredLineValue,
+};
+
+function appendUniqueMemoryArenaEvidenceRow(
+  rows: string[],
+  seen: Set<string>,
+  row: string,
+): void {
+  const key = normalizeItemSelectionText(row);
+  if (key.length === 0 || seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  rows.push(row);
 }
 
 function scoreMemoryArenaDomainAnswer(
   category: string,
   predicted: string,
   expectedAnswer: ArenaExpectedAnswer,
+  question?: string,
 ): Record<string, number> {
+  const itemScore = scoreItemSelectionAnswer(predicted, expectedAnswer, question);
   if (!isGroupTravelPlannerCategory(category)) {
-    return {};
+    return itemScore;
   }
 
   const expectedFields = extractPlanFieldValues(expectedAnswer);
   if (expectedFields.length === 0) {
-    return {};
+    return itemScore;
   }
 
   const hits = countNonOverlappingPlanFieldHits(predicted, expectedFields);
   const planFieldRecall = hits / expectedFields.length;
 
   return {
+    ...itemScore,
     soft_process_score: hits === expectedFields.length ? 1 : 0,
     plan_field_recall: planFieldRecall,
   };
@@ -722,16 +1833,401 @@ function failureMemoryArenaDomainScores(
   category: string,
   expectedAnswer: ArenaExpectedAnswer,
 ): Record<string, number> {
+  const itemScore: Record<string, number> = hasItemSelectionExpectation(expectedAnswer)
+    ? { item_selection_match: 0 }
+    : {};
   if (
     !isGroupTravelPlannerCategory(category)
     || extractPlanFieldValues(expectedAnswer).length === 0
   ) {
-    return {};
+    return itemScore;
   }
   return {
+    ...itemScore,
     plan_field_recall: 0,
     soft_process_score: 0,
   };
+}
+
+function scoreItemSelectionAnswer(
+  predicted: string,
+  expectedAnswer: ArenaExpectedAnswer,
+  question?: string,
+): Record<string, number> {
+  const expectations = extractItemSelectionExpectations(expectedAnswer);
+  if (expectations.length === 0) {
+    return {};
+  }
+
+  const predictedNormalized = normalizeItemSelectionText(predicted);
+  const asinContext = buildItemSelectionAsinContext(
+    predictedNormalized,
+    expectations,
+  );
+  const visibleOptions = question === undefined
+    ? []
+    : extractMemoryArenaVisibleOptions(question);
+  const hits = expectations.filter((expectation) => {
+    if (itemSelectionExpectationMatches(
+      predictedNormalized,
+      expectation,
+      asinContext,
+    )) {
+      return true;
+    }
+    if (itemSelectionHasConflictingExplicitAsin(asinContext, expectation)) {
+      return false;
+    }
+    return visibleOptionSelectionMatches(predicted, expectation, visibleOptions);
+  }).length;
+  return {
+    item_selection_match: hits / expectations.length,
+  };
+}
+
+interface ItemSelectionExpectation {
+  targetAsin?: string;
+  attributes: string[];
+}
+
+interface ItemSelectionAsinContext {
+  predictedExplicitAsins: string[];
+  expectedExplicitAsins: Set<string>;
+  hasConflictingExplicitAsin: boolean;
+}
+
+function hasItemSelectionExpectation(answer: ArenaExpectedAnswer): boolean {
+  return extractItemSelectionExpectations(answer).length > 0;
+}
+
+function extractItemSelectionExpectations(
+  answer: ArenaExpectedAnswer,
+): ItemSelectionExpectation[] {
+  const values = Array.isArray(answer) ? answer : [answer];
+  return values
+    .filter(isValidArenaAnswerObject)
+    .map((item) => {
+      const targetAsin = typeof item.target_asin === "string" && item.target_asin.trim().length > 0
+        ? item.target_asin.trim()
+        : undefined;
+      const attributes = Array.isArray(item.attributes)
+        ? item.attributes
+            .filter((attribute): attribute is string =>
+              typeof attribute === "string" && attribute.trim().length > 0,
+            )
+            .map((attribute) => attribute.trim())
+        : [];
+      return { targetAsin, attributes };
+    })
+    .filter((item) => item.targetAsin !== undefined || item.attributes.length > 0);
+}
+
+function buildItemSelectionAsinContext(
+  predictedNormalized: string,
+  expectations: ItemSelectionExpectation[],
+): ItemSelectionAsinContext {
+  const predictedExplicitAsins =
+    extractItemSelectionAsinReferences(predictedNormalized);
+  const expectedExplicitAsins = new Set(
+    expectations
+      .map((expectation) => expectation.targetAsin)
+      .filter((targetAsin): targetAsin is string => targetAsin !== undefined)
+      .map(normalizeItemSelectionAsinForComparison),
+  );
+  const hasConflictingExplicitAsin =
+    expectedExplicitAsins.size > 0
+    && predictedExplicitAsins.some((asin) => !expectedExplicitAsins.has(asin));
+  return {
+    predictedExplicitAsins,
+    expectedExplicitAsins,
+    hasConflictingExplicitAsin,
+  };
+}
+
+function itemSelectionExpectationMatches(
+  predictedNormalized: string,
+  expectation: ItemSelectionExpectation,
+  asinContext: ItemSelectionAsinContext,
+): boolean {
+  if (expectation.targetAsin) {
+    const normalizedExpectedAsin =
+      normalizeItemSelectionAsinForComparison(expectation.targetAsin);
+    const textNormalizedExpectedAsin = normalizeItemSelectionText(
+      expectation.targetAsin,
+    );
+    if (asinContext.predictedExplicitAsins.length > 0) {
+      return !asinContext.hasConflictingExplicitAsin
+        && asinContext.predictedExplicitAsins.includes(normalizedExpectedAsin);
+    }
+    if (predictedNormalized.includes(textNormalizedExpectedAsin)) {
+      return true;
+    }
+    return expectation.attributes.length > 0
+      && expectation.attributes.every((attribute) =>
+        predictedNormalized.includes(normalizeItemSelectionText(attribute)),
+      );
+  }
+
+  return expectation.attributes.every((attribute) =>
+    predictedNormalized.includes(normalizeItemSelectionText(attribute)),
+  );
+}
+
+function itemSelectionHasConflictingExplicitAsin(
+  asinContext: ItemSelectionAsinContext,
+  expectation: ItemSelectionExpectation,
+): boolean {
+  if (!expectation.targetAsin) {
+    return false;
+  }
+  return asinContext.predictedExplicitAsins.length > 0
+    && asinContext.hasConflictingExplicitAsin;
+}
+
+function extractItemSelectionAsinReferences(
+  predictedNormalized: string,
+): string[] {
+  const asinReferences = new Set<string>();
+  const asinPattern =
+    /\b(?:target\s+asin|asin)\s+([a-z0-9][a-z0-9 ]{1,30}?)(?=\s+(?:attributes?|item|selected|price|rating|reviews|product|title|category)\b|$)/g;
+  for (const match of predictedNormalized.matchAll(asinPattern)) {
+    const normalizedAsin = normalizeMemoryArenaWebshopAsinReference(match[1]);
+    if (normalizedAsin !== undefined) {
+      asinReferences.add(normalizedAsin);
+    }
+  }
+  for (const match of predictedNormalized.matchAll(/\b(?=[a-z0-9]*\d)[a-z0-9]{10}\b/g)) {
+    const normalizedAsin = normalizeMemoryArenaWebshopAsinReference(match[0]);
+    if (normalizedAsin !== undefined) {
+      asinReferences.add(normalizedAsin);
+    }
+  }
+  return [...asinReferences];
+}
+
+function normalizeItemSelectionAsinForComparison(value: string): string {
+  return normalizeMemoryArenaWebshopAsinReference(value)
+    ?? normalizeItemSelectionText(value);
+}
+
+function normalizeMemoryArenaWebshopAsinReference(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const compact = value.replace(/\s+/g, "");
+  return /^[a-z0-9]{10}$/i.test(compact) ? compact.toUpperCase() : undefined;
+}
+
+function normalizeItemSelectionText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+interface VisibleItemOption {
+  index: number;
+  text: string;
+  normalized: string;
+  tokens: Set<string>;
+}
+
+const ITEM_SELECTION_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "available",
+  "by",
+  "for",
+  "from",
+  "in",
+  "into",
+  "is",
+  "item",
+  "of",
+  "on",
+  "option",
+  "or",
+  "product",
+  "select",
+  "set",
+  "the",
+  "to",
+  "with",
+]);
+
+function extractMemoryArenaVisibleOptions(question: string): VisibleItemOption[] {
+  return question
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line, index) => {
+      const text = line.slice(2).trim();
+      return {
+        index,
+        text,
+        normalized: normalizeItemSelectionText(text),
+        tokens: new Set(tokenizeItemSelectionText(text)),
+      };
+    })
+    .filter((option) => option.text.length > 0);
+}
+
+function visibleOptionSelectionMatches(
+  predicted: string,
+  expectation: ItemSelectionExpectation,
+  visibleOptions: VisibleItemOption[],
+): boolean {
+  if (visibleOptions.length === 0 || expectation.attributes.length === 0) {
+    return false;
+  }
+
+  const expectedOptions = selectVisibleOptionsForExpectation(
+    visibleOptions,
+    expectation,
+  );
+  if (expectedOptions.length === 0) {
+    return false;
+  }
+
+  const predictedOptions = selectVisibleOptionsForPrediction(
+    visibleOptions,
+    predicted,
+  );
+  if (predictedOptions.length === 0) {
+    return false;
+  }
+
+  if (expectedOptions.length > 1 && predictedOptions.length > 1) {
+    return false;
+  }
+
+  const expectedIndexes = new Set(
+    expectedOptions.map((option) => option.index),
+  );
+  return predictedOptions.some((option) => expectedIndexes.has(option.index));
+}
+
+function selectVisibleOptionsForExpectation(
+  visibleOptions: VisibleItemOption[],
+  expectation: ItemSelectionExpectation,
+): VisibleItemOption[] {
+  const expectedTokens = new Set(
+    tokenizeItemSelectionText(expectation.attributes.join(" ")),
+  );
+  if (expectedTokens.size === 0) {
+    return [];
+  }
+
+  const targetAsin = expectation.targetAsin === undefined
+    ? undefined
+    : normalizeItemSelectionText(expectation.targetAsin);
+  const ranked = rankVisibleOptions(visibleOptions, (option) => {
+    let score = countTokenOverlap(expectedTokens, option.tokens);
+    if (targetAsin && option.normalized.includes(targetAsin)) {
+      score += 100;
+    }
+    for (const attribute of expectation.attributes) {
+      const normalizedAttribute = normalizeItemSelectionText(attribute);
+      if (
+        normalizedAttribute.length > 0
+        && option.normalized.includes(normalizedAttribute)
+      ) {
+        score += 2;
+      }
+    }
+    return score;
+  });
+  const threshold = Math.max(2, Math.ceil(Math.min(expectedTokens.size, 6) / 2));
+  return ranked.score >= threshold ? ranked.options : [];
+}
+
+function selectVisibleOptionsForPrediction(
+  visibleOptions: VisibleItemOption[],
+  predicted: string,
+): VisibleItemOption[] {
+  const predictedTokens = new Set(tokenizeItemSelectionText(predicted));
+  if (predictedTokens.size === 0) {
+    return [];
+  }
+
+  const predictedNormalized = normalizeItemSelectionText(predicted);
+  const ranked = rankVisibleOptions(visibleOptions, (option) => {
+    let score = countTokenOverlap(predictedTokens, option.tokens);
+    if (
+      predictedNormalized.length > 0
+      && predictedNormalized.includes(option.normalized)
+    ) {
+      score += Math.max(4, option.tokens.size);
+    }
+    return score;
+  });
+  const threshold = Math.max(
+    2,
+    Math.min(4, Math.ceil(predictedTokens.size * 0.4)),
+  );
+  return ranked.score >= threshold ? ranked.options : [];
+}
+
+function rankVisibleOptions(
+  visibleOptions: VisibleItemOption[],
+  scoreOption: (option: VisibleItemOption) => number,
+): { options: VisibleItemOption[]; score: number } {
+  let bestOptions: VisibleItemOption[] = [];
+  let bestScore = 0;
+  for (const option of visibleOptions) {
+    const score = scoreOption(option);
+    if (score > bestScore) {
+      bestOptions = [option];
+      bestScore = score;
+    } else if (score === bestScore && score > 0) {
+      bestOptions.push(option);
+    }
+  }
+  return { options: bestOptions, score: bestScore };
+}
+
+function countTokenOverlap(left: Set<string>, right: Set<string>): number {
+  let count = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function tokenizeItemSelectionText(value: string): string[] {
+  return normalizeItemSelectionText(value)
+    .split(" ")
+    .flatMap(canonicalizeItemSelectionToken)
+    .filter(
+      (token) =>
+        token.length > 0
+        && !ITEM_SELECTION_STOPWORDS.has(token),
+    );
+}
+
+function canonicalizeItemSelectionToken(token: string): string[] {
+  if (token.length > 4 && token.endsWith("ies")) {
+    return [
+      token.slice(0, -1),
+      `${token.slice(0, -3)}y`,
+    ];
+  }
+  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) {
+    return [token.slice(0, -1)];
+  }
+  return [token];
 }
 
 function isGroupTravelPlannerCategory(category: string): boolean {
@@ -1139,21 +2635,33 @@ async function storeCompletedSubtask(
   question: string,
   expected: string,
   expectedAnswer: ArenaExpectedAnswer,
+  webshopCatalog?: MemoryArenaWebshopProductCatalog,
 ): Promise<void> {
   const planFieldAnchors = formatPlanFieldAnchorLines(expectedAnswer);
+  const selectedItemLines = formatSelectedItemAnchorLines(expectedAnswer);
+  const selectedWebshopLines = formatSelectedWebshopProductAnchorLines(
+    expectedAnswer,
+    webshopCatalog,
+  );
+  const subtaskSummary = summarizeMemoryArenaSubtaskQuestion(question);
   await options.system.store(sessionId, [
     {
       role: "user",
-      content: question,
+      content: [
+        `MemoryArena subtask ${questionIndex + 1} request.`,
+        subtaskSummary,
+      ].filter((part) => part.length > 0).join("\n"),
     },
     {
       role: "assistant",
       content: [
         `MemoryArena completed subtask ${questionIndex + 1}.`,
-        `Instruction: ${question}`,
+        subtaskSummary.length > 0 ? `Instruction summary:\n${subtaskSummary}` : "",
         `Environment result: ${expected}`,
+        ...selectedItemLines,
+        ...selectedWebshopLines,
         ...planFieldAnchors,
-      ].join("\n"),
+      ].filter((part) => part.length > 0).join("\n"),
     },
   ]);
   try {
@@ -1163,7 +2671,124 @@ async function storeCompletedSubtask(
   }
 }
 
+function summarizeMemoryArenaSubtaskQuestion(question: string): string {
+  const lines = question
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const summary: string[] = [];
+  for (const line of lines) {
+    if (line === "**Available Options:**") {
+      break;
+    }
+    if (
+      /^Product\s+\d+:/i.test(line)
+      || line.startsWith("### ")
+      || line.startsWith("**Goal:**")
+      || line.startsWith("**Preference:**")
+      || line.startsWith("**Constraint:**")
+    ) {
+      summary.push(line);
+    }
+  }
+  if (summary.length > 0) {
+    return summary.join("\n");
+  }
+  return headText(question.trim(), 500);
+}
+
+function formatSelectedItemAnchorLines(answer: ArenaExpectedAnswer): string[] {
+  const expectations = extractItemSelectionExpectations(answer);
+  if (expectations.length === 0) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  expectations.forEach((expectation, index) => {
+    const prefix = expectations.length === 1
+      ? "Selected item"
+      : `Selected item ${index + 1}`;
+    if (expectation.targetAsin) {
+      lines.push(`${prefix} ASIN: ${expectation.targetAsin}`);
+    }
+    if (expectation.attributes.length > 0) {
+      lines.push(`${prefix} attributes: ${expectation.attributes.join(", ")}`);
+    }
+  });
+  return lines;
+}
+
+function formatSelectedWebshopProductAnchorLines(
+  answer: ArenaExpectedAnswer,
+  catalog: MemoryArenaWebshopProductCatalog | undefined,
+): string[] {
+  if (catalog === undefined) {
+    return [];
+  }
+  const expectations = extractItemSelectionExpectations(answer);
+  if (expectations.length === 0) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  expectations.forEach((expectation, index) => {
+    if (expectation.targetAsin === undefined) {
+      return;
+    }
+    const product = findMemoryArenaWebshopProductByAsin(
+      catalog,
+      expectation.targetAsin,
+    );
+    if (product === undefined) {
+      return;
+    }
+    const prefix = expectations.length === 1
+      ? "Selected WebShop product"
+      : `Selected WebShop product ${index + 1}`;
+    lines.push(`${prefix} title: ${product.name}`);
+    lines.push(`${prefix} ASIN: ${product.asin}`);
+    if (product.priceText !== undefined) {
+      lines.push(`${prefix} price: ${product.priceText}`);
+    } else if (product.price !== undefined) {
+      lines.push(`${prefix} price: ${formatMemoryArenaNumber(product.price)}`);
+    }
+    if (product.averageRating !== undefined) {
+      lines.push(`${prefix} average rating: ${formatMemoryArenaNumber(product.averageRating)}`);
+    }
+    if (product.totalReviews !== undefined) {
+      lines.push(`${prefix} reviews: ${formatMemoryArenaNumber(product.totalReviews)}`);
+    }
+    if (product.productCategory !== undefined) {
+      lines.push(`${prefix} category: ${product.productCategory}`);
+    }
+  });
+  return lines;
+}
+
+function findMemoryArenaWebshopProductByAsin(
+  catalog: MemoryArenaWebshopProductCatalog,
+  asin: string,
+): MemoryArenaWebshopProduct | undefined {
+  const normalizedAsin = normalizeMemoryArenaWebshopAsin(asin);
+  if (normalizedAsin === undefined) {
+    return undefined;
+  }
+  return catalog.products.find((product) => product.asin === normalizedAsin);
+}
+
+function headText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
 function scoreSubtaskSuccess(scores: Record<string, number>): number {
+  if (typeof scores.item_selection_match === "number") {
+    return scores.item_selection_match >= 1 ? 1 : 0;
+  }
   if (typeof scores.llm_judge === "number") {
     return scores.llm_judge >= 0.5 ? 1 : 0;
   }

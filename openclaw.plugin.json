@@ -4541,6 +4541,11 @@
         "default": 90,
         "description": "Days to retain archived LCM summaries"
       },
+      "lcmObserveConcurrency": {
+        "type": "number",
+        "default": 1,
+        "description": "Maximum independent LCM observe jobs to process concurrently."
+      },
       "messagePartsEnabled": {
         "type": "boolean",
         "default": false,

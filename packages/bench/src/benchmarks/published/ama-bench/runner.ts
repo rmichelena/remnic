@@ -51,6 +51,9 @@ export async function runAmaBenchBenchmark(
   const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
   const tasks: TaskResult[] = [];
   const totalQaPairs = dataset.reduce((sum, ep) => sum + ep.qa_pairs.length, 0);
+  const trialConcurrency = resolveAmaBenchTrialConcurrency(
+    options.benchmarkOptions?.trialConcurrency,
+  );
 
   for (const episode of dataset) {
     await options.system.reset();
@@ -78,180 +81,22 @@ export async function runAmaBenchBenchmark(
     }
 
     const recallQueries = buildAmaBenchRecallQueries(episode.qa_pairs);
+    const episodeTasks = await mapAmaBenchQaPairs(
+      episode.qa_pairs,
+      trialConcurrency,
+      (qa, qaIndex) =>
+        executeAmaBenchQa({
+          options,
+          episode,
+          qa,
+          recallQuery: recallQueries[qaIndex] ?? qa.question,
+          sessionId,
+        }),
+    );
 
-    for (const [qaIndex, qa] of episode.qa_pairs.entries()) {
-      const recallQuery = recallQueries[qaIndex] ?? qa.question;
-      try {
-        const { result: recalledText, durationMs } = await timed(async () =>
-          options.system.recall(
-            sessionId,
-            recallQuery,
-            DEFAULT_BENCH_RECALL_BUDGET_CHARS,
-          ),
-        );
-        const answered = await answerBenchmarkQuestion({
-          question: qa.question,
-          recalledText,
-          responder: options.system.responder,
-          answerMode: "agentic-memory",
-          questionContext: {
-            benchmark: "AMA-Bench",
-            domain: episode.domain,
-            task: episode.task,
-            taskType: episode.task_type,
-            qaType: qa.type,
-          },
-          retryUnknownWithEvidence: true,
-        });
-        const judgeResult = await llmJudgeScoreDetailed(
-          options.system.judge,
-          qa.question,
-          answered.finalAnswer,
-          qa.answer,
-        );
-        const trajectoryLocationScore = scoreAmaBenchTrajectoryLocationAnswer(
-          qa.question,
-          answered.finalAnswer,
-          episode.trajectory,
-        );
-        const crossJudgeResult = options.amaBenchCrossJudge
-          ? await llmJudgeScoreDetailed(
-              options.amaBenchCrossJudge,
-              qa.question,
-              answered.finalAnswer,
-              qa.answer,
-            )
-          : undefined;
-        const crossJudgeLatencyMs = crossJudgeResult?.latencyMs ?? 0;
-        const crossJudgeTokens = crossJudgeResult?.tokens ?? {
-          input: 0,
-          output: 0,
-        };
-        const isRecommendedPrimaryProtocol =
-          options.amaBenchJudgeProtocol === "recommended";
-        const effectiveJudgeScore = applyAmaBenchTrajectoryLocationScore(
-          judgeResult.score,
-          trajectoryLocationScore,
-        );
-        const effectiveCrossJudgeScore =
-          crossJudgeResult?.score == null
-            ? undefined
-            : applyAmaBenchTrajectoryLocationScore(
-                crossJudgeResult.score,
-                trajectoryLocationScore,
-              );
-
-        const scores: Record<string, number> = {
-          f1: f1Score(answered.finalAnswer, qa.answer),
-          contains_answer: containsAnswer(answered.finalAnswer, qa.answer),
-        };
-        if (effectiveJudgeScore >= 0) {
-          scores.llm_judge = effectiveJudgeScore;
-          if (isRecommendedPrimaryProtocol) {
-            scores.ama_bench_recommended_accuracy = effectiveJudgeScore;
-          }
-        }
-        if (effectiveCrossJudgeScore != null && effectiveCrossJudgeScore >= 0) {
-          scores.ama_bench_cross_accuracy = effectiveCrossJudgeScore;
-          if (isRecommendedPrimaryProtocol && effectiveJudgeScore >= 0) {
-            scores.ama_bench_cross_agreement =
-              effectiveJudgeScore === effectiveCrossJudgeScore ? 1 : 0;
-          }
-        }
-        const primaryTrajectoryOverride =
-          trajectoryLocationScore && effectiveJudgeScore !== judgeResult.score;
-        const crossTrajectoryOverride =
-          trajectoryLocationScore &&
-          crossJudgeResult?.score != null &&
-          effectiveCrossJudgeScore !== crossJudgeResult.score;
-
-        tasks.push({
-          taskId: qa.question_uuid,
-          question: qa.question,
-          expected: qa.answer,
-          actual: answered.finalAnswer,
-          scores,
-          latencyMs:
-            durationMs +
-            answered.latencyMs +
-            judgeResult.latencyMs +
-            crossJudgeLatencyMs,
-          tokens: {
-            input:
-              answered.tokens.input +
-              judgeResult.tokens.input +
-              crossJudgeTokens.input,
-            output:
-              answered.tokens.output +
-              judgeResult.tokens.output +
-              crossJudgeTokens.output,
-          },
-          details: {
-            qaType: qa.type,
-            domain: episode.domain,
-            episodeId: episode.episode_id,
-            task: episode.task,
-            taskType: episode.task_type,
-            numTurns: episode.num_turns,
-            totalTokens: episode.total_tokens,
-            ...(recallQuery !== qa.question
-              ? { recallQuery }
-              : {}),
-            recalledLength: recalledText.length,
-            recallSections: extractRecallSectionTitles(recalledText),
-            answeredLength: answered.finalAnswer.length,
-            recalledText,
-            answeredText: answered.finalAnswer,
-            responderModel: answered.model,
-            judgeModel: judgeResult.model,
-            amaBenchJudgeProtocol: options.amaBenchJudgeProtocol ?? "default",
-            ...(primaryTrajectoryOverride
-              ? {
-                  amaBenchRawJudgeScore: judgeResult.score,
-                  amaBenchTrajectoryLocationScoring: true,
-                  amaBenchTrajectoryDerivedAnswer:
-                    trajectoryLocationScore.derivedAnswer,
-                  amaBenchTrajectoryDerivedLocations:
-                    trajectoryLocationScore.derivedLocations,
-                }
-              : {}),
-            ...(crossJudgeResult
-              ? {
-                  amaBenchCrossJudgeModel: crossJudgeResult.model,
-                  amaBenchCrossJudgeScore: effectiveCrossJudgeScore,
-                  ...(crossTrajectoryOverride
-                    ? { amaBenchRawCrossJudgeScore: crossJudgeResult.score }
-                    : {}),
-                  amaBenchCrossJudgeLatencyMs: crossJudgeResult.latencyMs,
-                }
-              : {}),
-          },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`  [WARN] ama-bench task ${qa.question_uuid} failed: ${message}`);
-        tasks.push({
-          taskId: qa.question_uuid,
-          question: qa.question,
-          expected: qa.answer,
-          actual: `(error: ${message})`,
-          scores: { f1: -1, contains_answer: -1, llm_judge: -1 },
-          latencyMs: 0,
-          tokens: { input: 0, output: 0 },
-          details: {
-            error: message,
-            qaType: qa.type,
-            domain: episode.domain,
-            episodeId: episode.episode_id,
-            task: episode.task,
-            taskType: episode.task_type,
-            numTurns: episode.num_turns,
-            totalTokens: episode.total_tokens,
-          },
-        });
-      }
-
-      options.onTaskComplete?.(tasks[tasks.length - 1], tasks.length, totalQaPairs);
+    for (const task of episodeTasks) {
+      tasks.push(task);
+      options.onTaskComplete?.(task, tasks.length, totalQaPairs);
     }
   }
 
@@ -279,6 +124,7 @@ export async function runAmaBenchBenchmark(
       adapterMode: options.adapterMode ?? "direct",
       remnicConfig: options.remnicConfig ?? {},
       benchmarkOptions: {
+        ...(options.benchmarkOptions ?? {}),
         amaBenchJudgeProtocol: options.amaBenchJudgeProtocol ?? "default",
         amaBenchCrossJudgeProvider: options.amaBenchCrossJudgeProvider ?? null,
       },
@@ -302,6 +148,234 @@ export async function runAmaBenchBenchmark(
       hardware: process.arch,
     },
   };
+}
+
+async function executeAmaBenchQa(args: {
+  options: ResolvedRunBenchmarkOptions;
+  episode: AMABenchEpisode;
+  qa: QAPair;
+  recallQuery: string;
+  sessionId: string;
+}): Promise<TaskResult> {
+  const { options, episode, qa, recallQuery, sessionId } = args;
+  try {
+    const { result: recalledText, durationMs } = await timed(async () =>
+      options.system.recall(
+        sessionId,
+        recallQuery,
+        DEFAULT_BENCH_RECALL_BUDGET_CHARS,
+      ),
+    );
+    const answered = await answerBenchmarkQuestion({
+      question: qa.question,
+      recalledText,
+      responder: options.system.responder,
+      answerMode: "agentic-memory",
+      questionContext: {
+        benchmark: "AMA-Bench",
+        domain: episode.domain,
+        task: episode.task,
+        taskType: episode.task_type,
+        qaType: qa.type,
+      },
+      retryUnknownWithEvidence: true,
+    });
+    const judgeResult = await llmJudgeScoreDetailed(
+      options.system.judge,
+      qa.question,
+      answered.finalAnswer,
+      qa.answer,
+    );
+    const trajectoryLocationScore = scoreAmaBenchTrajectoryLocationAnswer(
+      qa.question,
+      answered.finalAnswer,
+      episode.trajectory,
+    );
+    const crossJudgeResult = options.amaBenchCrossJudge
+      ? await llmJudgeScoreDetailed(
+          options.amaBenchCrossJudge,
+          qa.question,
+          answered.finalAnswer,
+          qa.answer,
+        )
+      : undefined;
+    const crossJudgeLatencyMs = crossJudgeResult?.latencyMs ?? 0;
+    const crossJudgeTokens = crossJudgeResult?.tokens ?? {
+      input: 0,
+      output: 0,
+    };
+    const isRecommendedPrimaryProtocol =
+      options.amaBenchJudgeProtocol === "recommended";
+    const effectiveJudgeScore = applyAmaBenchTrajectoryLocationScore(
+      judgeResult.score,
+      trajectoryLocationScore,
+    );
+    const effectiveCrossJudgeScore =
+      crossJudgeResult?.score == null
+        ? undefined
+        : applyAmaBenchTrajectoryLocationScore(
+            crossJudgeResult.score,
+            trajectoryLocationScore,
+          );
+
+    const scores: Record<string, number> = {
+      f1: f1Score(answered.finalAnswer, qa.answer),
+      contains_answer: containsAnswer(answered.finalAnswer, qa.answer),
+    };
+    if (effectiveJudgeScore >= 0) {
+      scores.llm_judge = effectiveJudgeScore;
+      if (isRecommendedPrimaryProtocol) {
+        scores.ama_bench_recommended_accuracy = effectiveJudgeScore;
+      }
+    }
+    if (effectiveCrossJudgeScore != null && effectiveCrossJudgeScore >= 0) {
+      scores.ama_bench_cross_accuracy = effectiveCrossJudgeScore;
+      if (isRecommendedPrimaryProtocol && effectiveJudgeScore >= 0) {
+        scores.ama_bench_cross_agreement =
+          effectiveJudgeScore === effectiveCrossJudgeScore ? 1 : 0;
+      }
+    }
+    const primaryTrajectoryOverride =
+      trajectoryLocationScore && effectiveJudgeScore !== judgeResult.score;
+    const crossTrajectoryOverride =
+      trajectoryLocationScore &&
+      crossJudgeResult?.score != null &&
+      effectiveCrossJudgeScore !== crossJudgeResult.score;
+
+    return {
+      taskId: qa.question_uuid,
+      question: qa.question,
+      expected: qa.answer,
+      actual: answered.finalAnswer,
+      scores,
+      latencyMs:
+        durationMs +
+        answered.latencyMs +
+        judgeResult.latencyMs +
+        crossJudgeLatencyMs,
+      tokens: {
+        input:
+          answered.tokens.input +
+          judgeResult.tokens.input +
+          crossJudgeTokens.input,
+        output:
+          answered.tokens.output +
+          judgeResult.tokens.output +
+          crossJudgeTokens.output,
+      },
+      details: {
+        qaType: qa.type,
+        domain: episode.domain,
+        episodeId: episode.episode_id,
+        task: episode.task,
+        taskType: episode.task_type,
+        numTurns: episode.num_turns,
+        totalTokens: episode.total_tokens,
+        ...(recallQuery !== qa.question
+          ? { recallQuery }
+          : {}),
+        recalledLength: recalledText.length,
+        recallSections: extractRecallSectionTitles(recalledText),
+        answeredLength: answered.finalAnswer.length,
+        recalledText,
+        answeredText: answered.finalAnswer,
+        responderModel: answered.model,
+        judgeModel: judgeResult.model,
+        amaBenchJudgeProtocol: options.amaBenchJudgeProtocol ?? "default",
+        ...(primaryTrajectoryOverride
+          ? {
+              amaBenchRawJudgeScore: judgeResult.score,
+              amaBenchTrajectoryLocationScoring: true,
+              amaBenchTrajectoryDerivedAnswer:
+                trajectoryLocationScore.derivedAnswer,
+              amaBenchTrajectoryDerivedLocations:
+                trajectoryLocationScore.derivedLocations,
+            }
+          : {}),
+        ...(crossJudgeResult
+          ? {
+              amaBenchCrossJudgeModel: crossJudgeResult.model,
+              amaBenchCrossJudgeScore: effectiveCrossJudgeScore,
+              ...(crossTrajectoryOverride
+                ? { amaBenchRawCrossJudgeScore: crossJudgeResult.score }
+                : {}),
+              amaBenchCrossJudgeLatencyMs: crossJudgeResult.latencyMs,
+            }
+          : {}),
+      },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`  [WARN] ama-bench task ${qa.question_uuid} failed: ${message}`);
+    return {
+      taskId: qa.question_uuid,
+      question: qa.question,
+      expected: qa.answer,
+      actual: `(error: ${message})`,
+      scores: { f1: -1, contains_answer: -1, llm_judge: -1 },
+      latencyMs: 0,
+      tokens: { input: 0, output: 0 },
+      details: {
+        error: message,
+        qaType: qa.type,
+        domain: episode.domain,
+        episodeId: episode.episode_id,
+        task: episode.task,
+        taskType: episode.task_type,
+        numTurns: episode.num_turns,
+        totalTokens: episode.total_tokens,
+      },
+    };
+  }
+}
+
+async function mapAmaBenchQaPairs<T>(
+  qaPairs: readonly QAPair[],
+  concurrency: number,
+  execute: (qa: QAPair, index: number) => Promise<T>,
+): Promise<T[]> {
+  if (concurrency === 1 || qaPairs.length <= 1) {
+    const results: T[] = [];
+    for (const [index, qa] of qaPairs.entries()) {
+      results.push(await execute(qa, index));
+    }
+    return results;
+  }
+
+  const results: Array<T | undefined> = new Array(qaPairs.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= qaPairs.length) {
+        return;
+      }
+      results[index] = await execute(qaPairs[index]!, index);
+    }
+  };
+
+  const workerCount = Math.min(concurrency, qaPairs.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results.map((result, index) => {
+    if (result === undefined) {
+      throw new Error(`AMA-Bench internal error: missing result for QA index ${index}.`);
+    }
+    return result;
+  });
+}
+
+function resolveAmaBenchTrialConcurrency(raw: unknown): number {
+  if (raw === undefined) {
+    return 1;
+  }
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 64) {
+    throw new Error(
+      "AMA-Bench benchmarkOptions.trialConcurrency must be an integer from 1 to 64.",
+    );
+  }
+  return parsed;
 }
 
 async function loadDataset(

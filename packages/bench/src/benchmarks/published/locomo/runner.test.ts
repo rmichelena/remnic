@@ -316,6 +316,105 @@ test("LoCoMo refines successful responder answers from recalled evidence", async
   }
 });
 
+test("LoCoMo preserves useful temporal responder answers when recall has unrelated anchors", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-locomo-"));
+  const datasetPath = path.join(tempDir, "locomo10.json");
+
+  try {
+    await writeFile(
+      datasetPath,
+      JSON.stringify([
+        {
+          sample_id: "locomo-refine-preserve-1",
+          conversation: {
+            speaker_a: "Caroline",
+            speaker_b: "Melanie",
+            session_1_date_time: "1:56 pm on 8 May, 2023",
+            session_1: [
+              {
+                speaker: "Caroline",
+                dia_id: "D1:3",
+                text: "I went to a LGBTQ support group yesterday and it was powerful.",
+              },
+            ],
+            session_2_date_time: "6:55 pm on 20 October, 2023",
+            session_2: [
+              {
+                speaker: "Melanie",
+                dia_id: "D2:1",
+                text: "Yesterday I visited the pottery studio.",
+              },
+            ],
+          },
+          qa: [
+            {
+              question: "When did Caroline go to the LGBTQ support group?",
+              answer: "7 May 2023",
+              evidence: ["D1:3"],
+              category: 2,
+            },
+          ],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runLoCoMoBenchmark({
+      benchmark: locomoDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return [
+            "## LoCoMo Question-Focused Evidence",
+            "session_summary: Caroline and Melanie had a conversation on 8 May 2023. Caroline mentioned that she attended an LGBTQ support group.",
+            "Melanie: Yesterday I visited the pottery studio. | relative_time: session date 20 October 2023; yesterday = 19 October 2023",
+          ].join("\n");
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond() {
+            return {
+              text: "May 7, 2023",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "codex-cli-test",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 1;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "judge-smoke",
+            };
+          },
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.equal(task.actual, "May 7, 2023");
+    assert.equal(task.details.originalAnsweredText, undefined);
+    assert.equal(task.details.answerRefinementReason, undefined);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("LoCoMo trims generic tea category nouns from recalled evidence answers", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-locomo-"));
   const datasetPath = path.join(tempDir, "locomo10.json");

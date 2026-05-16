@@ -57,7 +57,9 @@ export interface ResolveBenchRuntimeProfileOptions {
   internalApiKey?: string;
   internalDisableThinking?: boolean;
   internalCodexReasoningEffort?: ProviderConfig["reasoningEffort"];
+  lcmObserveConcurrency?: number;
   requestTimeout?: number;
+  drainTimeout?: number;
   max429WaitMs?: number;
   disableThinking?: boolean;
 }
@@ -134,7 +136,11 @@ export async function resolveBenchRuntimeProfile(
     internalProvider,
     { disableThinking: options.internalDisableThinking === true },
   );
-  const drainTimeoutMs = normalizeDrainTimeoutMs(options.requestTimeout);
+  const lcmObserveConcurrencyOverrides =
+    buildLcmObserveConcurrencyOverrides(options.lcmObserveConcurrency);
+  const drainTimeoutMs = normalizeDrainTimeoutMs(
+    options.drainTimeout ?? options.requestTimeout,
+  );
   registerCodexCliFallbackRunnerIfNeeded(internalProvider);
   const responderFactoryConfig = systemProvider
     ? asProviderFactoryConfig(systemProvider)
@@ -160,6 +166,7 @@ export async function resolveBenchRuntimeProfile(
     const baselineWithInternalLlm = {
       ...baselineConfig,
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     };
     const effectiveRemnicConfig = withAssistantHooks(
       baselineWithInternalLlm,
@@ -197,6 +204,7 @@ export async function resolveBenchRuntimeProfile(
         ? { fastGatewayAgentId: options.fastGatewayAgentId }
         : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     };
     const persistedRemnicConfig = sanitizePersistedConfig({
       ...fileConfig,
@@ -249,6 +257,7 @@ export async function resolveBenchRuntimeProfile(
       ...(gatewayAgentId ? { gatewayAgentId } : {}),
       ...(fastGatewayAgentId ? { fastGatewayAgentId } : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     },
   );
   const effectiveRemnicConfig = withAssistantHooks(
@@ -260,6 +269,7 @@ export async function resolveBenchRuntimeProfile(
       ...(gatewayAgentId ? { gatewayAgentId } : {}),
       ...(fastGatewayAgentId ? { fastGatewayAgentId } : {}),
       ...internalConfigOverrides,
+      ...lcmObserveConcurrencyOverrides,
     },
     gatewayResponder,
     structuredJudge,
@@ -442,10 +452,24 @@ function normalizeDrainTimeoutMs(value: number | undefined): number | undefined 
   }
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(
-      `request timeout must be a positive integer when used for benchmark drain; received ${value}`,
+      `benchmark drain timeout must be a positive integer; received ${value}`,
     );
   }
   return value;
+}
+
+function buildLcmObserveConcurrencyOverrides(
+  value: number | undefined,
+): Record<string, unknown> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!Number.isInteger(value) || value <= 0 || value > 64) {
+    throw new Error(
+      `benchmark LCM observe concurrency must be an integer from 1 to 64; received ${value}`,
+    );
+  }
+  return { lcmObserveConcurrency: value };
 }
 
 function applyInternalProviderDefaults(

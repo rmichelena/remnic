@@ -38,6 +38,7 @@ import {
   aggregateTaskScores,
   containsAnswer,
   f1Score,
+  llmBinaryJudgeScoreDetailed,
   llmJudgeScoreDetailed,
   rougeL,
   timed,
@@ -120,6 +121,17 @@ export interface HarnessTrial {
     answeredText: string;
   }) => string | undefined;
   /**
+   * Optional benchmark-owned yes/no judge prompt. When present, the harness
+   * calls `BenchJudge.scoreBinaryPrompt()` instead of the generic scalar
+   * judge rubric so published benchmark metrics can keep their official
+   * evaluator wording.
+   */
+  binaryJudgePrompt?: (args: {
+    question: string;
+    expected: string;
+    answeredText: string;
+  }) => string;
+  /**
    * Optional extra per-task metrics computed by the caller up-front
    * (not a function of recall state). Merged into the final
    * `TaskResult.scores`.
@@ -152,7 +164,8 @@ export type HarnessMetricId =
   | "f1"
   | "contains_answer"
   | "rouge_l"
-  | "llm_judge";
+  | "llm_judge"
+  | "judge_accuracy";
 
 export interface HarnessMetricsSpec {
   /**
@@ -197,9 +210,10 @@ async function* toAsyncIterable<T>(
  *   - `system.reset()` is called exactly once per plan, before ingest.
  *   - `system.store(sessionId, messages)` is called once per non-empty
  *     session, in the order provided by `plan.ingestSessions`.
- *   - Within a plan, trials are executed sequentially. Across plans,
- *     plans are executed sequentially. No implicit concurrency is
- *     introduced; that keeps the harness deterministic.
+ *   - Within a plan, trials are sequential by default. Runners may opt
+ *     into bounded trial concurrency after ingestion/drain; task output
+ *     and progress callbacks still follow dataset order.
+ *     Across plans, execution remains sequential.
  *   - Every trial recalls from ALL `recallSessionIds` before calling
  *     the responder.
  */
@@ -207,6 +221,9 @@ export async function runPublishedHarness(
   ctx: HarnessContext,
 ): Promise<BenchmarkResult> {
   validateContext(ctx);
+  const trialConcurrency = resolveTrialConcurrency(
+    ctx.options.benchmarkOptions?.trialConcurrency,
+  );
   const tasks: TaskResult[] = [];
 
   for await (const plan of toAsyncIterable(ctx.plans)) {
@@ -219,35 +236,114 @@ export async function runPublishedHarness(
     try {
       await ctx.options.system.drain?.();
     } catch (drainErr) {
-      console.error(`  [WARN] harness drain failed for plan: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+      throw new Error(
+        `PublishedBenchmarkHarness: drain failed before scoring; public benchmark evidence would be incomplete: ${
+          drainErr instanceof Error ? drainErr.message : String(drainErr)
+        }`,
+        { cause: drainErr },
+      );
     }
     const planIndex = tasks.length;
-    for (const trial of plan.trials) {
-      const trialId = trial.taskId ?? trial.question.slice(0, 60);
-      try {
-        tasks.push(await executeTrial(ctx, trial));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`  [WARN] harness trial plan-${planIndex}/${trialId} failed: ${message}`);
-        tasks.push({
-          taskId: trial.taskId,
-          question: trial.question,
-          expected: trial.expected,
-          actual: `(error: ${message})`,
-          scores: { f1: -1, contains_answer: -1, llm_judge: -1 },
-          latencyMs: 0,
-          tokens: { input: 0, output: 0 },
-          details: { error: message },
-        });
-      }
-      // Pass the GLOBAL total (ctx.totalCount), not a per-plan total —
-      // `tasks.length` is cumulative across every plan in ctx.plans, so a
-      // per-plan divisor would overflow to "N/3" nonsense in plan 2+.
-      ctx.options.onTaskComplete?.(tasks[tasks.length - 1]!, tasks.length, ctx.totalCount);
-    }
+    await executePlanTrials(ctx, plan.trials, {
+      planIndex,
+      tasks,
+      trialConcurrency,
+    });
   }
 
   return buildBenchmarkResult(ctx, tasks);
+}
+
+async function executePlanTrials(
+  ctx: HarnessContext,
+  trials: HarnessTrial[],
+  options: {
+    planIndex: number;
+    tasks: TaskResult[];
+    trialConcurrency: number;
+  },
+): Promise<void> {
+  if (options.trialConcurrency === 1 || trials.length <= 1) {
+    for (const trial of trials) {
+      appendCompletedTask(
+        ctx,
+        options.tasks,
+        await executeTrialWithFailure(ctx, trial, options.planIndex),
+      );
+    }
+    return;
+  }
+
+  const results: Array<TaskResult | undefined> = new Array(trials.length);
+  const completed: boolean[] = new Array(trials.length).fill(false);
+  let nextTrialIndex = 0;
+  let nextEmitIndex = 0;
+
+  const emitCompletedPrefix = (): void => {
+    while (completed[nextEmitIndex]) {
+      appendCompletedTask(ctx, options.tasks, results[nextEmitIndex]!);
+      nextEmitIndex += 1;
+    }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const trialIndex = nextTrialIndex;
+      nextTrialIndex += 1;
+      if (trialIndex >= trials.length) {
+        return;
+      }
+
+      results[trialIndex] = await executeTrialWithFailure(
+        ctx,
+        trials[trialIndex]!,
+        options.planIndex,
+      );
+      completed[trialIndex] = true;
+      emitCompletedPrefix();
+    }
+  };
+
+  const workerCount = Math.min(options.trialConcurrency, trials.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, () => worker()),
+  );
+}
+
+function appendCompletedTask(
+  ctx: HarnessContext,
+  tasks: TaskResult[],
+  task: TaskResult,
+): void {
+  tasks.push(task);
+  // Pass the GLOBAL total (ctx.totalCount), not a per-plan total —
+  // `tasks.length` is cumulative across every plan in ctx.plans, so a
+  // per-plan divisor would overflow to "N/3" nonsense in plan 2+.
+  ctx.options.onTaskComplete?.(task, tasks.length, ctx.totalCount);
+}
+
+async function executeTrialWithFailure(
+  ctx: HarnessContext,
+  trial: HarnessTrial,
+  planIndex: number,
+): Promise<TaskResult> {
+  const trialId = trial.taskId ?? trial.question.slice(0, 60);
+  try {
+    return await executeTrial(ctx, trial);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`  [WARN] harness trial plan-${planIndex}/${trialId} failed: ${message}`);
+    return {
+      taskId: trial.taskId,
+      question: trial.question,
+      expected: trial.expected,
+      actual: `(error: ${message})`,
+      scores: buildFailureScores(ctx.metricsSpec.metrics),
+      latencyMs: 0,
+      tokens: { input: 0, output: 0 },
+      details: { error: message },
+    };
+  }
 }
 
 function validateContext(ctx: HarnessContext): void {
@@ -261,7 +357,7 @@ function validateContext(ctx: HarnessContext): void {
   if (!ctx.metricsSpec || !Array.isArray(ctx.metricsSpec.metrics)) {
     throw new Error(
       "PublishedBenchmarkHarness requires metricsSpec.metrics: one of " +
-        'f1, contains_answer, rouge_l, llm_judge.',
+        'f1, contains_answer, rouge_l, llm_judge, judge_accuracy.',
     );
   }
   const allowed: readonly HarnessMetricId[] = [
@@ -269,6 +365,7 @@ function validateContext(ctx: HarnessContext): void {
     "contains_answer",
     "rouge_l",
     "llm_judge",
+    "judge_accuracy",
   ];
   for (const metric of ctx.metricsSpec.metrics) {
     if (!allowed.includes(metric)) {
@@ -285,6 +382,29 @@ function validateContext(ctx: HarnessContext): void {
       );
     }
   }
+}
+
+function buildFailureScores(
+  metrics: readonly HarnessMetricId[],
+): Record<string, number> {
+  const scores: Record<string, number> = {};
+  for (const metric of metrics) {
+    scores[metric] = -1;
+  }
+  return scores;
+}
+
+function resolveTrialConcurrency(raw: unknown): number {
+  if (raw === undefined) {
+    return 1;
+  }
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 64) {
+    throw new Error(
+      "PublishedBenchmarkHarness: benchmarkOptions.trialConcurrency must be an integer from 1 to 64.",
+    );
+  }
+  return parsed;
 }
 
 async function executeTrial(
@@ -331,20 +451,17 @@ async function executeTrial(
       })
     : { extraScores: undefined, extraDetails: undefined };
 
-  // Only invoke the LLM judge when `llm_judge` is in the metrics spec.
+  // Only invoke the LLM judge when judge-backed metrics are in the spec.
   // Cursor review feedback on PR 596: unconditionally calling the judge
   // billed non-judge runs for an API call per trial and inflated the
   // `TaskResult` latency/token totals. The zero-valued placeholder
   // below keeps the downstream arithmetic unchanged for runs that
   // don't opt into the judge.
-  const judgeRequested = ctx.metricsSpec.metrics.includes("llm_judge");
+  const judgeRequested =
+    ctx.metricsSpec.metrics.includes("llm_judge") ||
+    ctx.metricsSpec.metrics.includes("judge_accuracy");
   const judgeResult = judgeRequested
-    ? await llmJudgeScoreDetailed(
-        ctx.options.system.judge,
-        trial.question,
-        answered.finalAnswer,
-        trial.expected,
-      )
+    ? await scoreTrialJudge(ctx, trial, answered.finalAnswer)
     : {
         score: -1,
         tokens: { input: 0, output: 0 },
@@ -370,6 +487,13 @@ async function executeTrial(
       case "llm_judge":
         if (judgeResult.score >= 0) {
           scores.llm_judge = judgeResult.score;
+        }
+        break;
+      case "judge_accuracy":
+        if (judgeResult.score >= 0) {
+          scores.judge_accuracy = judgeResult.score >= 0.5 ? 1 : 0;
+        } else {
+          scores.judge_accuracy = -1;
         }
         break;
       default: {
@@ -432,6 +556,54 @@ async function executeTrial(
     },
     details,
   };
+}
+
+async function scoreTrialJudge(
+  ctx: HarnessContext,
+  trial: HarnessTrial,
+  answeredText: string,
+) {
+  if (!trial.binaryJudgePrompt) {
+    return llmJudgeScoreDetailed(
+      ctx.options.system.judge,
+      trial.question,
+      answeredText,
+      trial.expected,
+    );
+  }
+
+  const judge = ctx.options.system.judge;
+  if (!judge?.scoreBinaryPrompt) {
+    return llmJudgeScoreDetailed(
+      judge,
+      trial.question,
+      answeredText,
+      trial.expected,
+    );
+  }
+
+  const prompt = trial.binaryJudgePrompt({
+    question: trial.question,
+    expected: trial.expected,
+    answeredText,
+  });
+  if (typeof prompt !== "string" || prompt.trim().length === 0) {
+    throw new Error(
+      "PublishedBenchmarkHarness: binaryJudgePrompt returned an empty prompt.",
+    );
+  }
+
+  const binaryJudge = {
+    scoreBinaryPrompt: judge.scoreBinaryPrompt.bind(judge),
+  };
+  return llmBinaryJudgeScoreDetailed(
+    binaryJudge,
+    prompt,
+    {
+      predicted: answeredText,
+      expected: trial.expected,
+    },
+  );
 }
 
 type HarnessAnswerResult = BenchmarkAnswerResult & {

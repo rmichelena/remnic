@@ -26,6 +26,16 @@ test("baseline runtime profile keeps the stripped retrieval-only config", async 
   assert.equal(resolved.remnicConfig.knowledgeIndexEnabled, false);
 });
 
+test("runtime profile forwards LCM observe concurrency override", async () => {
+  const resolved = await resolveBenchRuntimeProfile({
+    runtimeProfile: "baseline",
+    lcmObserveConcurrency: 4,
+  });
+
+  assert.equal(resolved.remnicConfig.lcmObserveConcurrency, 4);
+  assert.equal(resolved.effectiveRemnicConfig.lcmObserveConcurrency, 4);
+});
+
 test("runtime assistant hook applies assistant prompt contract and neutralizes unsupported pronouns", async () => {
   const received: { question?: string; recalledText?: string } = {};
   const agent = createAssistantAgentFromResponder({
@@ -448,6 +458,23 @@ test("runtime profile can route Remnic internal LLM calls through codex-cli", as
     gatewayConfig.models?.providers?.["remnic-bench-internal"]?.codexCliReasoningEffort,
     "xhigh",
   );
+});
+
+test("runtime profile can decouple provider request timeout from drain timeout", async () => {
+  const resolved = await resolveBenchRuntimeProfile({
+    runtimeProfile: "baseline",
+    internalProvider: "codex-cli",
+    internalModel: "gpt-5.5",
+    requestTimeout: 120_000,
+    drainTimeout: 900_000,
+  });
+
+  assert.equal(resolved.adapterOptions.drainTimeoutMs, 900_000);
+  assert.deepEqual(resolved.internalProvider?.retryOptions, {
+    timeoutMs: 120_000,
+  });
+  assert.equal(resolved.remnicConfig.localLlmTimeoutMs, 120_000);
+  assert.equal(resolved.effectiveRemnicConfig.localLlmTimeoutMs, 120_000);
 });
 
 test("runtime profile can route Remnic internal LLM calls through Ollama native chat", async () => {

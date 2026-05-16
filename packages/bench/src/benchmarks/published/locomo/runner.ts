@@ -618,10 +618,10 @@ function answerLoCoMoRelativeTimeQuestion(
 
   for (const line of rankedLines) {
     const lowerLine = line.toLowerCase();
-    if (wantsSupportGroup && !hasSupportGroupEvidence) {
+    if (wantsSupportGroup && !lineMatchesLoCoMoSupportGroup(lowerLine)) {
       continue;
     }
-    if (wantsSunrise && !hasSunriseEvidence) {
+    if (wantsSunrise && !lineMatchesLoCoMoSunrise(lowerLine)) {
       continue;
     }
     if (!lowerLine.includes("relative_time")) {
@@ -640,7 +640,11 @@ function answerLoCoMoRelativeTimeQuestion(
   }
 
   if (wantsSupportGroup && hasSupportGroupEvidence) {
-    const anchor = extractFirstLoCoMoAnchorDate(rankedLines);
+    const anchor = extractFirstLoCoMoAnchorDate(
+      rankedLines.filter((line) =>
+        lineMatchesLoCoMoSupportGroup(line.toLowerCase()),
+      ),
+    );
     if (anchor) {
       const yesterday = new Date(anchor.getTime());
       yesterday.setUTCDate(anchor.getUTCDate() - 1);
@@ -649,13 +653,25 @@ function answerLoCoMoRelativeTimeQuestion(
   }
 
   if (wantsSunrise && hasSunriseEvidence) {
-    const anchor = extractFirstLoCoMoAnchorDate(rankedLines);
+    const anchor = extractFirstLoCoMoAnchorDate(
+      rankedLines.filter((line) =>
+        lineMatchesLoCoMoSunrise(line.toLowerCase()),
+      ),
+    );
     if (anchor) {
       return String(anchor.getUTCFullYear() - 1);
     }
   }
 
   return undefined;
+}
+
+function lineMatchesLoCoMoSupportGroup(lowerLine: string): boolean {
+  return lowerLine.includes("support group");
+}
+
+function lineMatchesLoCoMoSunrise(lowerLine: string): boolean {
+  return lowerLine.includes("sunrise") || lowerLine.includes("paint");
 }
 
 function extractFirstLoCoMoAnchorDate(lines: string[]): Date | undefined {

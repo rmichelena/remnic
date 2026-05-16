@@ -195,6 +195,20 @@ test("research-max preset enables explicit cue recall for benchmark-grade runs",
   );
 });
 
+test("parseConfig validates lcmObserveConcurrency", () => {
+  const cfg = parseConfig({ lcmObserveConcurrency: "4" });
+  assert.equal(cfg.lcmObserveConcurrency, 4);
+
+  assert.throws(
+    () => parseConfig({ lcmObserveConcurrency: 0 }),
+    /lcmObserveConcurrency must be an integer greater than or equal to 1/,
+  );
+  assert.throws(
+    () => parseConfig({ lcmObserveConcurrency: 1.5 }),
+    /lcmObserveConcurrency must be an integer greater than or equal to 1/,
+  );
+});
+
 test("parseConfig activeRecallCacheTtlMs=-1 falls back to the default ttl", () => {
   const result = parseConfig({ activeRecallCacheTtlMs: -1 });
   assert.equal(result.activeRecallCacheTtlMs, 15000);

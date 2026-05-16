@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { containsAnswer, llmJudgeScoreDetailed } from "./scorer.ts";
+import {
+  containsAnswer,
+  llmBinaryJudgeScoreDetailed,
+  llmJudgeScoreDetailed,
+} from "./scorer.ts";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -67,6 +71,28 @@ test("llmJudgeScoreDetailed deterministic fallback can award obvious matches", a
 
   assert.equal(result.score, 1);
   assert.equal(result.model, "deterministic-fallback");
+});
+
+test("llmBinaryJudgeScoreDetailed falls back deterministically after prompt judge failure", async () => {
+  const result = await llmBinaryJudgeScoreDetailed(
+    {
+      async scoreBinaryPrompt() {
+        await delay(40);
+        throw new Error("binary judge timeout");
+      },
+    },
+    "Official yes/no prompt",
+    {
+      predicted: "The answer is 7 May 2023.",
+      expected: "7 May 2023",
+    },
+  );
+
+  assert.equal(result.score, 1);
+  assert.equal(result.model, "deterministic-fallback");
+  assert.equal(result.tokens.input, 0);
+  assert.equal(result.tokens.output, 0);
+  assert.equal(result.latencyMs >= 10, true);
 });
 
 test("containsAnswer ignores punctuation-only differences", () => {

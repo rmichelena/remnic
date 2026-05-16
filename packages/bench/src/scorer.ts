@@ -173,6 +173,39 @@ export async function llmJudgeScoreDetailed(
   }
 }
 
+export async function llmBinaryJudgeScoreDetailed(
+  judge:
+    | {
+      scoreBinaryPrompt(prompt: string): Promise<BenchJudgeResult>;
+    }
+    | undefined,
+  prompt: string,
+  fallback: {
+    predicted: string;
+    expected: unknown;
+  },
+): Promise<BenchJudgeResult> {
+  if (!judge) {
+    return {
+      score: -1,
+      tokens: { input: 0, output: 0 },
+      latencyMs: 0,
+    };
+  }
+
+  const startedAt = performance.now();
+  try {
+    return await judge.scoreBinaryPrompt(prompt);
+  } catch {
+    return {
+      score: deterministicJudgeFallback(fallback.predicted, fallback.expected),
+      tokens: { input: 0, output: 0 },
+      latencyMs: Math.round(performance.now() - startedAt),
+      model: "deterministic-fallback",
+    };
+  }
+}
+
 function deterministicJudgeFallback(
   predicted: string,
   expected: string | number | unknown,

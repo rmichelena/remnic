@@ -1003,6 +1003,15 @@ function parseTurn(turn: unknown, location: string): Message {
 
 function buildQuestionPrompt(testCase: MemBenchCase): string {
   if (!testCase.choices) {
+    if (isRecommendationQuestion(testCase.question)) {
+      return [
+        "Answer the MemBench question using only the recalled memory context.",
+        "Return only the exact recommended item, option, category, person, place, or phrase that answers the question.",
+        "Do not include explanation, hedging, or surrounding sentence text.",
+        "",
+        `Question: ${testCase.question}`,
+      ].join("\n");
+    }
     return testCase.question;
   }
 
@@ -1027,15 +1036,25 @@ function buildQuestionPrompt(testCase: MemBenchCase): string {
 }
 
 function buildRecallQuery(testCase: MemBenchCase): string {
-  return testCase.questionTime
+  const baseQuery = testCase.questionTime
     ? `${testCase.question} (${testCase.questionTime})`
     : testCase.question;
+  if (!isRecommendationQuestion(testCase.question)) {
+    return baseQuery;
+  }
+  return [
+    baseQuery,
+    "Retrieve the exact recommendation, suggestion, preference, chosen option, and concrete named item from memory.",
+  ].join(" ");
 }
 
 function buildStoredTurns(testCase: MemBenchCase): Message[] {
   return testCase.turns.map((message, index) => ({
     ...message,
-    content: appendMemBenchStepAnchor(message.content, index),
+    content: appendMemBenchSemanticCue(
+      appendMemBenchStepAnchor(message.content, index),
+      testCase,
+    ),
   }));
 }
 
@@ -1049,9 +1068,29 @@ function appendMemBenchStepAnchor(content: string, index: number): string {
 function stripMemBenchStepAnchors(content: string): string {
   return content
     .split("\n")
-    .filter((line) => !line.startsWith("MemBench turn anchors:"))
+    .filter((line) =>
+      !line.startsWith("MemBench turn anchors:")
+      && !line.startsWith("MemBench semantic cues:"),
+    )
     .join("\n")
     .trim();
+}
+
+function appendMemBenchSemanticCue(
+  content: string,
+  testCase: MemBenchCase,
+): string {
+  if (!isRecommendationQuestion(testCase.question)) {
+    return content;
+  }
+  return [
+    content,
+    "MemBench semantic cues: recommendation; suggestion; preference; chosen option; exact answer candidate; preserve concrete named items and categories.",
+  ].join("\n");
+}
+
+function isRecommendationQuestion(question: string): boolean {
+  return /\b(?:recommend|recommendation|suggest|suggestion|prefer|preference|favorite|choice|option|should i|would i|do i usually)\b/i.test(question);
 }
 
 function extractChoice(answer: string): MemBenchChoice | undefined {

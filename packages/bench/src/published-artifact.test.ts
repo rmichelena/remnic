@@ -7,6 +7,7 @@ import test from "node:test";
 import type { BenchmarkResult } from "./types.ts";
 import {
   BENCHMARK_ARTIFACT_SCHEMA_VERSION,
+  PUBLISHED_BENCHMARK_ARTIFACT_IDS,
   buildBenchmarkArtifact,
   buildBenchmarkArtifactFilename,
   hashBenchmarkArtifact,
@@ -213,6 +214,27 @@ test("serialize + parse round-trip preserves artifact", () => {
   assert.deepEqual(reparsed, artifact);
 });
 
+test("serialize + parse accepts every published benchmark artifact id", () => {
+  for (const benchmarkId of PUBLISHED_BENCHMARK_ARTIFACT_IDS) {
+    const artifact = buildBenchmarkArtifact({
+      benchmarkId,
+      datasetVersion: "v1",
+      model: "gpt-5.5",
+      seed: 42,
+      startedAt: "2026-04-20T12:00:00.000Z",
+      finishedAt: "2026-04-20T12:05:00.000Z",
+      result: sampleResult({
+        meta: {
+          ...sampleResult().meta,
+          benchmark: benchmarkId,
+        },
+      }),
+    });
+    const raw = serializeBenchmarkArtifact(artifact);
+    assert.equal(parseBenchmarkArtifact(raw).benchmarkId, benchmarkId);
+  }
+});
+
 test("serializeBenchmarkArtifact yields stable hash regardless of key insertion order", () => {
   const base = buildBenchmarkArtifact({
     benchmarkId: "longmemeval",
@@ -264,7 +286,7 @@ test("parseBenchmarkArtifact rejects unknown schemaVersion", () => {
 test("parseBenchmarkArtifact rejects invalid benchmarkId", () => {
   const raw = JSON.stringify({
     schemaVersion: BENCHMARK_ARTIFACT_SCHEMA_VERSION,
-    benchmarkId: "memory-arena",
+    benchmarkId: "not-a-benchmark",
     datasetVersion: "v1",
     system: { name: "remnic", version: "1.0.0", gitSha: "abc" },
     model: "m",
@@ -276,7 +298,10 @@ test("parseBenchmarkArtifact rejects invalid benchmarkId", () => {
     durationMs: 0,
     env: { node: "v22", os: "linux" },
   });
-  assert.throws(() => parseBenchmarkArtifact(raw), /benchmarkId/);
+  assert.throws(
+    () => parseBenchmarkArtifact(raw),
+    /benchmarkId must be one of/,
+  );
 });
 
 test("parseBenchmarkArtifact rejects non-number metric value", () => {

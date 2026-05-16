@@ -1,6 +1,5 @@
 /**
- * Public leaderboard artifact schema for the LongMemEval + LoCoMo
- * published benchmarks.
+ * Public leaderboard artifact schema for published benchmarks.
  *
  * `BenchmarkArtifact` is deliberately flatter and more opinionated than
  * the internal `BenchmarkResult`. The goal is a stable, versioned payload
@@ -33,8 +32,22 @@ import type { BenchmarkResult, TaskResult } from "./types.js";
  */
 export const BENCHMARK_ARTIFACT_SCHEMA_VERSION = 1 as const;
 
+/** Identifiers of published-benchmark runners that can emit public artifacts. */
+export const PUBLISHED_BENCHMARK_ARTIFACT_IDS = Object.freeze([
+  "ama-bench",
+  "memory-arena",
+  "amemgym",
+  "longmemeval",
+  "locomo",
+  "beam",
+  "personamem",
+  "memoryagentbench",
+  "membench",
+] as const);
+
 /** Identifier of a published-benchmark runner. */
-export type PublishedBenchmarkId = "longmemeval" | "locomo";
+export type PublishedBenchmarkId =
+  (typeof PUBLISHED_BENCHMARK_ARTIFACT_IDS)[number];
 
 export interface BenchmarkArtifactSystem {
   /** Short product name, e.g. "remnic". */
@@ -312,9 +325,9 @@ export function parseBenchmarkArtifact(raw: string): BenchmarkArtifact {
         `This build expects schemaVersion ${BENCHMARK_ARTIFACT_SCHEMA_VERSION}.`,
     );
   }
-  if (record.benchmarkId !== "longmemeval" && record.benchmarkId !== "locomo") {
+  if (!isPublishedBenchmarkArtifactId(record.benchmarkId)) {
     throw new Error(
-      `BenchmarkArtifact benchmarkId must be "longmemeval" or "locomo"; got ${String(record.benchmarkId)}.`,
+      `BenchmarkArtifact benchmarkId must be one of ${PUBLISHED_BENCHMARK_ARTIFACT_IDS.map((id) => `"${id}"`).join(", ")}; got ${String(record.benchmarkId)}.`,
     );
   }
   requireString(record, "datasetVersion");
@@ -498,4 +511,13 @@ function requireIsoTimestamp(
       `BenchmarkArtifact field "${field}" "${value}" is not a parseable ISO-8601 timestamp.`,
     );
   }
+}
+
+function isPublishedBenchmarkArtifactId(
+  value: unknown,
+): value is PublishedBenchmarkId {
+  return (
+    typeof value === "string" &&
+    (PUBLISHED_BENCHMARK_ARTIFACT_IDS as readonly string[]).includes(value)
+  );
 }

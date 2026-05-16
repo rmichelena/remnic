@@ -158,6 +158,7 @@ import {
 } from "./optional-bench.js";
 import type {
   BenchConfig,
+  BenchMemoryAdapter,
   BenchmarkDefinition,
   BenchmarkResult,
   ComparisonResult,
@@ -166,6 +167,7 @@ import { firstSuccessfulCandidate, firstSuccessfulResult } from "./service-candi
 import {
   type BenchAction,
   type ParsedBenchArgs,
+  PUBLISHED_BENCHMARK_NAMES,
   parseBenchActionArgs,
   parseBenchArgs,
 } from "./bench-args.js";
@@ -738,10 +740,12 @@ export function getBenchUsageText(): string {
 Commands:
   list                     List published benchmark packs
   run [benchmark...]       Run one or more benchmark packs
-  published --name <longmemeval|locomo|beam> --dataset <path> --model <id>
+  published --name <benchmark> --dataset <path> --model <id>
                            Run a published benchmark with leaderboard-friendly flags
                            (see issue #566 slice 4). Accepts --limit, --seed,
-                           --trial-limit, --out, --dry-run, --provider, --base-url.
+                           --trial-limit, --trial-concurrency,
+                           --ingest-concurrency, --out, --dry-run,
+                           --provider, --base-url.
   datasets download [benchmark...]
                            Download local datasets for supported published benchmarks
   datasets status          Show local dataset availability for supported benchmarks
@@ -817,8 +821,10 @@ Options:
   --custom <path>          Run a YAML-defined custom benchmark file
   --results-dir <path>     Override the stored benchmark results directory
   --baselines-dir <path>   Override the named baseline directory
+  --request-timeout <ms>   Provider request timeout in milliseconds
+  --drain-timeout <ms>     Memory drain timeout in milliseconds (defaults to --request-timeout when unset)
   --threshold <value>      Regression threshold for compare (default: 0.05)
-  --trial-limit <n>        Cap scored LoCoMo QA trials for staged published runs
+  --trial-limit <n>        Cap scored LoCoMo or MemoryAgentBench QA trials for staged published runs
   --task-filter <pattern>  BEAM diagnostic filter; match task id, ability, or question text
   --detail                 Include per-task details for bench results
   --format <json|csv|html> Output format for bench export
@@ -914,8 +920,10 @@ export function buildBenchRuntimeProfileRequest(
     internalDisableThinking: parsed.internalDisableThinking,
     internalCodexReasoningEffort: parsed.internalCodexReasoningEffort,
     requestTimeout: parsed.requestTimeout,
+    drainTimeout: parsed.drainTimeout,
     max429WaitMs: parsed.max429WaitMs,
     disableThinking: parsed.disableThinking,
+    lcmObserveConcurrency: parsed.publishedIngestConcurrency,
   };
 }
 
@@ -1158,14 +1166,61 @@ const DOWNLOADABLE_BENCHMARK_DATASETS = [
   "memoryagentbench",
 ] as const;
 
+const MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES = [
+  "webshop-products.jsonl",
+  "webshop-products.json",
+  "memory-arena-webshop-products.jsonl",
+  "memory-arena-webshop-products.json",
+] as const;
+
+const MEMORY_AGENT_BENCH_BUNDLE_FILENAMES = [
+  "memoryagentbench.json",
+  "memoryagentbench.jsonl",
+  "MemoryAgentBench.json",
+  "MemoryAgentBench.jsonl",
+] as const;
+
+const MEMORY_AGENT_BENCH_SPLIT_FILENAMES = [
+  "Accurate_Retrieval.json",
+  "Accurate_Retrieval.jsonl",
+  "accurate_retrieval.json",
+  "accurate_retrieval.jsonl",
+  "Test_Time_Learning.json",
+  "Test_Time_Learning.jsonl",
+  "test_time_learning.json",
+  "test_time_learning.jsonl",
+  "Long_Range_Understanding.json",
+  "Long_Range_Understanding.jsonl",
+  "long_range_understanding.json",
+  "long_range_understanding.jsonl",
+  "Conflict_Resolution.json",
+  "Conflict_Resolution.jsonl",
+  "conflict_resolution.json",
+  "conflict_resolution.jsonl",
+] as const;
+
+const MEMORY_AGENT_BENCH_ENTITY_MAPPING_CANDIDATES = [
+  "entity2id.json",
+  path.join("processed_data", "Recsys_Redial", "entity2id.json"),
+  path.join("Recsys_Redial", "entity2id.json"),
+] as const;
+
+type DownloadedDatasetMarker = {
+  anyOf?: string[];
+  allOf?: string[];
+  ext?: string;
+  exclude?: readonly string[];
+};
+
 // Required content markers per benchmark. `anyOf` lists the filenames
 // a benchmark runner will accept — a dataset directory is considered
-// "downloaded" as soon as any one of them is present. `ext` matches
-// any file in the directory with the given extension. The filename
-// sets mirror the dataset loaders under packages/bench/src/benchmarks
-// so `datasets status`/`resolveBenchDatasetDir` never disagree with
-// the runner about whether a dataset is ready.
-const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: string }> = {
+// "downloaded" as soon as any one of them is present. `allOf` lists
+// required sidecar files. `ext` matches any file in the directory with
+// the given extension. The filename sets mirror the dataset loaders
+// under packages/bench/src/benchmarks so `datasets status` and
+// `resolveBenchDatasetDir` never disagree with the runner about whether
+// a dataset is ready.
+const DOWNLOADED_DATASET_MARKERS: Record<string, DownloadedDatasetMarker> = {
   "ama-bench": { anyOf: ["open_end_qa_set.jsonl"] },
   longmemeval: {
     // Keep this list in lock-step with `LONG_MEM_EVAL_DATASET_FILENAMES`
@@ -1173,17 +1228,20 @@ const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: strin
     // `datasets status` never disagrees with the runner about what
     // counts as "downloaded".
     anyOf: [
-      "longmemeval_oracle.json",
       "longmemeval_s_cleaned.json",
       "longmemeval_s.json",
       "longmemeval.json",
+      "longmemeval_oracle.json",
     ],
   },
   amemgym: {
     anyOf: ["amemgym-v1-base.json", "amemgym-tasks.json", "data.json"],
   },
   locomo: { anyOf: ["locomo10.json", "locomo.json"] },
-  "memory-arena": { ext: ".jsonl" },
+  "memory-arena": {
+    ext: ".jsonl",
+    exclude: MEMORY_ARENA_WEBSHOP_PRODUCT_SIDECAR_FILENAMES,
+  },
   beam: {
     anyOf: [
       "beam_100k.json",
@@ -1225,18 +1283,8 @@ const DOWNLOADED_DATASET_MARKERS: Record<string, { anyOf?: string[]; ext?: strin
   },
   memoryagentbench: {
     anyOf: [
-      "memoryagentbench.json",
-      "memoryagentbench.jsonl",
-      "MemoryAgentBench.json",
-      "MemoryAgentBench.jsonl",
-      "Accurate_Retrieval.json",
-      "Accurate_Retrieval.jsonl",
-      "Test_Time_Learning.json",
-      "Test_Time_Learning.jsonl",
-      "Long_Range_Understanding.json",
-      "Long_Range_Understanding.jsonl",
-      "Conflict_Resolution.json",
-      "Conflict_Resolution.jsonl",
+      ...MEMORY_AGENT_BENCH_BUNDLE_FILENAMES,
+      ...MEMORY_AGENT_BENCH_SPLIT_FILENAMES,
     ],
   },
 };
@@ -1375,6 +1423,53 @@ function isPersonaMemDatasetComplete(datasetPath: string): boolean {
   }
 }
 
+function hasDatasetFile(datasetPath: string, relativePath: string): boolean {
+  try {
+    return fs.statSync(path.join(datasetPath, relativePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function hasMemoryAgentBenchEntityMapping(datasetPath: string): boolean {
+  const absoluteDatasetPath = path.resolve(datasetPath);
+  const roots = [absoluteDatasetPath, path.dirname(absoluteDatasetPath)];
+  return (
+    hasDatasetFile(absoluteDatasetPath, "entity2id.json") ||
+    roots.some((root) =>
+      MEMORY_AGENT_BENCH_ENTITY_MAPPING_CANDIDATES
+        .filter((relativePath) => relativePath !== "entity2id.json")
+        .some((relativePath) => hasDatasetFile(root, relativePath)),
+    )
+  );
+}
+
+function memoryAgentBenchDatasetHasRecSysSamples(datasetPath: string): boolean {
+  const candidateFilenames = [
+    ...MEMORY_AGENT_BENCH_BUNDLE_FILENAMES,
+    ...MEMORY_AGENT_BENCH_SPLIT_FILENAMES,
+  ];
+  return candidateFilenames.some((filename) => {
+    const filePath = path.join(datasetPath, filename);
+    try {
+      if (!fs.statSync(filePath).isFile()) {
+        return false;
+      }
+      const raw = fs.readFileSync(filePath, "utf8");
+      return /"source"\s*:\s*"recsys[_-]/i.test(raw);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isMemoryAgentBenchDatasetComplete(datasetPath: string): boolean {
+  if (hasMemoryAgentBenchEntityMapping(datasetPath)) {
+    return true;
+  }
+  return !memoryAgentBenchDatasetHasRecSysSamples(datasetPath);
+}
+
 function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean {
   let stats: fs.Stats;
   try {
@@ -1394,6 +1489,18 @@ function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean 
       return false;
     }
   }
+  if (marker.allOf) {
+    const hasAllRequiredFiles = marker.allOf.every((name) => {
+      try {
+        return fs.statSync(path.join(datasetPath, name)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (!hasAllRequiredFiles) {
+      return false;
+    }
+  }
   if (marker.anyOf) {
     const hasMarkerFile = marker.anyOf.some((name) => {
       try {
@@ -1408,22 +1515,22 @@ function isDatasetDownloaded(datasetPath: string, benchmarkId: string): boolean 
     if (benchmarkId === "personamem") {
       return isPersonaMemDatasetComplete(datasetPath);
     }
+    if (benchmarkId === "memoryagentbench") {
+      return isMemoryAgentBenchDatasetComplete(datasetPath);
+    }
     return true;
   }
   if (marker.ext) {
     try {
-      return fs.readdirSync(datasetPath).some((name) => name.endsWith(marker.ext!));
+      return fs.readdirSync(datasetPath).some((name) =>
+        name.endsWith(marker.ext!) && !marker.exclude?.includes(name),
+      );
     } catch {
       return false;
     }
   }
   return false;
 }
-
-export const __benchDatasetTestHooks = {
-  isDatasetDownloaded,
-  resolveBenchDatasetDir,
-};
 
 async function launchBenchUi(resultsDir: string): Promise<void> {
   const benchUiDir = path.join(CLI_REPO_ROOT, "packages", "bench-ui");
@@ -1594,6 +1701,58 @@ function resolveBenchDatasetDir(
 
   return undefined;
 }
+
+function resolveDownloadedBenchDatasetDir(
+  benchmarkId: string,
+  quick: boolean,
+  datasetDirOverride?: string,
+): string | undefined {
+  const datasetDir = resolveBenchDatasetDir(
+    benchmarkId,
+    quick,
+    datasetDirOverride,
+  );
+  if (datasetDir === undefined) {
+    return undefined;
+  }
+  return isDatasetDownloaded(datasetDir, benchmarkId) ? datasetDir : undefined;
+}
+
+export const __benchDatasetTestHooks = {
+  isDatasetDownloaded,
+  resolveBenchDatasetDir,
+  resolveDownloadedBenchDatasetDir,
+  buildPublishedBenchmarkOptionsForTest(
+    benchmarkId: string,
+    args: {
+      publishedTrialLimit?: number;
+      publishedTrialConcurrency?: number;
+      publishedTaskFilter?: string;
+    },
+  ) {
+    return buildPublishedBenchmarkOptions(benchmarkId, args);
+  },
+  validateRunnerManagedPublishedDryRunDatasetForTest,
+  validateRunnerManagedPublishedDryRunDatasetWithModuleForTest(
+    benchModule: unknown,
+    benchmarkId: string,
+    mode: "quick" | "full",
+    datasetDir: string | undefined,
+    limit: number | undefined,
+    seed: number | undefined,
+    benchmarkOptions: Record<string, unknown> | undefined,
+  ) {
+    return validateRunnerManagedPublishedDryRunDataset(
+      benchModule as PackageBenchModule,
+      benchmarkId,
+      mode,
+      datasetDir,
+      limit,
+      seed,
+      benchmarkOptions,
+    );
+  },
+};
 
 function printBenchPackageSummary(
   result: BenchSummaryResult,
@@ -2150,15 +2309,15 @@ async function publishBenchPackageResults(parsed: ParsedBenchArgs): Promise<void
 }
 
 /**
- * `remnic bench published --name <longmemeval|locomo|beam> --dataset <path>
+ * `remnic bench published --name <benchmark> --dataset <path>
  *    --model <id> --limit <n> --trial-limit <n> --seed <n> --out <dir> [--dry-run]
- *    [--provider openai|anthropic|ollama|litellm] [--base-url <url>]`
+ *    [--provider openai|anthropic|ollama|litellm|codex-cli] [--base-url <url>]`
  *
  * Issue #566 PR 4/7. Thin wrapper that routes the user's flags into the
- * existing `runBenchViaPackage` machinery. The wrapper is deliberately
- * narrow: it only accepts the supported published benchmark IDs, enforces the
- * `--name` + `--dataset` invariants at the boundary, and — in `--dry-run`
- * — loads the dataset and prints a preview without calling any LLM.
+ * existing `runBenchViaPackage` machinery. The wrapper accepts every public
+ * benchmark runner, enforces the `--name` + `--dataset` invariants at the
+ * boundary, and — in `--dry-run` — validates the dataset path without calling
+ * any LLM.
  *
  * Validation is upstream in `parseBenchArgs`, per CLAUDE.md rules 14
  * (validate CLI flag args) and 51 (reject invalid input with listed
@@ -2168,7 +2327,7 @@ async function publishBenchPackageResults(parsed: ParsedBenchArgs): Promise<void
 async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
   if (!parsed.publishedName) {
     console.error(
-      "ERROR: `bench published` requires --name longmemeval|locomo|beam.",
+      `ERROR: \`bench published\` requires --name ${PUBLISHED_BENCHMARK_NAMES.join("|")}.`,
     );
     process.exit(1);
   }
@@ -2213,6 +2372,10 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
     // sample while the real run loaded only one item.
     const effectiveLimit =
       parsed.publishedLimit ?? (parsed.quick ? 1 : undefined);
+    const benchmarkOptions = buildPublishedBenchmarkOptions(
+      benchmarkId,
+      parsed,
+    );
     let itemCount: number | undefined;
     // Codex P2 review on PR #603: when the loader returns
     // `source: "missing"` (full mode and the dataset file is absent or
@@ -2265,10 +2428,38 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
         `[dry-run] beam: source=${preview.source} files=${preview.files.length} items=${preview.items} tasks=${preview.tasks} errors=${preview.errors.length}`,
       );
     } else {
-      console.error(
-        `ERROR: installed @remnic/bench version does not export a loader for "${benchmarkId}".`,
+      const definition = benchModule.getBenchmark?.(benchmarkId);
+      if (!definition?.runnerAvailable) {
+        console.error(
+          `ERROR: installed @remnic/bench version does not export a runner for "${benchmarkId}".`,
+        );
+        process.exit(1);
+      }
+      try {
+        await validateRunnerManagedPublishedDryRunDataset(
+          benchModule,
+          benchmarkId,
+          mode,
+          parsed.datasetDir,
+          effectiveLimit,
+          parsed.publishedSeed,
+          benchmarkOptions,
+        );
+      } catch (error) {
+        console.error(
+          `ERROR: [dry-run] ${benchmarkId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+      loadResult = {
+        source: "dataset",
+        filename: parsed.datasetDir,
+        items: [],
+        errors: [],
+      };
+      console.log(
+        `[dry-run] ${benchmarkId}: source=${loadResult.source} datasetDir=${parsed.datasetDir} items=<runner-managed> errors=0`,
       );
-      process.exit(1);
     }
     if (loadResult && loadResult.source === "missing") {
       console.error(
@@ -2328,6 +2519,148 @@ async function runBenchPublished(parsed: ParsedBenchArgs): Promise<void> {
       model: parsed.systemModel,
     });
   }
+}
+
+const DRY_RUN_DATASET_VALIDATED_CODE = "REMNIC_BENCH_DRY_RUN_DATASET_VALIDATED";
+
+type DryRunDatasetValidatedError = Error & {
+  code: typeof DRY_RUN_DATASET_VALIDATED_CODE;
+};
+
+function createDryRunDatasetValidatedError(benchmarkId: string): DryRunDatasetValidatedError {
+  const error = new Error(
+    benchmarkId + " dataset validated; dry-run stopped before benchmark execution.",
+  ) as DryRunDatasetValidatedError;
+  error.name = "DryRunDatasetValidated";
+  error.code = DRY_RUN_DATASET_VALIDATED_CODE;
+  return error;
+}
+
+function isDryRunDatasetValidatedError(
+  error: unknown,
+): error is DryRunDatasetValidatedError {
+  return (
+    error instanceof Error
+    && (error as { code?: unknown }).code === DRY_RUN_DATASET_VALIDATED_CODE
+  );
+}
+
+function createDryRunDatasetValidationAdapter(
+  benchmarkId: string,
+): BenchMemoryAdapter {
+  const abort = async (): Promise<never> => {
+    throw createDryRunDatasetValidatedError(benchmarkId);
+  };
+
+  return {
+    store: abort,
+    recall: abort,
+    search: abort,
+    reset: abort,
+    getStats: abort,
+    drain: abort,
+    destroy: async () => {},
+  };
+}
+
+function buildPublishedBenchmarkOptions(
+  benchmarkId: string,
+  args: {
+    publishedTrialLimit?: number;
+    publishedTrialConcurrency?: number;
+    publishedTaskFilter?: string;
+  },
+): Record<string, unknown> | undefined {
+  const trialLimitOptions =
+    args.publishedTrialLimit !== undefined
+      ? { trialLimit: args.publishedTrialLimit }
+      : undefined;
+  const trialConcurrencyOptions =
+    args.publishedTrialConcurrency !== undefined
+      ? { trialConcurrency: args.publishedTrialConcurrency }
+      : undefined;
+  if (benchmarkId === "locomo") {
+    return {
+      ...(trialLimitOptions ?? {}),
+      ...(trialConcurrencyOptions ?? {}),
+      replayExtractionMode: "skip",
+    };
+  }
+  if (benchmarkId === "ama-bench") {
+    return trialConcurrencyOptions;
+  }
+  if (benchmarkId === "memoryagentbench") {
+    return trialLimitOptions;
+  }
+  if (benchmarkId === "beam" && args.publishedTaskFilter !== undefined) {
+    return { taskFilter: args.publishedTaskFilter };
+  }
+  return undefined;
+}
+
+async function validateRunnerManagedPublishedDryRunDataset(
+  benchModule: PackageBenchModule,
+  benchmarkId: string,
+  mode: "quick" | "full",
+  datasetDir: string | undefined,
+  limit: number | undefined,
+  seed: number | undefined,
+  benchmarkOptions: Record<string, unknown> | undefined,
+): Promise<void> {
+  if (!benchModule.runBenchmark) {
+    throw new Error(
+      "installed @remnic/bench version does not export runBenchmark.",
+    );
+  }
+
+  try {
+    await benchModule.runBenchmark(benchmarkId, {
+      mode,
+      datasetDir,
+      limit,
+      seed,
+      adapterMode: "dry-run",
+      runtimeProfile: null,
+      systemProvider: null,
+      judgeProvider: null,
+      internalProvider: null,
+      remnicConfig: {},
+      ...(benchmarkOptions ? { benchmarkOptions } : {}),
+      system: createDryRunDatasetValidationAdapter(benchmarkId),
+      onTaskComplete: () => {
+        throw createDryRunDatasetValidatedError(benchmarkId);
+      },
+    });
+  } catch (error) {
+    if (isDryRunDatasetValidatedError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function validateRunnerManagedPublishedDryRunDatasetForTest(
+  benchmarkId: string,
+  mode: "quick" | "full",
+  datasetDir: string | undefined,
+  limit?: number,
+  benchmarkOptions?: Record<string, unknown>,
+): Promise<void> {
+  const benchModule = (await tryLoadBenchModule()) as
+    | PackageBenchModule
+    | undefined;
+  if (!benchModule) {
+    throw new Error("@remnic/bench package is not installed.");
+  }
+  await validateRunnerManagedPublishedDryRunDataset(
+    benchModule,
+    benchmarkId,
+    mode,
+    datasetDir,
+    limit,
+    undefined,
+    benchmarkOptions,
+  );
 }
 
 async function loadPublishedPromotionHelpers() {
@@ -2459,17 +2792,7 @@ async function runBenchViaPackage(
   // parsed but dropped, and the harness recorded `ctx.options.seed ?? 0`
   // instead of the user-specified seed, breaking reproducibility.
   const effectiveSeed = parsed.publishedSeed;
-  const benchmarkOptions =
-    benchmarkId === "locomo"
-      ? {
-          ...(parsed.publishedTrialLimit !== undefined
-            ? { trialLimit: parsed.publishedTrialLimit }
-            : {}),
-          replayExtractionMode: "skip",
-        }
-      : benchmarkId === "beam" && parsed.publishedTaskFilter !== undefined
-        ? { taskFilter: parsed.publishedTaskFilter }
-      : undefined;
+  const benchmarkOptions = buildPublishedBenchmarkOptions(benchmarkId, parsed);
 
   try {
     const amaBenchProtocol = buildAmaBenchProtocolOptions(
@@ -2499,6 +2822,7 @@ async function runBenchViaPackage(
       judgeProvider: plan.runtime.judgeProvider,
       internalProvider: plan.runtime.internalProvider,
       remnicConfig: plan.runtime.effectiveRemnicConfig,
+      drainTimeoutMs: plan.runtime.adapterOptions.drainTimeoutMs,
       ...(benchmarkOptions ? { benchmarkOptions } : {}),
       ...(amaBenchProtocol.judgeProtocol
         ? { amaBenchJudgeProtocol: amaBenchProtocol.judgeProtocol }
@@ -2816,6 +3140,7 @@ const BENCH_REPRO_ENV_KEYS = [
   "REMNIC_BENCH_MODE",
   "REMNIC_BENCH_PHASE_TIMEOUT_MS",
   "REMNIC_BENCH_CODEX_CLI_EXECUTABLE",
+  "REMNIC_BENCH_CODEX_CLI_TRANSPORT",
   "REMNIC_BENCH_REQUEST_TIMEOUT_MS",
   "XDG_CACHE_HOME",
 ] as const;

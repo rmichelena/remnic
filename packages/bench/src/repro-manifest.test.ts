@@ -106,6 +106,7 @@ test("buildBenchmarkReproManifest hashes datasets/results and redacts secret arg
   });
 
   assert.equal(manifest.run.mode, "full");
+  assert.match(manifest.run.id, /^20[0-9]{2}-/);
   assert.deepEqual(manifest.run.runtimeProfiles, ["real"]);
   assert.equal(manifest.run.seed, 42);
   assert.deepEqual(manifest.command.argv, [
@@ -156,7 +157,7 @@ test("writeBenchmarkReproManifest writes MANIFEST.json beside results", async ()
   assert.equal(manifest.results[0]?.benchmark, "longmemeval");
 });
 
-test("artifact hash ignores volatile host and command metadata", async () => {
+test("artifact hash ignores volatile host metadata but binds run id", async () => {
   const firstRoot = await createTempRoot("remnic-repro-manifest-stable-a-");
   const secondRoot = await createTempRoot("remnic-repro-manifest-stable-b-");
   const firstResultsDir = path.join(firstRoot, "results");
@@ -172,17 +173,28 @@ test("artifact hash ignores volatile host and command metadata", async () => {
 
   const firstManifest = await buildBenchmarkReproManifest(firstResultsDir, {
     resultPaths: [firstResultPath],
+    runId: "stable-run",
     selectedBenchmarks: ["longmemeval"],
     command: { cwd: firstRoot, argv: ["bench", "run", "longmemeval"] },
   });
   const secondManifest = await buildBenchmarkReproManifest(secondResultsDir, {
     resultPaths: [secondResultPath],
+    runId: "stable-run",
     selectedBenchmarks: ["longmemeval"],
     command: { cwd: secondRoot, argv: ["bench", "run", "longmemeval"] },
   });
+  const tamperedRunManifest = await buildBenchmarkReproManifest(firstResultsDir, {
+    resultPaths: [firstResultPath],
+    runId: "borrowed-run",
+    selectedBenchmarks: ["longmemeval"],
+    command: { cwd: firstRoot, argv: ["bench", "run", "longmemeval"] },
+  });
 
   assert.notEqual(firstManifest.command.cwd, secondManifest.command.cwd);
+  assert.equal(firstManifest.run.id, secondManifest.run.id);
   assert.equal(firstManifest.artifactHash, secondManifest.artifactHash);
+  assert.notEqual(firstManifest.run.id, tamperedRunManifest.run.id);
+  assert.notEqual(firstManifest.artifactHash, tamperedRunManifest.artifactHash);
 });
 
 test("buildBenchmarkReproManifest rejects symlinked dataset roots", async () => {

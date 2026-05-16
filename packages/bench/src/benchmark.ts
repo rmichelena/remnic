@@ -132,16 +132,21 @@ export async function runBenchmark(
 
   const definition = benchmarkDefinition(registeredBenchmark.id);
   const timeoutMs = resolveBenchmarkPhaseTimeoutMs(options);
+  const shouldGuardSystem =
+    timeoutMs !== undefined || options.drainTimeoutMs !== undefined;
   const logProgress = resolveBenchmarkProgressLogging(options.remnicConfig);
   const log = (message: string): void => {
     console.error(`  ${message}`);
   };
   const system =
-    timeoutMs === undefined
+    !shouldGuardSystem
       ? options.system
       : createTimeoutGuardedAdapter(options.system, {
           benchmarkId,
-          timeoutMs,
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          ...(options.drainTimeoutMs !== undefined
+            ? { drainTimeoutMs: options.drainTimeoutMs }
+            : {}),
           logProgress,
           log,
         });

@@ -87,6 +87,10 @@ const DATASET_BUNDLE_CANDIDATES = [
 ] as const;
 
 const VISIBLE_CUE_ANCHOR_PREFIX = "MemoryAgentBench visible anchors:";
+const RECOMMENDATION_CUE_PATTERN =
+  /\b(?:recommend(?:ed|s|ing|ation|ations)?|recommender|suggest(?:ed|s|ing|ion|ions)?)\b/i;
+const RECOMMENDATION_CUE_GLOBAL_PATTERN =
+  /\b(?:recommend(?:ed|s|ing|ation|ations)?|recommender|suggest(?:ed|s|ing|ion|ions)?)\b/gi;
 
 type MemoryAgentBenchProtocol =
   | "ruler_qa"
@@ -125,9 +129,15 @@ export const memoryAgentBenchDefinition: BenchmarkDefinition = {
 export async function runMemoryAgentBenchBenchmark(
   options: ResolvedRunBenchmarkOptions,
 ): Promise<BenchmarkResult> {
-  const dataset = await loadDataset(options.mode, options.datasetDir, options.limit);
-  let recsysMappingLoaded = false;
-  let recsysMapping: RecSysEntityMapping | null = null;
+  const rawDataset = await loadDataset(options.mode, options.datasetDir, options.limit);
+  const trialLimit = resolveTrialLimit(options.benchmarkOptions?.trialLimit);
+  const dataset = applyTrialLimit(rawDataset, trialLimit);
+  const validateRecsysMappingBeforeExecution =
+    options.adapterMode === "dry-run" && hasRecSysRedialItems(dataset);
+  let recsysMapping: RecSysEntityMapping | null = validateRecsysMappingBeforeExecution
+    ? await requireRecSysEntityMapping(options.datasetDir)
+    : null;
+  let recsysMappingLoaded = recsysMapping !== null;
   const tasks: TaskResult[] = [];
 
   const totalQuestions = dataset.reduce(
@@ -173,6 +183,10 @@ export async function runMemoryAgentBenchBenchmark(
           return recalledSessions.filter(Boolean).join("\n\n");
         });
         const answerRecalledText = stripVisibleCueAnchors(recalledText);
+        if (protocol === "recsys_redial" && !recsysMappingLoaded) {
+          recsysMapping = await loadRecSysEntityMapping(options.datasetDir);
+          recsysMappingLoaded = true;
+        }
         const answered = await answerBenchmarkQuestion({
           question: officialQuestion,
           recalledText: answerRecalledText,
@@ -184,12 +198,9 @@ export async function runMemoryAgentBenchBenchmark(
           question,
           recalledText: answerRecalledText,
           answeredText: answered.finalAnswer,
+          recsysMapping: protocol === "recsys_redial" ? recsysMapping : null,
         });
         const finalAnswer = refinedAnswer ?? answered.finalAnswer;
-        if (protocol === "recsys_redial" && !recsysMappingLoaded) {
-          recsysMapping = await loadRecSysEntityMapping(options.datasetDir);
-          recsysMappingLoaded = true;
-        }
         const officialScoring = scoreOfficialProtocol({
           protocol,
           actual: finalAnswer,
@@ -342,6 +353,71 @@ export async function runMemoryAgentBenchBenchmark(
   };
 }
 
+function resolveTrialLimit(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      "MemoryAgentBench benchmarkOptions.trialLimit must be a non-negative integer.",
+    );
+  }
+  return parsed;
+}
+
+function applyTrialLimit(
+  dataset: MemoryAgentBenchItem[],
+  trialLimit: number | undefined,
+): MemoryAgentBenchItem[] {
+  if (trialLimit === undefined) {
+    return dataset;
+  }
+  if (trialLimit === 0) {
+    return [];
+  }
+
+  const limited: MemoryAgentBenchItem[] = [];
+  let remaining = trialLimit;
+  for (const item of dataset) {
+    if (remaining <= 0) {
+      break;
+    }
+    const questionCount = Math.min(item.questions.length, remaining);
+    if (questionCount > 0) {
+      limited.push({
+        ...item,
+        questions: item.questions.slice(0, questionCount),
+        answers: item.answers.slice(0, questionCount),
+        metadata: truncateQuestionMetadata(item.metadata, questionCount),
+      });
+      remaining -= questionCount;
+    }
+  }
+  return limited;
+}
+
+function truncateQuestionMetadata(
+  metadata: MemoryAgentBenchMetadata,
+  questionCount: number,
+): MemoryAgentBenchMetadata {
+  return {
+    ...metadata,
+    previous_events: sliceOptional(metadata.previous_events, questionCount),
+    qa_pair_ids: sliceOptional(metadata.qa_pair_ids, questionCount),
+    question_dates: sliceOptional(metadata.question_dates, questionCount),
+    question_ids: sliceOptional(metadata.question_ids, questionCount),
+    question_types: sliceOptional(metadata.question_types, questionCount),
+  };
+}
+
+function sliceOptional<T>(
+  values: T[] | null | undefined,
+  count: number,
+): T[] | null | undefined {
+  return Array.isArray(values) ? values.slice(0, count) : values;
+}
+
 function errorScoresForProtocol(
   protocol: MemoryAgentBenchProtocol | undefined,
 ): Record<string, number> {
@@ -367,6 +443,12 @@ function errorScoresForProtocol(
     scores.recsys_recall_at_10 = -1;
   }
   return scores;
+}
+
+function hasRecSysRedialItems(dataset: MemoryAgentBenchItem[]): boolean {
+  return dataset.some((item) =>
+    item.metadata.source.toLowerCase().startsWith("recsys_"),
+  );
 }
 
 function getProtocolForSource(source: string): MemoryAgentBenchProtocol {
@@ -495,7 +577,16 @@ function refineMemoryAgentBenchAnswerFromRecall(args: {
   question: string;
   recalledText: string;
   answeredText: string;
+  recsysMapping?: RecSysEntityMapping | null;
 }): string | undefined {
+  if (args.protocol === "recsys_redial" && args.recsysMapping) {
+    return refineRecSysRecommendationsFromRecall(
+      args.answeredText,
+      args.recalledText,
+      args.recsysMapping,
+    );
+  }
+
   if (args.protocol !== "eventqa" || !/\bwhere\b/i.test(args.question)) {
     return undefined;
   }
@@ -520,6 +611,125 @@ function refineMemoryAgentBenchAnswerFromRecall(args: {
   }
 
   return undefined;
+}
+
+function refineRecSysRecommendationsFromRecall(
+  answeredText: string,
+  recalledText: string,
+  recsysMapping: RecSysEntityMapping,
+): string | undefined {
+  const recalledMovies = extractRecalledRecommendationMovies(
+    recalledText,
+    recsysMapping.movieCandidates,
+    recsysMapping.aliasCounts,
+  );
+  if (recalledMovies.length === 0) {
+    return undefined;
+  }
+
+  const answeredMovies = extractRecommendationMovies(
+    answeredText,
+    recsysMapping.movieCandidates,
+    recsysMapping.aliasCounts,
+  );
+  const answeredTop = answeredMovies[0];
+  const recallSupportsAnsweredTop =
+    answeredTop !== undefined &&
+    recalledMovies.some((movie) => sameOfficialAnswer(movie, answeredTop));
+  const rankedMovies = uniquePreservingOrder(
+    recallSupportsAnsweredTop
+      ? [...answeredMovies, ...recalledMovies]
+      : [...recalledMovies, ...answeredMovies],
+  ).slice(0, 20);
+  if (
+    rankedMovies.length === answeredMovies.length &&
+    rankedMovies.every((movie, index) => movie === answeredMovies[index])
+  ) {
+    return undefined;
+  }
+
+  return rankedMovies
+    .map((movie, index) => `${index + 1}. ${movie}`)
+    .join("\n");
+}
+
+function extractRecalledRecommendationMovies(
+  recalledText: string,
+  movieCandidates: string[],
+  aliasCounts: Map<string, number>,
+): string[] {
+  const spans: string[] = [];
+  let inRecommendationList = false;
+
+  for (const line of recalledText
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")) {
+    const span = recalledRecommendationSpan(line, inRecommendationList);
+    if (span !== undefined) {
+      spans.push(span);
+    }
+
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      inRecommendationList = false;
+    } else if (isRecommendationHeader(trimmed)) {
+      inRecommendationList = true;
+    } else if (!/^\d+[\.)]\s+/.test(trimmed)) {
+      inRecommendationList = false;
+    }
+  }
+
+  return spans.flatMap((line) =>
+    extractRecommendationMoviesFromLine(line, movieCandidates, aliasCounts),
+  );
+}
+
+function recalledRecommendationSpan(
+  line: string,
+  inRecommendationList = false,
+): string | undefined {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  if (/^\d+[\.)]\s+/.test(trimmed)) {
+    const unnumbered = trimmed.replace(/^\d+[\.)]\s+/, "");
+    return inRecommendationList ? unnumbered : recommendationCueSpan(unnumbered);
+  }
+
+  return recommendationCueSpan(trimmed);
+}
+
+function recommendationCueSpan(line: string): string | undefined {
+  const cues = [...line.matchAll(RECOMMENDATION_CUE_GLOBAL_PATTERN)];
+  const lastCue = cues.at(-1);
+  if (lastCue?.index === undefined) {
+    return undefined;
+  }
+  return line.slice(lastCue.index);
+}
+
+function isRecommendationHeader(line: string): boolean {
+  return RECOMMENDATION_CUE_PATTERN.test(line) && /:\s*$/.test(line);
+}
+
+function uniquePreservingOrder(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const key = normalizeOfficialAnswer(value);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(value);
+  }
+  return unique;
+}
+
+function sameOfficialAnswer(left: string, right: string): boolean {
+  return normalizeOfficialAnswer(left) === normalizeOfficialAnswer(right);
 }
 
 function rankedMemoryAgentBenchLines(
@@ -1061,6 +1271,19 @@ async function loadRecSysEntityMapping(
   return null;
 }
 
+async function requireRecSysEntityMapping(
+  datasetDir: string | undefined,
+): Promise<RecSysEntityMapping> {
+  const mapping = await loadRecSysEntityMapping(datasetDir);
+  if (!mapping) {
+    throw new Error(
+      "MemoryAgentBench ReDial samples require a valid ReDial entity mapping. " +
+        `Expected one of: ${recsysEntityMappingCandidates(datasetDir).join(", ") || "entity2id.json under the dataset directory"}.`,
+    );
+  }
+  return mapping;
+}
+
 function recsysEntityMappingCandidates(datasetDir: string | undefined): string[] {
   if (!datasetDir) {
     return [];
@@ -1099,6 +1322,7 @@ function extractMovieName(rawName: string): string {
   const decodedFilename = decodeUrlComponentSafely(filename);
   return decodedFilename
     .replace(/[_>]+/g, " ")
+    .replace(/\((\d{4})\s+film\)$/i, "($1)")
     .replace(/\s+/g, " ")
     .trim();
 }

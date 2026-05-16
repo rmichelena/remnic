@@ -69,6 +69,16 @@ export interface BenchJudge {
     expected: string,
     control?: BenchPhaseControl,
   ): Promise<BenchJudgeResult>;
+  /**
+   * Run a benchmark-supplied yes/no judging prompt directly and return a
+   * normalized 0/1 score. Published benchmarks such as LongMemEval define
+   * their own evaluator prompt; routing those through the scalar generic
+   * judge prompt would change the metric contract.
+   */
+  scoreBinaryPrompt?(
+    prompt: string,
+    control?: BenchPhaseControl,
+  ): Promise<BenchJudgeResult>;
 }
 
 export interface BenchMemoryAdapter {

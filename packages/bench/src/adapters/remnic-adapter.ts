@@ -1478,7 +1478,7 @@ async function collectRawSessionMessages(options: {
 function formatTemporalIntervalEvidenceSection(options: {
   maxChars: number;
   rows: readonly string[];
-  evidence: readonly Array<{
+  evidence: ReadonlyArray<{
     sessionId: string;
     turnIndex: number;
     role: string;

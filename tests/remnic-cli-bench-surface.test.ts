@@ -108,6 +108,28 @@ test("CLI uses package-owned adapters for migrated benchmark runs", async () => 
   assert.doesNotMatch(source, /evals\/adapter\/engram-adapter\.ts/);
 });
 
+test("optional bench loader imports workspace source through a TS-aware fallback", async () => {
+  const source = await readFile("packages/remnic-cli/src/optional-bench.ts", "utf8");
+
+  assert.match(source, /const TSX_ESM_API_SPECIFIER = "tsx\/esm\/" \+ "api";/);
+  assert.match(source, /await import\(TSX_ESM_API_SPECIFIER\)/);
+  assert.match(
+    source,
+    /tsImport\(pathToFileURL\(sourceEntry\)\.href,\s*import\.meta\.url\)/,
+  );
+  assert.match(source, /fromLocalWorkspaceBenchSource: true/);
+  assert.match(source, /cachedFromLocalWorkspaceBenchSource/);
+  assert.match(
+    source,
+    /if \(!cachedFromLocalWorkspaceBenchSource\) \{\s*assertBenchModuleFreshForDevelopment\(\);\s*\}/,
+  );
+  assert.match(
+    source,
+    /export function assertBenchModuleFreshForDevelopment\(\): void \{\s*if \(cachedFromLocalWorkspaceBenchSource\) \{\s*return;\s*\}\s*assertLocalBenchBuildFreshForDevelopment\(import\.meta\.url\);/s,
+  );
+  assert.doesNotMatch(source, /await import\(pathToFileURL\(sourceEntry\)\.href\)/);
+});
+
 test("--all selection resolves to runnable package benchmarks when package metadata is available", async () => {
   const source = await readFile("packages/remnic-cli/src/index.ts", "utf8");
 

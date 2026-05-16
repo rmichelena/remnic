@@ -58,7 +58,7 @@ export async function runLongMemEvalBenchmark(
   return runPublishedHarness({
     options,
     metricsSpec: {
-      metrics: ["f1", "contains_answer", "llm_judge"],
+      metrics: ["f1", "contains_answer", "llm_judge", "judge_accuracy"],
     },
     plans,
     totalCount: plans.reduce((sum, plan) => sum + plan.trials.length, 0),
@@ -100,12 +100,17 @@ function buildPlan(
     question: item.question,
     expected: item.answer,
     recallSessionIds: sessionIds,
+    binaryJudgePrompt: ({ answeredText }) =>
+      buildLongMemEvalOfficialJudgePrompt(item, answeredText),
     extraDetails: {
       questionType: item.question_type,
       questionDate: item.question_date,
       haystackDates: item.haystack_dates,
       haystackSessionIds: item.haystack_session_ids,
       answerSessionIds: item.answer_session_ids,
+      judgeProtocol: "longmemeval-official-yes-no",
+      judgePromptSource:
+        "https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py",
     },
     postAnswerHook: async ({ question, recalledText }) => {
       const searchResults = await searchLongMemEvalEvidence(
@@ -133,6 +138,89 @@ function buildPlan(
   };
 
   return { ingestSessions, trials: [trial] };
+}
+
+function buildLongMemEvalOfficialJudgePrompt(
+  item: LongMemEvalItem,
+  response: string,
+): string {
+  if (String(item.question_id).endsWith("_abs")) {
+    return formatLongMemEvalJudgePrompt(
+      "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.",
+      item.question,
+      "Explanation",
+      item.answer,
+      response,
+      "Does the model correctly identify the question as unanswerable? Answer yes or no only.",
+    );
+  }
+
+  switch (item.question_type) {
+    case "single-session-user":
+    case "single-session-assistant":
+    case "multi-session":
+      return formatLongMemEvalJudgePrompt(
+        "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.",
+        item.question,
+        "Correct Answer",
+        item.answer,
+        response,
+        "Is the model response correct? Answer yes or no only.",
+      );
+    case "temporal-reasoning":
+      return formatLongMemEvalJudgePrompt(
+        "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct.",
+        item.question,
+        "Correct Answer",
+        item.answer,
+        response,
+        "Is the model response correct? Answer yes or no only.",
+      );
+    case "knowledge-update":
+    case "multi-session-update":
+      return formatLongMemEvalJudgePrompt(
+        "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.",
+        item.question,
+        "Correct Answer",
+        item.answer,
+        response,
+        "Is the model response correct? Answer yes or no only.",
+      );
+    case "single-session-preference":
+      return formatLongMemEvalJudgePrompt(
+        "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.",
+        item.question,
+        "Rubric",
+        item.answer,
+        response,
+        "Is the model response correct? Answer yes or no only.",
+      );
+    default:
+      throw new Error(
+        `LongMemEval unsupported question_type: ${item.question_type}`,
+      );
+  }
+}
+
+function formatLongMemEvalJudgePrompt(
+  instructions: string,
+  question: string,
+  answerLabel: "Correct Answer" | "Explanation" | "Rubric",
+  answer: string,
+  response: string,
+  finalQuestion: string,
+): string {
+  return [
+    instructions,
+    "",
+    `Question: ${question}`,
+    "",
+    `${answerLabel}: ${answer}`,
+    "",
+    `Model Response: ${response}`,
+    "",
+    finalQuestion,
+  ].join("\n");
 }
 
 async function searchLongMemEvalEvidence(

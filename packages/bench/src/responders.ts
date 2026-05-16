@@ -536,6 +536,25 @@ function isRangeDash(char: string | undefined): boolean {
 }
 
 function createJudgeFromProvider(provider: LlmProvider): BenchJudge {
+  async function scoreBinaryPrompt(
+    prompt: string,
+    control?: { signal?: AbortSignal },
+  ): Promise<BenchJudgeResult> {
+    const completion = await provider.complete(prompt, {
+      systemPrompt: "Answer the benchmark judging question with yes or no only.",
+      temperature: 0,
+      maxTokens: 10,
+      signal: control?.signal,
+    });
+
+    return {
+      score: parseYesNoJudgeScore(completion.text),
+      tokens: completion.tokens,
+      latencyMs: completion.latencyMs,
+      model: completion.model,
+    };
+  }
+
   async function scoreWithMetrics(
     question: string,
     predicted: string,
@@ -578,6 +597,7 @@ function createJudgeFromProvider(provider: LlmProvider): BenchJudge {
       return (await scoreWithMetrics(question, predicted, expected, control)).score;
     },
     scoreWithMetrics,
+    scoreBinaryPrompt,
   };
 }
 
@@ -776,6 +796,22 @@ function parseScalarJudgeScore(raw: string): number {
   }
 
   return -1;
+}
+
+function parseYesNoJudgeScore(raw: string): number {
+  const normalized = raw.trim().toLowerCase();
+  const firstLabel = normalized.match(/\b(yes|no)\b/)?.[1];
+  if (firstLabel === "yes") {
+    return 1;
+  }
+  if (firstLabel === "no") {
+    return 0;
+  }
+  const scalar = parseScalarJudgeScore(raw);
+  if (scalar < 0) {
+    return -1;
+  }
+  return scalar >= 0.5 ? 1 : 0;
 }
 
 function parseAmaBenchBinaryJudgeScore(raw: string): number {

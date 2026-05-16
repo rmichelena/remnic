@@ -57,6 +57,11 @@ export const PERSONAMEM_SMOKE_FIXTURE: PersonaMemSample[] = [
     personaId: "personamem-smoke-1",
     userQuery: "What music do I tend to put on when I cook on Sunday evenings?",
     correctAnswer: "jazz piano",
+    incorrectAnswers: [
+      "classical violin",
+      "podcast interviews",
+      "silent kitchen",
+    ],
     preference: "jazz piano while cooking on Sunday evenings",
     prefType: "implicit_preference",
     relatedConversationSnippet:

@@ -72,6 +72,32 @@ test("responder wrappers adapt a provider instance into answer-generation and ju
   assert.equal(judgeResult?.tokens.output > 0, true);
   assert.equal(judgeResult?.latencyMs, 12);
   assert.equal(judgeResult?.model, "test-model");
+  const noJudge = createProviderBackedJudge(
+    { provider: "openai", model: "gpt-5.4-mini" },
+    createFakeProvider("No."),
+  );
+  assert.equal(
+    (await noJudge.scoreBinaryPrompt?.("yes/no prompt"))?.score,
+    0,
+  );
+
+  const yesJudge = createProviderBackedJudge(
+    { provider: "openai", model: "gpt-5.4-mini" },
+    createFakeProvider("Yes."),
+  );
+  assert.equal(
+    (await yesJudge.scoreBinaryPrompt?.("yes/no prompt"))?.score,
+    1,
+  );
+
+  const invalidBinaryJudge = createProviderBackedJudge(
+    { provider: "openai", model: "gpt-5.4-mini" },
+    createFakeProvider("I cannot determine the answer from the prompt."),
+  );
+  assert.equal(
+    (await invalidBinaryJudge.scoreBinaryPrompt?.("yes/no prompt"))?.score,
+    -1,
+  );
 
   const structuredProvider = createFakeProvider("{\"identity_accuracy\":0.9,\"stance_coherence\":0.8,\"novelty\":0.7,\"calibration\":0.6,\"notes\":\"ok\"}");
   const structuredJudge = createStructuredJudgeFromProvider(structuredProvider);
