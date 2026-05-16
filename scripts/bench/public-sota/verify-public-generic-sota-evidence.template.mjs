@@ -259,7 +259,7 @@ function comparePublicBenchmarkSota(result, targetMap) {
   const benchmark = result.meta?.benchmark ?? result.benchmarkId;
   assert(typeof benchmark === 'string' && benchmark.length > 0, 'result missing benchmark id');
   const entry = targetMap.benchmarks?.[benchmark];
-  const targets = entry?.targets ?? entry?.target ?? entry;
+  const targets = entry?.targets ?? entry;
   assert(targets, `target map missing ${benchmark}`);
 
   const checks = {
