@@ -110,6 +110,16 @@ function assertNoInvalidRawScores(result) {
   }
 }
 
+function assertCodexProvider(config, label, { required = true } = {}) {
+  if (!config) {
+    assert(!required, `${label} provider is required`);
+    return;
+  }
+  assert(config.provider === 'codex-cli', `${label} provider must be codex-cli`);
+  assert(config.model === 'gpt-5.5', `${label} model must be gpt-5.5`);
+  assert(config.reasoningEffort === 'xhigh', `${label} reasoning must be xhigh`);
+}
+
 function publicTaskCategory(benchmark, task) {
   switch (benchmark) {
     case 'amemgym':
@@ -474,9 +484,9 @@ async function main() {
   assert(rel && !rel.startsWith('..') && !path.isAbsolute(rel), 'raw result must be inside --results-dir');
   assert(result.meta.mode === 'full', 'result must be full mode');
   assertRealRuntime(result, baseManifest, 'raw result');
-  assert(result.config.systemProvider?.provider === 'codex-cli', 'system provider must be codex-cli');
-  assert(result.config.systemProvider?.model === 'gpt-5.5', 'system model must be gpt-5.5');
-  assert(result.config.systemProvider?.reasoningEffort === 'xhigh', 'system reasoning must be xhigh');
+  assertCodexProvider(result.config.systemProvider, 'system');
+  assertCodexProvider(result.config.judgeProvider, 'judge');
+  assertCodexProvider(result.config.internalProvider, 'internal', { required: false });
   assertNoInvalidRawScores(result);
 
   const comparison = comparePublicBenchmarkSota(result, targetMap);
