@@ -37,10 +37,22 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
 fi
 trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
+stale_baseline_run() {
+  local run_id="$1"
+  local status_file="${RESULTS_ROOT}/${run_id}/status.tsv"
+  if tmux has-session -t "${run_id}" 2>/dev/null; then
+    return 1
+  fi
+  [[ -f "${status_file}" ]] && grep -Eq $'\t(success|fail:[0-9]+)\t' "${status_file}"
+}
+
 BASELINE_RUNS_FILE="$(mktemp "${TMP_ROOT}/remnic-${BENCHMARK}-publish-baseline.XXXXXX")"
 if [[ -z "${RUN_ID}" ]]; then
   while IFS= read -r candidate; do
-    basename "${candidate}"
+    run_basename="$(basename "${candidate}")"
+    if stale_baseline_run "${run_basename}"; then
+      printf '%s\n' "${run_basename}"
+    fi
   done < <(find "${RESULTS_ROOT}" -maxdepth 1 -type d -name "public-${BENCHMARK}-codex-*" -print 2>/dev/null) \
     | sort > "${BASELINE_RUNS_FILE}"
 fi
