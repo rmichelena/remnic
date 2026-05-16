@@ -44,6 +44,9 @@ fi
 mkdir -p "${OUT_DIR}"
 
 node "${PUBLIC_SOTA_DIR}/build-target-map.mjs" "${TARGET_MAP}"
+if ! cmp -s "${TARGET_MAP}" "${OUT_DIR}/current-target-map.json" 2>/dev/null; then
+  cp "${TARGET_MAP}" "${OUT_DIR}/current-target-map.json"
+fi
 
 comparison_path="${OUT_DIR}/memory-arena-sota-comparison.raw.json"
 node "${COMPARE_SCRIPT}" "${result_path}" "${TARGET_MAP}" | tee "${comparison_path}"
