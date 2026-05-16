@@ -186,6 +186,8 @@ function publicTaskDetails(benchmark, task) {
 
 async function scanDataset(datasetDir, repoRoot, benchmark) {
   const root = path.resolve(datasetDir);
+  const rootStat = await fsp.lstat(root);
+  assert(rootStat.isDirectory() && !rootStat.isSymbolicLink(), `dataset root must be a real directory: ${datasetDir}`);
   const files = [];
   async function walk(dir) {
     const entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -194,6 +196,7 @@ async function scanDataset(datasetDir, repoRoot, benchmark) {
       const entryPath = path.join(dir, entry.name);
       const stat = await fsp.lstat(entryPath);
       const relative = path.relative(root, entryPath).split(path.sep).join('/');
+      assert(!stat.isSymbolicLink(), `dataset symlinks are not allowed in evidence manifests: ${relative}`);
       if (stat.isDirectory()) {
         await walk(entryPath);
       } else if (stat.isFile()) {
@@ -202,15 +205,6 @@ async function scanDataset(datasetDir, repoRoot, benchmark) {
           kind: 'file',
           sizeBytes: stat.size,
           sha256: sha256File(entryPath),
-        });
-      } else if (stat.isSymbolicLink()) {
-        const target = await fsp.readlink(entryPath);
-        files.push({
-          path: relative,
-          kind: 'symlink',
-          sizeBytes: Buffer.byteLength(target, 'utf8'),
-          sha256: sha256String(target),
-          target,
         });
       }
     }

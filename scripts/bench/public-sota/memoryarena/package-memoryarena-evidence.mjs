@@ -194,6 +194,8 @@ function sanitizeArgv(argv) {
 
 async function scanDataset(datasetDir, repoRoot) {
   const root = path.resolve(datasetDir);
+  const rootStat = await fsp.lstat(root);
+  assert(rootStat.isDirectory() && !rootStat.isSymbolicLink(), `dataset root must be a real directory: ${datasetDir}`);
   const files = [];
 
   async function walk(dir) {
@@ -203,16 +205,8 @@ async function scanDataset(datasetDir, repoRoot) {
       const entryPath = path.join(dir, entry.name);
       const stat = await fsp.lstat(entryPath);
       const relative = path.relative(root, entryPath).split(path.sep).join('/');
-      if (stat.isSymbolicLink()) {
-        const target = await fsp.readlink(entryPath);
-        files.push({
-          path: relative,
-          kind: 'symlink',
-          sizeBytes: Buffer.byteLength(target, 'utf8'),
-          sha256: sha256String(target),
-          target,
-        });
-      } else if (stat.isDirectory()) {
+      assert(!stat.isSymbolicLink(), `dataset symlinks are not allowed in evidence manifests: ${relative}`);
+      if (stat.isDirectory()) {
         await walk(entryPath);
       } else if (stat.isFile()) {
         files.push({
