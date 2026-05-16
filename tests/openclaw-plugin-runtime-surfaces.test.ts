@@ -378,7 +378,7 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
 }
 
 for (const expectation of OPENCLAW_PACKAGE_EXPECTATIONS) {
-  test(`${expectation.name} declares OpenClaw 2026.5.16-beta.2 package install metadata`, () => {
+  test(`${expectation.name} declares OpenClaw 2026.5.16-beta.3 package install metadata`, () => {
     const packageJson = readPackageJson(expectation.packageJsonPath);
     const openclaw = packageJson.openclaw ?? {};
 
@@ -393,8 +393,8 @@ for (const expectation of OPENCLAW_PACKAGE_EXPECTATIONS) {
       pluginApi: ">=2026.5.16-beta.1",
     });
     assert.deepEqual(openclaw.build, {
-      openclawVersion: "2026.5.16-beta.2",
-      pluginSdkVersion: "2026.5.16-beta.2",
+      openclawVersion: "2026.5.16-beta.3",
+      pluginSdkVersion: "2026.5.16-beta.3",
     });
     assert.deepEqual(openclaw.install, {
       ...expectation.install,

@@ -167,8 +167,8 @@ CI jobs that provision OpenClaw should use
 Last compatibility sweep: May 16, 2026. The SDK surface check passed against
 `openclaw@2026.5.3`, `openclaw@2026.5.3-1`, `openclaw@2026.5.4-beta.1`,
 `openclaw@2026.5.4-beta.2`, `openclaw@2026.5.4-beta.3`,
-`openclaw@2026.5.4`, `openclaw@2026.5.5`, `openclaw@2026.5.6`, and
-`openclaw@2026.5.16-beta.2`.
+`openclaw@2026.5.4`, `openclaw@2026.5.5`, `openclaw@2026.5.6`,
+`openclaw@2026.5.16-beta.2`, and `openclaw@2026.5.16-beta.3`.
 Keep the peer range broad unless an upstream release removes a runtime surface
 Remnic actively uses.
 
@@ -185,6 +185,13 @@ The manifest also declares `activation.onStartup: false`, leaves provider
 ownership to the host, exposes the optional plugin-mode OpenAI key through
 `providerAuthChoices`, and keeps `providerAuthEnvVars.openai` as compatibility
 metadata for OpenClaw's pre-runtime env-var auth probes.
+
+OpenClaw 2026.5.16-beta.3 keeps those install and auth ownership contracts
+intact. The sweep confirmed that Remnic still relies on host-owned gateway
+restart/reload behavior after plugin install changes, uses `gateway_stop`
+instead of the deprecated `deactivate` cleanup alias, and should not claim
+OpenAI `setup.providers` ownership because gateway/provider configuration
+remains host-owned.
 
 Native memory registrars are tracked separately in
 [`docs/plugins/openclaw-native-memory-registrars.md`](../../docs/plugins/openclaw-native-memory-registrars.md).
