@@ -229,7 +229,7 @@ const targetMap = {
     },
     personamem: {
       primaryMetric: 'MCQ accuracy by split',
-      comparison: 'live AMB reproduced target for 32k; paper targets for 128k and 1M',
+      comparison: 'live AMB reproduced target for runner-supported 32k; paper targets for 128k and 1M are retained as reference targets until those runner modes exist',
       targets: {
         '32k': liveTargets.personamem.ambReproduced['32k'],
         '128k': liveTargets.personamem.external['128k'],

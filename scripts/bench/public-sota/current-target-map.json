@@ -202,7 +202,7 @@
     },
     "personamem": {
       "primaryMetric": "MCQ accuracy by split",
-      "comparison": "live AMB reproduced target for 32k; paper targets for 128k and 1M",
+      "comparison": "live AMB reproduced target for runner-supported 32k; paper targets for 128k and 1M are retained as reference targets until those runner modes exist",
       "targets": {
         "32k": {
           "score": 0.865874363327674,

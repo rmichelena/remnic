@@ -175,7 +175,9 @@ function expectedComparisonTargets(benchmark) {
     case 'beam':
       return Object.fromEntries(Object.entries(entry.targets).map(([split, target]) => [`beam_${split.toLowerCase()}`, target.score]));
     case 'personamem':
-      return Object.fromEntries(Object.entries(entry.targets).map(([split, target]) => [`personamem_${split.toLowerCase()}_mcq_accuracy`, target.score]));
+      return {
+        personamem_32k_mcq_accuracy: entry.targets['32k'].score,
+      };
     case 'memoryagentbench':
       return {
         memoryagentbench_overall_score: entry.targets.overallScore.score,
