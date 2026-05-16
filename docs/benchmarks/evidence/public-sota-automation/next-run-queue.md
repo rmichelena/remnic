@@ -113,7 +113,7 @@ node packages/remnic-cli/bin/remnic.cjs bench published \
   --max-429-wait 86400000 \
   --seed 1 \
   --results-dir ${HOME}/.remnic/bench/results/<run-id> \
-  --out <repo-root>/docs/benchmarks/results/<run-id>
+  --out ${HOME}/.remnic/bench/results/<run-id>
 ```
 
 The Remnic `codex-cli` provider injects `--config service_tier="fast"` into

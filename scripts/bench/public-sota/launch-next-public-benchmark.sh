@@ -8,7 +8,7 @@ REPO_ROOT_DEFAULT="$(git -C "${SCRIPT_DIR}/../../.." rev-parse --show-toplevel 2
 
 REPO_ROOT="${REPO_ROOT:-${REPO_ROOT_DEFAULT}}"
 RESULTS_ROOT="${RESULTS_ROOT:-${HOME}/.remnic/bench/results}"
-OUT_ROOT="${REPO_ROOT}/docs/benchmarks/results"
+OUT_ROOT="${OUT_ROOT:-${RESULTS_ROOT}}"
 
 active_scoring_session="$(tmux list-sessions -F '#S' 2>/dev/null \
   | grep -E '^public-.*-codex-.*[0-9]{8}T[0-9]{6}Z$' \

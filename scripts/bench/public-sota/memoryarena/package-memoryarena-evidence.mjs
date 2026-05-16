@@ -131,12 +131,22 @@ function gitOutput(repoRoot, args) {
   }
 }
 
-function gitInfo(repoRoot, result) {
+function statusEntryPath(entry) {
+  return entry.slice(3).replace(/^"|"$/g, '').split(' -> ').at(-1);
+}
+
+function isIgnoredDirtyEntry(entry, ignoredRelativePrefixes) {
+  const entryPath = statusEntryPath(entry);
+  return ignoredRelativePrefixes.some((prefix) => entryPath === prefix || entryPath.startsWith(prefix));
+}
+
+function gitInfo(repoRoot, result, ignoredRelativePrefixes = []) {
   const commit = gitOutput(repoRoot, ['rev-parse', 'HEAD']) || result.meta?.gitSha || 'unknown';
   const shortCommit = gitOutput(repoRoot, ['rev-parse', '--short', 'HEAD']) || String(result.meta?.gitSha ?? 'unknown').slice(0, 8);
   const dirtyEntries = gitOutput(repoRoot, ['status', '--porcelain', '--untracked-files=all'])
     .split(/\r?\n/)
-    .filter((line) => line.trim().length > 0);
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !isIgnoredDirtyEntry(line, ignoredRelativePrefixes));
   return {
     commit,
     shortCommit,
@@ -463,7 +473,8 @@ async function main() {
 
   const rawEntry = resultManifestEntry(resultPath, resultsDir, result);
   const baseManifest = fs.existsSync(baseManifestPath) ? readJson(baseManifestPath) : {};
-  const git = gitInfo(repoRoot, result);
+  const generatedResultPrefix = `docs/benchmarks/results/${path.basename(resultsDir)}/`;
+  const git = gitInfo(repoRoot, result, [generatedResultPrefix]);
   const publicEntry = {
     path: artifactFilename,
     sha256: sha256String(artifactBody),

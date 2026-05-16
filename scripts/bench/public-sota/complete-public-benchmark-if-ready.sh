@@ -25,7 +25,6 @@ esac
 run_id="${2:-}"
 RESULTS_ROOT="${RESULTS_ROOT:-${HOME}/.remnic/bench/results}"
 REPO_ROOT="${REPO_ROOT:-${REPO_ROOT_DEFAULT}}"
-TARGET_MAP="${TARGET_MAP:-${SCRIPT_DIR}/current-target-map.json}"
 OUT_ROOT="${OUT_ROOT:-${TMP_ROOT}/remnic-public-benchmark-evidence}"
 
 if [[ -z "${run_id}" ]]; then
@@ -39,6 +38,7 @@ fi
 
 RESULTS_DIR="${RESULTS_ROOT}/${run_id}"
 OUT_DIR="${OUT_ROOT}/${run_id}"
+TARGET_MAP="${TARGET_MAP:-${OUT_DIR}/current-target-map.json}"
 DATASET_DIR="${REPO_ROOT}/evals/datasets/${benchmark}"
 SESSION="${SESSION:-${run_id}}"
 COMPARE_SCRIPT="${SCRIPT_DIR}/compare-public-benchmark-sota.mjs"

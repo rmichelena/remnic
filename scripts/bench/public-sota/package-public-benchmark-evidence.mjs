@@ -248,7 +248,16 @@ function sanitizeArgv(argv, repoRoot, resultsDir, outDir, benchmark) {
   });
 }
 
-function gitInfo(repoRoot, result) {
+function statusEntryPath(entry) {
+  return entry.slice(3).replace(/^"|"$/g, '').split(' -> ').at(-1);
+}
+
+function isIgnoredDirtyEntry(entry, ignoredRelativePrefixes) {
+  const entryPath = statusEntryPath(entry);
+  return ignoredRelativePrefixes.some((prefix) => entryPath === prefix || entryPath.startsWith(prefix));
+}
+
+function gitInfo(repoRoot, result, ignoredRelativePrefixes = []) {
   const git = (args) => {
     try {
       return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -256,7 +265,10 @@ function gitInfo(repoRoot, result) {
       return '';
     }
   };
-  const dirtyEntries = git(['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter((line) => line.trim());
+  const dirtyEntries = git(['status', '--porcelain', '--untracked-files=all'])
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .filter((line) => !isIgnoredDirtyEntry(line, ignoredRelativePrefixes));
   return {
     commit: git(['rev-parse', 'HEAD']) || result.meta.gitSha,
     shortCommit: git(['rev-parse', '--short', 'HEAD']) || String(result.meta.gitSha).slice(0, 8),
@@ -450,7 +462,8 @@ async function main() {
   const times = statusTimes(resultsDir, benchmark, result.meta.timestamp);
   const artifact = buildArtifact(result, dataset, comparison, times.startedAt);
   const filename = `${times.startedAt.slice(0, 10)}-${benchmark}-gpt-5.5-real-${String(result.meta.gitSha).slice(0, 8)}.json`;
-  const git = gitInfo(repoRoot, result);
+  const generatedResultPrefix = `docs/benchmarks/results/${path.basename(resultsDir)}/`;
+  const git = gitInfo(repoRoot, result, [generatedResultPrefix]);
 
   await fsp.mkdir(outDir, { recursive: true });
   const artifactPath = path.join(outDir, filename);
