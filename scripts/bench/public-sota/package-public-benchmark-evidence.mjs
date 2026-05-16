@@ -159,7 +159,7 @@ function publicTaskDetails(benchmark, task) {
       };
     case 'personamem':
       return {
-        split: details.split ?? details.contextWindow ?? details.chatHistoryWindow,
+        split: details.split ?? details.contextWindow ?? details.chatHistoryWindow ?? (details.chatHistory32kLink ? '32k' : undefined),
         chatHistory32kLink: details.chatHistory32kLink,
         chatHistory128kLink: details.chatHistory128kLink,
         prefType: details.prefType,

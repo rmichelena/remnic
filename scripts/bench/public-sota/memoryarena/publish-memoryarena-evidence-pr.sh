@@ -36,11 +36,19 @@ if [[ -z "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; 
   exit 0
 fi
 
+manifest_rel="$(cd "${WORKTREE}" && find docs/benchmarks/results -mindepth 2 -maxdepth 2 -name 'MANIFEST.memory-arena.json' -print | sort | tail -1)"
+if [[ -z "${manifest_rel}" ]]; then
+  echo "error: staged MemoryArena manifest not found in ${WORKTREE}/docs/benchmarks/results" >&2
+  exit 2
+fi
+results_rel="$(dirname "${manifest_rel}")"
+run_id="$(basename "${results_rel}")"
+
 cat > "${BODY_FILE}" <<'BODY'
 ## Summary
 
 Publishes the completed Remnic MemoryArena full-run SOTA evidence for the
-`public-matrix-codex-bf9b2643-20260515T052919Z` benchmark attempt.
+__RUN_ID__ benchmark attempt.
 
 The PR includes:
 
@@ -55,11 +63,11 @@ The PR includes:
 
 ```bash
 node scripts/bench/verify-public-memoryarena-sota-evidence.mjs \
-  docs/benchmarks/results/public-matrix-codex-bf9b2643-20260515T052919Z
+  __RESULTS_REL__
 
 PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH npx tsx scripts/bench/verify-public-matrix.ts \
-  --results-dir docs/benchmarks/results/public-matrix-codex-bf9b2643-20260515T052919Z \
-  --manifest docs/benchmarks/results/public-matrix-codex-bf9b2643-20260515T052919Z/MANIFEST.memory-arena.json \
+  --results-dir __RESULTS_REL__ \
+  --manifest __MANIFEST_REL__ \
   --benchmarks memory-arena \
   --skip-git \
   --no-diagnostics
@@ -67,6 +75,21 @@ PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH npx tsx scripts/bench/verify-pub
 gitleaks detect --source . --no-git --redact --exit-code 1
 ```
 BODY
+
+RUN_ID="${run_id}" RESULTS_REL="${results_rel}" MANIFEST_REL="${manifest_rel}" BODY_FILE="${BODY_FILE}" node --input-type=module -e '
+import fs from "node:fs";
+
+const file = process.env.BODY_FILE;
+let body = fs.readFileSync(file, "utf8");
+for (const [key, value] of Object.entries({
+  __RUN_ID__: process.env.RUN_ID,
+  __RESULTS_REL__: process.env.RESULTS_REL,
+  __MANIFEST_REL__: process.env.MANIFEST_REL,
+})) {
+  body = body.replaceAll(key, value ?? "");
+}
+fs.writeFileSync(file, body);
+'
 
 (
   cd "${WORKTREE}"

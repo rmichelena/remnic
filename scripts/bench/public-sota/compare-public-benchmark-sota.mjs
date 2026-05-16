@@ -145,9 +145,12 @@ function comparePersonaMem(result, targets) {
   for (const [split, targetEntry] of Object.entries(targets)) {
     const splitKey = normalizeSplit(split);
     const values = taskScores(result, 'mcq_accuracy', (task) =>
-      normalizeSplit(task.details?.split ?? task.details?.contextWindow ?? task.details?.chatHistoryWindow) === splitKey ||
-      (splitKey === '32k' && task.details?.chatHistory32kLink) ||
-      (splitKey === '128k' && task.details?.chatHistory128kLink) ||
+      normalizeSplit(
+        task.details?.split ??
+          task.details?.contextWindow ??
+          task.details?.chatHistoryWindow ??
+          (task.details?.chatHistory32kLink ? '32k' : undefined),
+      ) === splitKey ||
       String(task.taskId ?? '').toLowerCase().includes(splitKey),
     );
     if (values.length === 0) {
