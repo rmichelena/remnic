@@ -84,11 +84,20 @@ test("release workflow verifies the OpenClaw ClawHub packlist after build", asyn
 
 test("@remnic/server build verifies declared bin artifacts", async () => {
   const packageJson = JSON.parse(await readFile("packages/remnic-server/package.json", "utf8"));
+  const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
 
   assert.deepEqual(packageJson.bin, {
     "remnic-server": "./bin/remnic-server.js",
     "engram-server": "./bin/engram-server.js",
   });
+  assert.deepEqual(
+    packageLock.packages?.["packages/remnic-server"]?.bin,
+    {
+      "remnic-server": "bin/remnic-server.js",
+      "engram-server": "bin/engram-server.js",
+    },
+    "package-lock.json must keep @remnic/server bin targets in sync with package.json",
+  );
   assert.ok(
     packageJson.files.includes("bin/*.js"),
     "@remnic/server package must include source-controlled bin wrappers",
