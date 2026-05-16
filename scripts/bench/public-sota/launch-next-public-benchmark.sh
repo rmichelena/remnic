@@ -72,9 +72,10 @@ printf -v repo_quoted '%q' "${REPO_ROOT}"
 printf -v log_quoted '%q' "${log_file}"
 printf -v status_quoted '%q' "${status_file}"
 printf -v benchmark_quoted '%q' "${benchmark}"
+printf -v run_id_quoted '%q' "${run_id}"
 session="${run_id}"
 tmux new-session -d -s "${session}" -c "${REPO_ROOT}" \
-  "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:\$PATH; cd ${repo_quoted}; (${cmd_quoted}) >> ${log_quoted} 2>&1; rc=\$?; if [ \$rc -eq 0 ]; then printf '%s\tsuccess\t%s\n' ${benchmark_quoted} \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; else printf '%s\tfail:%s\t%s\n' ${benchmark_quoted} \"\$rc\" \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; fi; exit \$rc"
+  "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:\$PATH; export REMNIC_BENCH_RUN_ID=${run_id_quoted}; cd ${repo_quoted}; (${cmd_quoted}) >> ${log_quoted} 2>&1; rc=\$?; if [ \$rc -eq 0 ]; then printf '%s\tsuccess\t%s\n' ${benchmark_quoted} \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; else printf '%s\tfail:%s\t%s\n' ${benchmark_quoted} \"\$rc\" \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; fi; exit \$rc"
 
 cat <<EOF
 launched=${session}

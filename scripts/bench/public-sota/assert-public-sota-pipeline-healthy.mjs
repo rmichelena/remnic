@@ -58,7 +58,11 @@ const watcherPlan = [
 ];
 
 const failures = [];
-const activeRun = status.activeRun ?? status.memoryArena;
+const activeRun = status.activeRun ?? (
+  status.memoryArena
+    ? { benchmark: 'memory-arena', ...status.memoryArena }
+    : undefined
+);
 
 if (!Array.isArray(status.scoringSessions) || status.scoringSessions.length !== 1) {
   failures.push(`expected exactly one active scoring session, found ${status.scoringSessions?.length ?? 'unknown'}`);

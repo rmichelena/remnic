@@ -23,7 +23,11 @@ PACKAGE_SCRIPT="${SCRIPT_DIR}/package-memoryarena-evidence.mjs"
 VERIFY_SCRIPT="${SCRIPT_DIR}/verify-memoryarena-sota-evidence.mjs"
 
 latest_result() {
-  find "${RESULTS_DIR}" -maxdepth 1 -type f -name 'memory-arena-*.json' -print 2>/dev/null | sort | tail -1
+  find "${RESULTS_DIR}" -maxdepth 1 -type f \
+    -name 'memory-arena-*.json' \
+    ! -name 'memory-arena-sota-comparison.json' \
+    ! -name 'memory-arena-diagnostics-summary.json' \
+    -print 2>/dev/null | sort | tail -1
 }
 
 result_path="$(latest_result)"

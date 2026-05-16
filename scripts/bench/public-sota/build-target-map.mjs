@@ -7,6 +7,23 @@ import { fileURLToPath } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const OUT_PATH = process.argv[2] ?? path.join(scriptDir, 'current-target-map.json');
 
+function compareNullableStrings(left, right) {
+  return String(left ?? '').localeCompare(String(right ?? ''));
+}
+
+function compareResultRows(left, right) {
+  const scoreDelta = Number(right.accuracy ?? right.score ?? 0) - Number(left.accuracy ?? left.score ?? 0);
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+  return compareNullableStrings(left.memory ?? left.method, right.memory ?? right.method) ||
+    compareNullableStrings(left.source_label ?? left.sourceLabel, right.source_label ?? right.sourceLabel) ||
+    compareNullableStrings(left.source_url ?? left.sourceUrl, right.source_url ?? right.sourceUrl) ||
+    compareNullableStrings(left.comment, right.comment) ||
+    compareNullableStrings(left.run_name ?? left.runName, right.run_name ?? right.runName) ||
+    compareNullableStrings(left.path ?? left.sourcePath, right.path ?? right.sourcePath);
+}
+
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -30,7 +47,7 @@ function best(rows) {
   if (!Array.isArray(rows) || rows.length === 0) {
     return undefined;
   }
-  return [...rows].sort((a, b) => Number(b.accuracy ?? 0) - Number(a.accuracy ?? 0))[0];
+  return [...rows].sort(compareResultRows)[0];
 }
 
 function bestBySplitFromExternal(external, dataset) {
@@ -77,7 +94,7 @@ function maxTarget(...targets) {
   if (rows.length === 0) {
     return undefined;
   }
-  return rows.sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0))[0];
+  return rows.sort(compareResultRows)[0];
 }
 
 const external = await fetchJson('https://agentmemorybenchmark.ai/api/external-results');
