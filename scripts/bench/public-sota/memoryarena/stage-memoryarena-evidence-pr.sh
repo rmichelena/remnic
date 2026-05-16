@@ -67,8 +67,13 @@ if [[ -e "${WORKTREE}" ]]; then
   fi
   git -C "${WORKTREE}" status --short --untracked-files=all
 else
-  git -C "${REPO_ROOT}" fetch origin "${BASE_BRANCH}"
-  git -C "${REPO_ROOT}" worktree add -B "${BRANCH}" "${WORKTREE}" "origin/${BASE_BRANCH}"
+  if git -C "${REPO_ROOT}" ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+    git -C "${REPO_ROOT}" worktree add -B "${BRANCH}" "${WORKTREE}" "origin/${BRANCH}"
+  else
+    git -C "${REPO_ROOT}" fetch origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+    git -C "${REPO_ROOT}" worktree add -B "${BRANCH}" "${WORKTREE}" "origin/${BASE_BRANCH}"
+  fi
 fi
 
 mkdir -p "${WORKTREE}/${RESULTS_REL}" "${WORKTREE}/$(dirname "${EVIDENCE_DOC_REL}")" "${WORKTREE}/scripts/bench"
