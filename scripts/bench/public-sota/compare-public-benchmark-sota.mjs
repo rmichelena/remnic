@@ -276,13 +276,7 @@ export function comparePublicBenchmarkSota(result, targetMap) {
   assert(targets, `target map missing ${benchmark}`);
 
   if (benchmark === 'memory-arena') {
-    const report = compareMemoryArenaSota(result, targetMap);
-    return {
-      ...report,
-      checks: report.checks,
-      atOrAboveAllCheckedMetrics: report.atOrAboveAllCheckedMetrics,
-      sotaAllCheckedMetrics: report.sotaAllCheckedMetrics,
-    };
+    return compareMemoryArenaSota(result, targetMap);
   }
 
   const checks = {

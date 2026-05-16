@@ -81,7 +81,7 @@ function newestDiagnostics(diagDir, count) {
   let inFlight = 0;
   const parsedRecords = records.map((entry) => {
     try {
-      const record = { name: entry.name, ...JSON.parse(fs.readFileSync(entry.file, 'utf8')) };
+      const record = { ...JSON.parse(fs.readFileSync(entry.file, 'utf8')), name: entry.name };
       if (record.error || record.parseError) {
         errors += 1;
       }
