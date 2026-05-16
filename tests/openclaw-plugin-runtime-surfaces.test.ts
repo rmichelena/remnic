@@ -142,6 +142,7 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
       },
     ]);
     assert.deepEqual(manifest.activation, {
+      onStartup: false,
       onCommands: ["remnic"],
       onCapabilities: ["tool", "hook"],
     });
@@ -160,7 +161,7 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
     }
   });
 
-  test(`${manifestPath} declares pre-runtime auth metadata for OpenAI-backed memory extraction`, () => {
+  test(`${manifestPath} declares plugin-mode auth metadata without provider setup ownership`, () => {
     const manifest = readManifest(manifestPath);
     const packageJsonPath = manifestPath === "packages/shim-openclaw-engram/openclaw.plugin.json"
       ? "packages/shim-openclaw-engram/package.json"
@@ -169,17 +170,19 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
 
     assert.equal(manifest.name, "Remnic OpenClaw Plugin");
     assert.equal(manifest.version, packageJson.version);
-    assert.deepEqual(manifest.setup, {
-      providers: [
-        {
-          id: "openai",
-          authMethods: ["api-key"],
-          envVars: ["OPENAI_API_KEY"],
-        },
-      ],
-      requiresRuntime: false,
-    });
-    assert.deepEqual(manifest.providerAuthEnvVars?.openai, ["OPENAI_API_KEY"]);
+    assert.deepEqual(manifest.setup, { requiresRuntime: false });
+    assert.equal(
+      "providers" in (manifest.setup ?? {}),
+      false,
+      "Remnic must not claim OpenAI provider setup ownership",
+    );
+    assert.deepEqual(
+      manifest.providerAuthEnvVars,
+      {
+        openai: ["OPENAI_API_KEY"],
+      },
+      "providerAuthEnvVars remains compatibility metadata for pre-runtime OpenClaw auth probes",
+    );
     const expectedAuthChoice = manifest.id === "openclaw-engram"
       ? {
           provider: "openai",
@@ -375,7 +378,7 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
 }
 
 for (const expectation of OPENCLAW_PACKAGE_EXPECTATIONS) {
-  test(`${expectation.name} declares OpenClaw 2026.5.12-beta.4 package install metadata`, () => {
+  test(`${expectation.name} declares OpenClaw 2026.5.16-beta.2 package install metadata`, () => {
     const packageJson = readPackageJson(expectation.packageJsonPath);
     const openclaw = packageJson.openclaw ?? {};
 
@@ -387,16 +390,16 @@ for (const expectation of OPENCLAW_PACKAGE_EXPECTATIONS) {
       "OpenClaw 2026.5.12+ package discovery should have an explicit built runtime entrypoint",
     );
     assert.deepEqual(openclaw.compat, {
-      pluginApi: ">=2026.4.8",
+      pluginApi: ">=2026.5.16-beta.1",
     });
     assert.deepEqual(openclaw.build, {
-      openclawVersion: "2026.5.12-beta.4",
-      pluginSdkVersion: "2026.5.12-beta.4",
+      openclawVersion: "2026.5.16-beta.2",
+      pluginSdkVersion: "2026.5.16-beta.2",
     });
     assert.deepEqual(openclaw.install, {
       ...expectation.install,
       defaultChoice: "clawhub",
-      minHostVersion: ">=2026.4.8",
+      minHostVersion: ">=2026.5.16-beta.1",
     });
   });
 }
