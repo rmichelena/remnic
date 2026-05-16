@@ -93,6 +93,61 @@ test("doctor: CLI handles legacy openclaw-engram warn case", async () => {
   );
 });
 
+test("doctor: CLI distinguishes OpenClaw plugin mode from standalone launchd", async () => {
+  const src = await readCli();
+  assert.ok(
+    src.includes("Standalone launchd plist"),
+    "CLI doctor must include standalone launchd plist validation",
+  );
+  assert.ok(
+    src.includes("OpenClaw plugin mode does not require standalone launchd") ||
+      src.includes("not required for OpenClaw plugin mode"),
+    "CLI doctor must not require launchd when OpenClaw plugin mode is configured",
+  );
+});
+
+test("doctor: CLI validates stale launchd server binary paths", async () => {
+  const src = await readCli();
+  assert.ok(
+    src.includes("inspectLaunchdPlist"),
+    "CLI doctor must inspect the installed launchd plist",
+  );
+  assert.ok(
+    src.includes("remnic daemon install") && src.includes("remnic daemon uninstall"),
+    "CLI doctor must tell users how to rewrite or remove a stale standalone daemon",
+  );
+});
+
+test("doctor: standalone service checks use merged service path arrays", async () => {
+  const src = await readCli();
+  assert.ok(
+    src.includes("anyFileExists(LAUNCHD_PLIST_PATHS)"),
+    "CLI doctor must check all launchd candidate paths",
+  );
+  assert.ok(
+    src.includes("anyFileExists(SYSTEMD_UNIT_PATHS)"),
+    "CLI doctor must check all systemd candidate paths",
+  );
+  assert.equal(
+    src.includes("LEGACY_LAUNCHD_PLIST_PATH") || src.includes("LEGACY_SYSTEMD_UNIT_PATH"),
+    false,
+    "CLI doctor must not reference removed legacy path constants",
+  );
+});
+
+test("doctor: OPENAI_API_KEY failure message is unambiguous", async () => {
+  const src = await readCli();
+  assert.ok(
+    src.includes("not set (required for direct OpenAI-backed extraction)"),
+    "CLI doctor must make the failing OPENAI_API_KEY case explicit",
+  );
+  assert.equal(
+    src.includes("not set (required only for direct OpenAI-backed extraction)"),
+    false,
+    "CLI doctor must not imply OPENAI_API_KEY is optional when the check fails",
+  );
+});
+
 // ── Logic unit tests (pure config parsing) ───────────────────────────────────
 
 interface OpenclawConfig {

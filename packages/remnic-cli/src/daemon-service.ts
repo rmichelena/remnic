@@ -1,0 +1,249 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { findCommandOnPath as findCommandOnPathDefault } from "./daemon-service-candidates.js";
+import { expandTilde } from "./path-utils.js";
+
+export type ServerBinSource = "package" | "path" | "workspace-dist" | "workspace-source";
+
+export interface ServerBinResolution {
+  path: string;
+  source: ServerBinSource;
+  exists: boolean;
+  loadableByNode: boolean;
+}
+
+export interface ResolveServerBinOptions {
+  existsSync?: (candidate: string) => boolean;
+  findCommandOnPath?: (command: string, pathEnv?: string) => string | undefined;
+  moduleDir?: string;
+  packageResolve?: (specifier: string) => string;
+  pathEnv?: string;
+}
+
+export interface LaunchdPlistInspection {
+  installed: boolean;
+  ok: boolean;
+  warn?: boolean;
+  detail: string;
+  remediation?: string;
+}
+
+export interface InspectLaunchdPlistOptions {
+  existsSync?: (candidate: string) => boolean;
+  readFileSync?: (file: string, encoding: BufferEncoding) => string;
+}
+
+const thisModuleDir = path.dirname(fileURLToPath(import.meta.url));
+
+export function resolveServerBinDetails(options: ResolveServerBinOptions = {}): ServerBinResolution {
+  const existsSync = options.existsSync ?? fs.existsSync;
+  const findCommandOnPath = options.findCommandOnPath ?? findCommandOnPathDefault;
+  const moduleDir = options.moduleDir ?? thisModuleDir;
+  const packageResolve = options.packageResolve ?? resolveImportSpecifier;
+  const candidates: Array<{ path: string; source: ServerBinSource }> = [];
+
+  try {
+    const packageEntry = normalizeResolvedPath(packageResolve("@remnic/server"));
+    candidates.push({
+      path: packageServerBinFromEntry(packageEntry),
+      source: "package",
+    });
+  } catch {
+    // @remnic/server may not be installed beside @remnic/cli in older or
+    // development setups. Fall through to workspace-relative candidates.
+  }
+
+  candidates.push(
+    {
+      path: path.resolve(moduleDir, "../../remnic-server/dist/index.js"),
+      source: "workspace-dist",
+    },
+  );
+
+  const pathBin = findCommandOnPath("remnic-server", options.pathEnv);
+  if (pathBin) {
+    candidates.push({
+      path: pathBin,
+      source: "path",
+    });
+  }
+
+  candidates.push({
+    path: path.resolve(moduleDir, "../../remnic-server/src/index.ts"),
+    source: "workspace-source",
+  });
+
+  const selected = candidates.find((candidate) => existsSync(candidate.path)) ?? candidates[0] ?? {
+    path: path.resolve(moduleDir, "../../remnic-server/dist/index.js"),
+    source: "workspace-dist" as const,
+  };
+
+  const exists = existsSync(selected.path);
+  return {
+    ...selected,
+    exists,
+    loadableByNode: exists && !selected.path.endsWith(".ts"),
+  };
+}
+
+export function resolveServerBin(options: ResolveServerBinOptions = {}): string {
+  return resolveServerBinDetails(options).path;
+}
+
+export function inspectLaunchdPlist(
+  plistPath: string,
+  options: InspectLaunchdPlistOptions = {},
+): LaunchdPlistInspection {
+  const existsSync = options.existsSync ?? fs.existsSync;
+  const readFileSync = options.readFileSync ?? fs.readFileSync;
+
+  if (!existsSync(plistPath)) {
+    return {
+      installed: false,
+      ok: true,
+      warn: true,
+      detail: `${plistPath} (not installed)`,
+    };
+  }
+
+  let content: string;
+  try {
+    content = readFileSync(plistPath, "utf8");
+  } catch {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${plistPath} (cannot read)`,
+      remediation: "Fix the launchd plist permissions or run `remnic daemon install` to recreate it.",
+    };
+  }
+
+  const args = readLaunchdProgramArguments(content);
+  if (args.length === 0) {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${plistPath} (missing ProgramArguments)`,
+      remediation: "Run `remnic daemon install` to recreate the launchd service.",
+    };
+  }
+
+  const serverArg = findLaunchdServerArgument(args);
+  if (!serverArg) {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${plistPath} (ProgramArguments do not include a Remnic server binary)`,
+      remediation: "Run `remnic daemon install` to recreate the launchd service.",
+    };
+  }
+
+  const expandedServerArg = expandTilde(serverArg);
+  if (!path.isAbsolute(expandedServerArg)) {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${serverArg} (not an absolute path in ${plistPath})`,
+      remediation: "Run `remnic daemon install` so launchd uses an absolute Remnic server path.",
+    };
+  }
+
+  if (!existsSync(expandedServerArg)) {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${expandedServerArg} (missing; referenced by ${plistPath})`,
+      remediation:
+        "Run `remnic daemon install` to rewrite the launchd service, or `remnic daemon uninstall` if you only use the OpenClaw plugin.",
+    };
+  }
+
+  if (expandedServerArg.endsWith(".ts")) {
+    return {
+      installed: true,
+      ok: false,
+      detail: expandedServerArg + " (TypeScript source is not loadable by launchd node)",
+      remediation: "Build @remnic/server and run `remnic daemon install` again.",
+    };
+  }
+
+  if (!isRunnableServerNodePath(expandedServerArg)) {
+    return {
+      installed: true,
+      ok: false,
+      detail: `${expandedServerArg} (does not invoke the Remnic server CLI)`,
+      remediation: "Run `remnic daemon install` to rewrite the launchd service with the Remnic server bin path.",
+    };
+  }
+
+  return {
+    installed: true,
+    ok: true,
+    detail: `${expandedServerArg} (from ${plistPath})`,
+  };
+}
+
+export function readLaunchdProgramArguments(plistContent: string): string[] {
+  const programArguments = plistContent.match(
+    /<key>\s*ProgramArguments\s*<\/key>\s*<array>([\s\S]*?)<\/array>/,
+  );
+  if (!programArguments) return [];
+  const args: string[] = [];
+  const stringPattern = /<string>([\s\S]*?)<\/string>/g;
+  let match: RegExpExecArray | null;
+  while ((match = stringPattern.exec(programArguments[1] ?? "")) !== null) {
+    args.push(unescapeXml(match[1] ?? ""));
+  }
+  return args;
+}
+
+function findLaunchdServerArgument(args: string[]): string | undefined {
+  const explicit = args.find((arg) =>
+    /(?:^|[/\\])@remnic[/\\]server[/\\]/.test(arg) ||
+    /(?:^|[/\\])(?:remnic-server|engram-server)(?:\.js)?$/.test(arg) ||
+    /(?:^|[/\\])(?:remnic-server|engram-server)[/\\](?:dist|src)[/\\]index\.[jt]s$/.test(arg)
+  );
+  if (explicit) return explicit;
+
+  const [program, firstArg] = args;
+  if (program && firstArg && /(?:^|[/\\])node(?:\.exe)?$/.test(program)) {
+    return firstArg;
+  }
+  return undefined;
+}
+
+function resolveImportSpecifier(specifier: string): string {
+  const resolver = (import.meta as ImportMeta & { resolve?: (target: string) => string }).resolve;
+  if (!resolver) throw new Error("import.meta.resolve is unavailable");
+  return resolver.call(import.meta, specifier);
+}
+
+function normalizeResolvedPath(resolved: string): string {
+  if (resolved.startsWith("file:")) return fileURLToPath(resolved);
+  return resolved;
+}
+
+function packageServerBinFromEntry(packageEntry: string): string {
+  if (path.basename(packageEntry) === "index.js" && path.basename(path.dirname(packageEntry)) === "dist") {
+    return path.join(path.dirname(packageEntry), "bin", "remnic-server.js");
+  }
+  return packageEntry;
+}
+
+function isRunnableServerNodePath(candidate: string): boolean {
+  const normalized = candidate.replaceAll("\\", "/");
+  return (
+    /(?:^|\/)(?:remnic-server|engram-server)(?:\.js)?$/.test(normalized) ||
+    /(?:^|\/)(?:remnic-server|engram-server)\/(?:dist|src)\/index\.[jt]s$/.test(normalized)
+  );
+}
+
+function unescapeXml(input: string): string {
+  return input
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
