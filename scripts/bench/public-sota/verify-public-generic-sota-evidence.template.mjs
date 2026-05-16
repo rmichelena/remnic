@@ -174,11 +174,22 @@ function comparePersonaMem(result, targets) {
   return checks;
 }
 
+function memoryAgentBenchPercent(value) {
+  return value <= 1 ? value * 100 : value;
+}
+
 function compareMemoryAgentBench(result, targets) {
   const overall = result.results?.aggregates?.memoryagentbench_overall_score?.mean
     ?? result.results?.aggregates?.overall_score?.mean;
   if (typeof overall === 'number' && Number.isFinite(overall)) {
-    return [metricResult('memoryagentbench_overall_score', overall, finiteScore(targets.overallScore?.score, 'MemoryAgentBench overall target'))];
+    return [
+      metricResult(
+        'memoryagentbench_overall_score',
+        memoryAgentBenchPercent(overall),
+        finiteScore(targets.overallScore?.score, 'MemoryAgentBench overall target'),
+        { units: 'percent' },
+      ),
+    ];
   }
 
   const protocolReady = metricFromTasks(result, 'official_protocol_ready');
