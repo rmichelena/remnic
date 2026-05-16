@@ -141,21 +141,22 @@ function compareBeam(result, targets) {
 
 function comparePersonaMem(result, targets) {
   const checks = [];
+  const missing = [];
   for (const [split, targetEntry] of Object.entries(targets)) {
     const splitKey = normalizeSplit(split);
     const values = taskScores(result, 'mcq_accuracy', (task) =>
       normalizeSplit(task.details?.split ?? task.details?.contextWindow ?? task.details?.chatHistoryWindow) === splitKey ||
       (splitKey === '32k' && task.details?.chatHistory32kLink) ||
+      (splitKey === '128k' && task.details?.chatHistory128kLink) ||
       String(task.taskId ?? '').toLowerCase().includes(splitKey),
     );
-    if (values.length > 0) {
-      checks.push(metricResult(`personamem_${splitKey}_mcq_accuracy`, mean(values), finiteScore(targetEntry.score, `PersonaMem ${split} target`)));
+    if (values.length === 0) {
+      missing.push(split);
+      continue;
     }
+    checks.push(metricResult(`personamem_${splitKey}_mcq_accuracy`, mean(values), finiteScore(targetEntry.score, `PersonaMem ${split} target`)));
   }
-  if (checks.length === 0) {
-    const actual = aggregateMean(result, 'mcq_accuracy');
-    checks.push(metricResult('personamem_mcq_accuracy', actual, finiteScore(targets['32k']?.score, 'PersonaMem 32k target')));
-  }
+  assert(missing.length === 0, `PersonaMem result missing target split(s): ${missing.join(', ')}`);
   return checks;
 }
 
