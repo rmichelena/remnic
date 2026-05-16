@@ -163,20 +163,35 @@ function comparePersonaMem(result, targets) {
   return checks;
 }
 
-function memoryAgentBenchPercent(value) {
-  return value <= 1 ? value * 100 : value;
+function memoryAgentBenchPercent(metricName, aggregate) {
+  const value = finiteScore(aggregate?.mean, `MemoryAgentBench ${metricName}.mean`);
+  const units = String(aggregate?.units ?? aggregate?.unit ?? aggregate?.scale ?? '').toLowerCase();
+  if (units === 'percent' || units === 'percentage') {
+    return value;
+  }
+  if (units === 'fraction' || units === 'ratio' || units === 'proportion') {
+    return value * 100;
+  }
+  // Remnic benchmark aggregates are means of 0-1 task scores unless units say otherwise.
+  if (metricName === 'memoryagentbench_overall_score' || metricName === 'overall_score') {
+    return value * 100;
+  }
+  throw new Error(`MemoryAgentBench aggregate ${metricName} missing units`);
 }
 
 function compareMemoryAgentBench(result, targets) {
-  const overall = result.results?.aggregates?.memoryagentbench_overall_score?.mean
-    ?? result.results?.aggregates?.overall_score?.mean;
-  if (typeof overall === 'number' && Number.isFinite(overall)) {
+  const overallAggregate = [
+    ['memoryagentbench_overall_score', result.results?.aggregates?.memoryagentbench_overall_score],
+    ['overall_score', result.results?.aggregates?.overall_score],
+  ].find(([, aggregate]) => typeof aggregate?.mean === 'number' && Number.isFinite(aggregate.mean));
+  if (overallAggregate) {
+    const [metricName, aggregate] = overallAggregate;
     return [
       metricResult(
         'memoryagentbench_overall_score',
-        memoryAgentBenchPercent(overall),
+        memoryAgentBenchPercent(metricName, aggregate),
         finiteScore(targets.overallScore?.score, 'MemoryAgentBench overall target'),
-        { units: 'percent' },
+        { units: 'percent', sourceMetric: metricName },
       ),
     ];
   }
