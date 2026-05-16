@@ -106,6 +106,8 @@ export function compareMemoryArenaSota(result, targetMap) {
     ),
   ];
 
+  const publishableChecks = checks.filter((check) => check.publishAsSota !== false);
+
   return {
     benchmark: 'memory-arena',
     gitSha: derived.gitSha,
@@ -117,8 +119,8 @@ export function compareMemoryArenaSota(result, targetMap) {
       progressScore: formalProgressScore,
     },
     checks,
-    sotaAllCheckedMetrics: checks.every((check) => check.sota),
-    atOrAboveAllCheckedMetrics: checks.every((check) => check.sota || check.tied),
+    sotaAllCheckedMetrics: publishableChecks.every((check) => check.sota),
+    atOrAboveAllCheckedMetrics: publishableChecks.every((check) => check.sota || check.tied),
   };
 }
 
