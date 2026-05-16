@@ -53,7 +53,7 @@ fi
 comparison_path="${OUT_DIR}/memory-arena-sota-comparison.raw.json"
 node "${COMPARE_SCRIPT}" "${result_path}" "${TARGET_MAP}" | tee "${comparison_path}"
 
-if ! jq -e '.atOrAboveAllCheckedMetrics == true' "${comparison_path}" >/dev/null; then
+if ! jq -e '.sotaAllCheckedMetrics == true' "${comparison_path}" >/dev/null; then
   echo "not-sota: comparison saved to ${comparison_path}" >&2
   exit 4
 fi

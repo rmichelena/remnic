@@ -180,7 +180,7 @@ if (typeof derived.official.softProgressScore === 'number') {
 
 const recomputedComparison = compareMemoryArenaSota(pseudoRawResult, targetMap);
 compareJson(comparison, recomputedComparison, 'SOTA comparison');
-assert(comparison.atOrAboveAllCheckedMetrics === true, 'memory-arena comparison must be at or above all checked metrics');
+assert(comparison.sotaAllCheckedMetrics === true, 'memory-arena comparison must beat all checked metrics for SOTA publication');
 
 assert(diagnostics.runId === manifest.run?.id, 'diagnostics runId must match manifest');
 assert(diagnostics.benchmark === 'memory-arena', 'diagnostics benchmark must be memory-arena');
