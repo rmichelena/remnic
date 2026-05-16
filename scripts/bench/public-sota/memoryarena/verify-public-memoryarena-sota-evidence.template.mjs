@@ -202,7 +202,7 @@ function compareMemoryArenaSota(result, targets) {
   const formalProgressScore = (math.progressScore + phys.progressScore) / 2;
 
   const checks = [
-    verdict(derived.official.successRate, targets.allTaskAverageSuccessRate, 'all_task_average_success_rate'),
+    verdict(derived.official.successRate, targets.allTaskAverageSuccessRate?.score, 'all_task_average_success_rate'),
     verdict(bundled.successRate, targets.bundledWebShopping?.successRate, 'bundled_web_shopping_success_rate'),
     verdict(bundled.progressScore, targets.bundledWebShopping?.progressScore, 'bundled_web_shopping_progress_score'),
     verdict(travel.progressScore, targets.groupTravelPlanning?.progressScore, 'group_travel_planning_progress_score'),
