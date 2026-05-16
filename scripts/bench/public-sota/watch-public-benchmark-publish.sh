@@ -37,6 +37,15 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
 fi
 trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
+BASELINE_RUNS_FILE="$(mktemp "${TMP_ROOT}/remnic-${BENCHMARK}-publish-baseline.XXXXXX")"
+if [[ -z "${RUN_ID}" ]]; then
+  while IFS= read -r candidate; do
+    basename "${candidate}"
+  done < <(find "${RESULTS_ROOT}" -maxdepth 1 -type d -name "public-${BENCHMARK}-codex-*" -print 2>/dev/null) \
+    | sort > "${BASELINE_RUNS_FILE}"
+fi
+trap 'rm -f "${BASELINE_RUNS_FILE}"; rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
+
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${LOG_FILE}"
 }
@@ -46,7 +55,16 @@ current_run_id() {
     printf '%s\n' "${RUN_ID}"
     return
   fi
-  find "${RESULTS_ROOT}" -maxdepth 1 -type d -name "public-${BENCHMARK}-codex-*" -print 2>/dev/null | sort | tail -1 | xargs basename 2>/dev/null || true
+  local candidate
+  local run_basename
+  while IFS= read -r candidate; do
+    run_basename="$(basename "${candidate}")"
+    if ! grep -Fxq "${run_basename}" "${BASELINE_RUNS_FILE}"; then
+      printf '%s\n' "${run_basename}"
+      return
+    fi
+  done < <(find "${RESULTS_ROOT}" -maxdepth 1 -type d -name "public-${BENCHMARK}-codex-*" -print 2>/dev/null | sort -r)
+  return 0
 }
 
 while :; do
