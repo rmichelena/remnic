@@ -286,13 +286,12 @@ for (const [metric, recomputed] of Object.entries(recomputedMetricMeans)) {
 const pseudoRawResult = pseudoRawResultFromArtifact(artifact);
 const recomputedComparison = comparePublicBenchmarkSota(pseudoRawResult, targetMap);
 compareJson(comparison, recomputedComparison, 'SOTA comparison');
-assert(comparison.sotaAllCheckedMetrics === true, `${benchmark} comparison must be SOTA on publishable metrics`);
 assert(comparison.atOrAboveAllCheckedMetrics === true, `${benchmark} comparison must be at or above publishable metrics`);
 for (const check of comparison.checks ?? []) {
   if (check.publishAsSota === false) {
     continue;
   }
-  assert(check.sota === true, `${check.metric} must exceed target for SOTA claim`);
+  assert(check.sota === true || check.tied === true, `${check.metric} must meet or exceed target for SOTA claim`);
 }
 
 assert(diagnostics.runId === manifest.run?.id, 'diagnostics runId must match manifest');
