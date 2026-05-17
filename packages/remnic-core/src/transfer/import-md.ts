@@ -1,6 +1,12 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { fileExists, listFilesRecursive, toPosixRelPath, fromPosixRelPath } from "./fs-utils.js";
+import {
+  fileExists,
+  listFilesRecursive,
+  prepareSafeArchiveRoot,
+  resolveSafeArchiveTarget,
+  toPosixRelPath,
+} from "./fs-utils.js";
 import { parseConflictPolicy, type ConflictPolicy } from "./conflict-policy.js";
 
 export type { ConflictPolicy };
@@ -20,6 +26,11 @@ export async function importMarkdownBundle(opts: ImportMdOptions): Promise<{ wri
   const conflict = parseConflictPolicy(opts.conflict, "importMarkdownBundle");
   const fromAbs = path.resolve(opts.fromDir);
   const targetAbs = path.resolve(opts.targetMemoryDir);
+  const targetRoot = await prepareSafeArchiveRoot(
+    targetAbs,
+    "importMarkdownBundle",
+    "targetMemoryDir",
+  );
 
   const filesAbs = await listFilesRecursive(fromAbs);
   const writes: Array<{ abs: string; content: string }> = [];
@@ -28,7 +39,7 @@ export async function importMarkdownBundle(opts: ImportMdOptions): Promise<{ wri
   for (const abs of filesAbs) {
     const relPosix = toPosixRelPath(abs, fromAbs);
     if (relPosix === "manifest.json") continue;
-    const dstAbs = path.join(targetAbs, fromPosixRelPath(relPosix));
+    const dstAbs = await resolveSafeArchiveTarget(targetRoot, relPosix);
     const content = await readFile(abs, "utf-8");
 
     const exists = await fileExists(dstAbs);
