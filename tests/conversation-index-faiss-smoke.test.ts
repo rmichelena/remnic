@@ -40,6 +40,10 @@ function manifestPath(indexPath: string): string {
   return path.join(indexPath, "manifest.json");
 }
 
+function metadataPath(indexPath: string): string {
+  return path.join(indexPath, "metadata.jsonl");
+}
+
 test("faiss sidecar health command returns contract", () => {
   const indexPath = mkdtempSync(path.join(tmpdir(), "engram-faiss-health-"));
   try {
@@ -308,6 +312,57 @@ test("faiss sidecar rejects manifest dimension mismatches instead of silently re
 
     assert.equal(searchResponse.ok, false);
     assert.match(String(searchResponse.error), /dimension mismatch/i);
+  } finally {
+    rmSync(indexPath, { recursive: true, force: true });
+  }
+});
+
+test("faiss sidecar rejects mismatched index artifact counts", { skip: !hasFaissDeps() }, () => {
+  const indexPath = mkdtempSync(path.join(tmpdir(), "engram-faiss-stale-counts-"));
+  try {
+    const upsertResponse = runSidecar("upsert", {
+      modelId: "__hash__",
+      indexPath,
+      chunks: [
+        {
+          id: "chunk-1",
+          sessionKey: "session-1",
+          text: "count mismatch first chunk",
+          startTs: "2026-02-27T00:00:00.000Z",
+          endTs: "2026-02-27T00:00:05.000Z",
+        },
+        {
+          id: "chunk-2",
+          sessionKey: "session-1",
+          text: "count mismatch second chunk",
+          startTs: "2026-02-27T00:01:00.000Z",
+          endTs: "2026-02-27T00:01:05.000Z",
+        },
+      ],
+    });
+
+    assert.equal(upsertResponse.ok, true);
+
+    const metadataLines = readFileSync(metadataPath(indexPath), "utf-8").trim().split(/\r?\n/);
+    writeFileSync(metadataPath(indexPath), `${metadataLines[0]}\n`, "utf-8");
+
+    const healthResponse = runSidecar("health", {
+      modelId: "__hash__",
+      indexPath,
+    });
+    assert.equal(healthResponse.ok, true);
+    assert.equal(healthResponse.status, "degraded");
+    assert.match(String(healthResponse.error), /artifact count mismatch/i);
+
+    const searchResponse = runSidecar("search", {
+      modelId: "__hash__",
+      indexPath,
+      query: "count mismatch",
+      topK: 2,
+    });
+
+    assert.equal(searchResponse.ok, false);
+    assert.match(String(searchResponse.error), /artifact count mismatch/i);
   } finally {
     rmSync(indexPath, { recursive: true, force: true });
   }
