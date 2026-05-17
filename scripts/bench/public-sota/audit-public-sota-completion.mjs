@@ -28,7 +28,7 @@ function fetchBranchRef() {
     return;
   }
   const branch = branchRef.slice('origin/'.length);
-  execFileSync('git', ['-C', repoRoot, 'fetch', 'origin', branch], { stdio: ['ignore', 'ignore', 'ignore'] });
+  execFileSync('git', ['-C', repoRoot, 'fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { stdio: ['ignore', 'ignore', 'ignore'] });
 }
 
 const benchmarks = [
@@ -273,7 +273,7 @@ function ensureAuditWorktree() {
   try {
     if (fs.existsSync(auditWorktree)) {
       try {
-        execFileSync('git', ['-C', auditWorktree, 'fetch', 'origin', 'bench/public-matrix-codex'], { stdio: ['ignore', 'ignore', 'ignore'] });
+        fetchBranchRef();
         execFileSync('git', ['-C', auditWorktree, 'checkout', '--detach', branchRef], { stdio: ['ignore', 'ignore', 'ignore'] });
         return auditWorktree;
       } catch {
