@@ -22,6 +22,7 @@ test("codex-cli provider invokes codex exec in an isolated benchmark mode", asyn
       provider: "codex-cli",
       model: "gpt-5.5",
       apiKey: "test-api-key",
+      baseUrl: "https://gateway.example/v1",
       reasoningEffort: "xhigh",
       retryOptions: { timeoutMs: 1234 },
     },
@@ -90,6 +91,155 @@ test("codex-cli provider invokes codex exec in an isolated benchmark mode", asyn
   assert.equal(captured.env?.ENGRAM_MEMORY_DIR, undefined);
   assert.equal(captured.env?.OPENCLAW_ENGRAM_ACCESS_TOKEN, undefined);
   assert.equal(captured.env?.OPENAI_API_KEY, "test-api-key");
+  assert.equal(captured.env?.OPENAI_BASE_URL, "https://gateway.example/v1");
+});
+
+test("codex-cli provider does not expose unrelated process secrets to the child", async () => {
+  const seededEnv = {
+    ANTHROPIC_API_KEY: "anthropic-secret",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    GITHUB_TOKEN: "github-secret",
+    NPM_TOKEN: "npm-secret",
+    OPENAI_API_KEY: "openai-secret",
+    REMNIC_MEMORY_DIR: "/tmp/remnic",
+  };
+  const previousEnv = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(seededEnv)) {
+    previousEnv.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  let capturedEnv: NodeJS.ProcessEnv | undefined;
+  try {
+    const provider = createCodexCliProvider(
+      { provider: "codex-cli", model: "gpt-5.5" },
+      {
+        async runCodexCli(request) {
+          capturedEnv = request.env;
+          return {
+            status: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            outputText: "ok",
+          };
+        },
+      },
+    );
+
+    await provider.complete("hello");
+
+    assert.equal(capturedEnv?.OPENAI_API_KEY, "openai-secret");
+    assert.equal(capturedEnv?.ANTHROPIC_API_KEY, undefined);
+    assert.equal(capturedEnv?.AWS_SECRET_ACCESS_KEY, undefined);
+    assert.equal(capturedEnv?.GITHUB_TOKEN, undefined);
+    assert.equal(capturedEnv?.NPM_TOKEN, undefined);
+    assert.equal(capturedEnv?.REMNIC_MEMORY_DIR, undefined);
+  } finally {
+    for (const key of Object.keys(seededEnv)) {
+      const previous = previousEnv.get(key);
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  }
+});
+
+test("codex-cli provider preserves mixed-case Windows runtime env keys", () => {
+  const seededEnv = {
+    Path: "C:\\tools\\bin",
+    SystemRoot: "C:\\Windows",
+  };
+  const previousEnv = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(seededEnv)) {
+    previousEnv.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  try {
+    const env = __codexCliProviderTestHooks.buildIsolatedCodexEnv("test-api-key");
+
+    assert.equal(env.Path, "C:\\tools\\bin");
+    assert.equal(env.SystemRoot, "C:\\Windows");
+    assert.equal(env.OPENAI_API_KEY, "test-api-key");
+  } finally {
+    for (const key of Object.keys(seededEnv)) {
+      const previous = previousEnv.get(key);
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  }
+});
+
+test("codex-cli provider preserves networking env required by the child", () => {
+  const seededEnv = {
+    CODEX_HOME: "/tmp/codex-home",
+    HTTPS_PROXY: "http://proxy.example:8080",
+    no_proxy: "localhost,127.0.0.1",
+    NODE_EXTRA_CA_CERTS: "/etc/company-ca.pem",
+    SSL_CERT_FILE: "/etc/ssl/cert.pem",
+    SSL_CERT_DIR: "/etc/ssl/certs",
+  };
+  const previousEnv = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(seededEnv)) {
+    previousEnv.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  try {
+    const env = __codexCliProviderTestHooks.buildIsolatedCodexEnv("test-api-key");
+
+    assert.equal(env.CODEX_HOME, "/tmp/codex-home");
+    assert.equal(env.HTTPS_PROXY, "http://proxy.example:8080");
+    assert.equal(env.no_proxy, "localhost,127.0.0.1");
+    assert.equal(env.NODE_EXTRA_CA_CERTS, "/etc/company-ca.pem");
+    assert.equal(env.SSL_CERT_FILE, "/etc/ssl/cert.pem");
+    assert.equal(env.SSL_CERT_DIR, "/etc/ssl/certs");
+  } finally {
+    for (const key of Object.keys(seededEnv)) {
+      const previous = previousEnv.get(key);
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  }
+});
+
+test("codex-cli provider preserves OpenAI scoping env required by the child", () => {
+  const seededEnv = {
+    OPENAI_BASE_URL: "https://gateway.example/v1",
+    OPENAI_ORGANIZATION: "org-example",
+    OPENAI_PROJECT: "proj-example",
+  };
+  const previousEnv = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(seededEnv)) {
+    previousEnv.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  try {
+    const env = __codexCliProviderTestHooks.buildIsolatedCodexEnv("test-api-key");
+
+    assert.equal(env.OPENAI_BASE_URL, "https://gateway.example/v1");
+    assert.equal(env.OPENAI_ORGANIZATION, "org-example");
+    assert.equal(env.OPENAI_PROJECT, "proj-example");
+  } finally {
+    for (const key of Object.keys(seededEnv)) {
+      const previous = previousEnv.get(key);
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  }
 });
 
 test("codex-cli provider defaults reasoning effort to xhigh", async () => {

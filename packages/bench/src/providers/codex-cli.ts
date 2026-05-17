@@ -121,7 +121,53 @@ const CODEX_CLI_TRANSPORT_ENV = "REMNIC_BENCH_CODEX_CLI_TRANSPORT";
 const CODEX_CLI_VERSION_TIMEOUT_MS = 5_000;
 const CODEX_CLI_HEALTH_CACHE_TTL_MS = 30_000;
 const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";
+const OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL";
 const OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
+const CODEX_CLI_RUNTIME_ENV_ALLOWLIST = new Set([
+  "ALL_PROXY",
+  "APPDATA",
+  "CODEX_HOME",
+  "COLORTERM",
+  "COMSPEC",
+  "FORCE_COLOR",
+  "HOME",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LANG",
+  "LOCALAPPDATA",
+  "LOGNAME",
+  "NO_COLOR",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_PROXY",
+  "NUMBER_OF_PROCESSORS",
+  OPENAI_BASE_URL_ENV,
+  "OPENAI_ORGANIZATION",
+  "OPENAI_PROJECT",
+  "OS",
+  "PATH",
+  "PATHEXT",
+  "PROGRAMDATA",
+  "PROCESSOR_ARCHITECTURE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "SHELL",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+]);
 
 const activeCodexCliChildPids = new Set<number>();
 let codexCliParentCleanupInstalled = false;
@@ -430,7 +476,7 @@ class CodexCliProvider implements LlmProvider {
       workspacePath,
       timeoutMs: this.config.retryOptions?.timeoutMs,
       signal: opts.signal,
-      env: buildIsolatedCodexEnv(this.config.apiKey),
+      env: buildIsolatedCodexEnv(this.config.apiKey, this.config.baseUrl),
     };
   }
 }
@@ -592,22 +638,32 @@ function buildCodexCompletionPrompt(
   ].join("\n");
 }
 
-function buildIsolatedCodexEnv(apiKey?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (
-      key.startsWith("REMNIC_") ||
-      key.startsWith("ENGRAM_") ||
-      key.startsWith("OPENCLAW_") ||
-      key === "QMD_CONFIG_DIR"
-    ) {
-      delete env[key];
+function buildIsolatedCodexEnv(
+  apiKey?: string,
+  baseUrl?: string,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && isAllowedCodexRuntimeEnvKey(key)) {
+      env[key] = value;
     }
   }
-  if (apiKey) {
-    env.OPENAI_API_KEY = apiKey;
+
+  const resolvedApiKey = (apiKey ?? process.env[OPENAI_API_KEY_ENV] ?? "").trim();
+  if (resolvedApiKey.length > 0) {
+    env[OPENAI_API_KEY_ENV] = resolvedApiKey;
+  }
+  const resolvedBaseUrl = (baseUrl ?? process.env[OPENAI_BASE_URL_ENV] ?? "").trim();
+  if (resolvedBaseUrl.length > 0) {
+    env[OPENAI_BASE_URL_ENV] = resolvedBaseUrl;
   }
   return env;
+}
+
+function isAllowedCodexRuntimeEnvKey(key: string): boolean {
+  const normalized = key.toUpperCase();
+  return CODEX_CLI_RUNTIME_ENV_ALLOWLIST.has(normalized)
+    || normalized.startsWith("LC_");
 }
 
 async function startCodexCliDiagnostics(args: {
