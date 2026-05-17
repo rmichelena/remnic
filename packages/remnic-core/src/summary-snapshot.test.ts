@@ -574,6 +574,42 @@ test("runHourly keeps processing later sessions when snapshot upsert fails after
   );
 });
 
+test("hourly active session discovery reads every session key in a transcript file", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-active-sessions-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const transcriptDir = path.join(memoryDir, "transcripts", "other", "default");
+  await mkdir(transcriptDir, { recursive: true });
+  await writeFile(
+    path.join(transcriptDir, "2026-03-26.jsonl"),
+    [
+      JSON.stringify({
+        role: "user",
+        content: "first session",
+        timestamp: "2026-03-26T08:15:00.000Z",
+        sessionKey: "agent:first:main",
+      }),
+      JSON.stringify({
+        role: "user",
+        content: "second session",
+        timestamp: "2026-03-26T08:16:00.000Z",
+        sessionKey: "agent:second:main",
+      }),
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  const sessions = await (summarizer as any).getActiveSessions();
+  assert.deepEqual(
+    [...sessions].sort(),
+    ["agent:first:main", "agent:second:main"],
+  );
+});
+
 test("hourly transcript lookup ignores traversal channel paths", async () => {
   const memoryDir = await mkdtemp(
     path.join(os.tmpdir(), "engram-summary-transcript-traversal-"),

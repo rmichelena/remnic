@@ -697,37 +697,57 @@ Respond with valid JSON matching this schema:
 
   // Get list of active sessions from transcript directory
   private async getActiveSessions(): Promise<string[]> {
-    const transcriptDir = path.join(this.config.memoryDir, "transcripts");
+    const transcriptDir = await resolveSafeStoragePath(
+      this.config.memoryDir,
+      "transcripts",
+    ).catch(() => null);
+    if (transcriptDir === null) return [];
 
     try {
       const sessionKeys = new Set<string>();
       const typeEntries = await readdir(transcriptDir, { withFileTypes: true });
       for (const typeEnt of typeEntries) {
         if (!typeEnt.isDirectory()) continue;
-        const typeDir = path.join(transcriptDir, typeEnt.name);
+        const typeDir = await resolveSafeStoragePath(transcriptDir, typeEnt.name).catch(() => null);
+        if (typeDir === null) continue;
         const idEntries = await readdir(typeDir, { withFileTypes: true });
         for (const idEnt of idEntries) {
           if (!idEnt.isDirectory()) continue;
-          const chanDir = path.join(typeDir, idEnt.name);
+          const chanDir = await resolveSafeStoragePath(typeDir, idEnt.name).catch(() => null);
+          if (chanDir === null) continue;
           const files = (await readdir(chanDir)).filter((f) => f.endsWith(".jsonl")).sort();
-          const last = files[files.length - 1];
-          if (!last) continue;
-          try {
-            const raw = await readFile(path.join(chanDir, last), "utf-8");
-            const firstLine = raw.split("\n").find((l) => l.trim().length > 0);
-            if (!firstLine) continue;
-            const entry = JSON.parse(firstLine) as TranscriptEntry;
-            if (typeof entry.sessionKey === "string" && entry.sessionKey.length > 0) {
-              sessionKeys.add(entry.sessionKey);
-            }
-          } catch {
-            // ignore
+          for (const file of files) {
+            const transcriptPath = await resolveSafeStoragePath(chanDir, file).catch(() => null);
+            if (transcriptPath === null) continue;
+            await this.collectTranscriptSessionKeys(transcriptPath, sessionKeys);
           }
         }
       }
       return Array.from(sessionKeys);
     } catch {
       return [];
+    }
+  }
+
+  private async collectTranscriptSessionKeys(
+    transcriptPath: string,
+    sessionKeys: Set<string>,
+  ): Promise<void> {
+    try {
+      const raw = await readFile(transcriptPath, "utf-8");
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as TranscriptEntry;
+          if (typeof entry.sessionKey === "string" && entry.sessionKey.length > 0) {
+            sessionKeys.add(entry.sessionKey);
+          }
+        } catch {
+          // ignore malformed transcript lines
+        }
+      }
+    } catch {
+      // ignore unreadable transcript files
     }
   }
 
