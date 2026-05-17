@@ -16,7 +16,7 @@ const TARGET_MAP = {
   },
 };
 
-test("MemoryArena SOTA comparison treats zero-target ties as state of the art", () => {
+test("MemoryArena SOTA comparison treats zero-target equality as a tie, not SOTA", () => {
   const comparison = compareMemoryArenaSota(
     {
       meta: {
@@ -44,12 +44,9 @@ test("MemoryArena SOTA comparison treats zero-target ties as state of the art", 
   assert.equal(travelSuccess?.target, 0);
   assert.equal(travelSuccess?.actual, 0);
   assert.equal(travelSuccess?.tied, true);
-  assert.equal(travelSuccess?.sota, true);
-  assert.equal(
-    travelSuccess?.sotaCriterion,
-    "target is zero; matching the target ties state of the art",
-  );
-  assert.equal(comparison.sotaAllCheckedMetrics, true);
+  assert.equal(travelSuccess?.sota, false);
+  assert.equal("sotaCriterion" in (travelSuccess ?? {}), false);
+  assert.equal(comparison.sotaAllCheckedMetrics, false);
   assert.equal(comparison.atOrAboveAllCheckedMetrics, true);
 });
 

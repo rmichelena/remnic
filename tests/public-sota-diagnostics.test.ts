@@ -1691,7 +1691,8 @@ test("published SOTA verifier templates delegate to copied core verifier modules
   assert.match(memoryArenaComparator, /import \{ roundedJsonNumberReplacer \} from '\.\.\/comparison-json\.mjs'/);
   assert.doesNotMatch(memoryArenaComparator, /function roundedJsonNumberReplacer/);
   assert.match(memoryArenaComparator, /const publishableChecks = checks\.filter\(\(check\) => check\.publishAsSota !== false\)/);
-  assert.match(memoryArenaComparator, /sota: delta > 1e-9 \|\| zeroTargetTie/);
+  assert.match(memoryArenaComparator, /sota: delta > 1e-9/);
+  assert.doesNotMatch(memoryArenaComparator, /zeroTargetTie/);
 });
 
 test("active public run diagnostics picks latest finished record from full scan", async () => {
