@@ -1845,6 +1845,92 @@ test("active public run diagnostics ignore records before latest lifecycle start
   }
 });
 
+test("active public run progress ignores pre-restart checkpoints", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-active-run-restart-progress-"));
+  try {
+    const runDir = path.join(root, "public-memory-arena-codex-20260517T000000Z");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(
+      path.join(runDir, "status.tsv"),
+      [
+        "benchmark\tstatus\ttimestamp",
+        "memory-arena\tstart\t2026-05-17T00:00:00Z",
+        "memory-arena\trestart-after-reboot\t2026-05-17T02:00:00Z",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(runDir, "run.log"),
+      [
+        "  [memory-arena] 1850/4209 tasks (142365s elapsed, ~181535s remaining)",
+        "=== restart-after-reboot 2026-05-17T02:00:00Z ===",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const beforeCheckpoint = await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "bench", "public-sota", "check-active-public-run.mjs"), runDir],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+    const beforeStatus = JSON.parse(beforeCheckpoint.stdout);
+    assert.equal(beforeStatus.progress, null);
+    assert.equal(beforeStatus.progressSource.mode, "run-log-lines-since-lifecycle-start");
+    assert.equal(beforeStatus.progressSource.markerFound, true);
+    assert.equal(beforeStatus.progressSource.scannedLines, 0);
+
+    await writeFile(
+      path.join(runDir, "run.log"),
+      [
+        "  [memory-arena] 1850/4209 tasks (142365s elapsed, ~181535s remaining)",
+        "=== restart-after-reboot 2026-05-17T02:00:00Z ===",
+        "  [memory-arena] 50/4209 tasks (2400s elapsed, ~199632s remaining)",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const afterCheckpoint = await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "bench", "public-sota", "check-active-public-run.mjs"), runDir],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+    const afterStatus = JSON.parse(afterCheckpoint.stdout);
+    assert.equal(afterStatus.progress.completed, 50);
+    assert.equal(afterStatus.progress.total, 4209);
+    assert.equal(afterStatus.progress.remaining, 4159);
+    assert.equal(afterStatus.progressSource.scannedLines, 1);
+    assert.doesNotMatch(afterStatus.progress.line, /1850\/4209/);
+
+    await writeFile(
+      path.join(runDir, "run.log"),
+      [
+        "  [memory-arena] 1850/4209 tasks (142365s elapsed, ~181535s remaining)",
+        "=== restart-after-reboot 2026-05-17T02:00:00Z ===",
+        ...Array.from({ length: 5001 }, (_, index) => `post-restart detail ${index}`),
+        "  [memory-arena] 100/4209 tasks (4800s elapsed, ~197232s remaining)",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const longLogCheckpoint = await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "bench", "public-sota", "check-active-public-run.mjs"), runDir],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+    const longLogStatus = JSON.parse(longLogCheckpoint.stdout);
+    assert.equal(longLogStatus.progress.completed, 100);
+    assert.equal(longLogStatus.progress.total, 4209);
+    assert.equal(longLogStatus.progressSource.markerFound, true);
+    assert.equal(longLogStatus.progressSource.scannedLines, 5002);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("public SOTA evidence scripts share manifest hash identity helpers", async () => {
   const files = [
     path.join("scripts", "bench", "public-sota", "package-public-benchmark-evidence.mjs"),

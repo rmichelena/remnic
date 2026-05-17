@@ -30,6 +30,14 @@ function readLines(file, count) {
   return fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).slice(-count);
 }
 
+function readAllLines(file) {
+  if (!fs.existsSync(file)) {
+    return [];
+  }
+  const content = fs.readFileSync(file, 'utf8').trim();
+  return content ? content.split(/\r?\n/) : [];
+}
+
 function readStatusRows(file) {
   if (!fs.existsSync(file)) {
     return [];
@@ -235,6 +243,34 @@ function parseBenchmarkProgress(lines, benchmark) {
   };
 }
 
+function linesSinceLifecycleStart(lines, lifecycleStart) {
+  if (!lifecycleStart || lifecycleStart.status === 'start') {
+    return {
+      lines,
+      mode: 'all-run-log-lines',
+      markerFound: false,
+    };
+  }
+
+  const marker = `=== ${lifecycleStart.status} ${lifecycleStart.timestamp} ===`;
+  const markerIndex = lines.findLastIndex((line) => line.trim() === marker);
+  if (markerIndex < 0) {
+    return {
+      lines: [],
+      mode: 'run-log-lines-since-lifecycle-start',
+      markerFound: false,
+      marker,
+    };
+  }
+
+  return {
+    lines: lines.slice(markerIndex + 1),
+    mode: 'run-log-lines-since-lifecycle-start',
+    markerFound: true,
+    marker,
+  };
+}
+
 const runId = path.basename(resultsDir);
 const statusRows = readStatusRows(path.join(resultsDir, 'status.tsv'));
 const benchmark = benchmarkFromRun(runId, statusRows);
@@ -245,7 +281,9 @@ const monitorSessionName = runId === 'public-matrix-codex-bf9b2643-20260515T0529
 const jsonFiles = fs.existsSync(resultsDir)
   ? fs.readdirSync(resultsDir).filter((name) => name.endsWith('.json')).sort()
   : [];
-const runLogTail = readLines(path.join(resultsDir, 'run.log'), 500);
+const runLogLines = readAllLines(path.join(resultsDir, 'run.log'));
+const runLogTail = runLogLines.slice(-500);
+const progressLines = linesSinceLifecycleStart(runLogLines, lifecycleStart);
 const monitorPath = path.join(resultsDir, 'monitor-30m.log');
 const monitorStat = fs.existsSync(monitorPath) ? fs.statSync(monitorPath) : undefined;
 const summary = {
@@ -262,7 +300,13 @@ const summary = {
     : [],
   memoryArenaResultFiles: jsonFiles.filter((name) => name.startsWith('memory-arena-')),
   runLogTail: runLogTail.slice(-12),
-  progress: parseBenchmarkProgress(runLogTail, benchmark),
+  progress: parseBenchmarkProgress(progressLines.lines, benchmark),
+  progressSource: {
+    mode: progressLines.mode,
+    markerFound: progressLines.markerFound,
+    marker: progressLines.marker,
+    scannedLines: progressLines.lines.length,
+  },
   monitor: monitorStat
     ? {
         mtime: monitorStat.mtime.toISOString(),
