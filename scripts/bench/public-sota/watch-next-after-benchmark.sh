@@ -85,6 +85,11 @@ while :; do
   if [[ -n "${launch_output}" ]]; then
     while IFS= read -r line; do log "${line}"; done <<< "${launch_output}"
   fi
+  if [[ "${launch_status}" -eq 3 ]]; then
+    log "waiting: active public benchmark scoring session blocked ${NEXT} launch; retrying"
+    sleep "${INTERVAL_SECONDS}"
+    continue
+  fi
   if [[ "${launch_status}" -ne 0 ]]; then
     log "stopping: next benchmark launch helper exited ${launch_status}"
     exit "${launch_status}"

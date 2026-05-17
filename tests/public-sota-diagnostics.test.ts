@@ -372,6 +372,17 @@ test("public SOTA completion audit aligns MemoryAgentBench target freshness with
   assert.match(source, /expectedComparisonTargets\(item\.benchmark, comparison\.checks \?\? \[\]\)/);
 });
 
+test("chained public benchmark watcher retries active-session launch collisions", async () => {
+  const source = await readFile(
+    path.join("scripts", "bench", "public-sota", "watch-next-after-benchmark.sh"),
+    "utf8",
+  );
+
+  assert.match(source, /if \[\[ "\$\{launch_status\}" -eq 3 \]\]; then/);
+  assert.match(source, /waiting: active public benchmark scoring session blocked \$\{NEXT\} launch; retrying/);
+  assert.match(source, /sleep "\$\{INTERVAL_SECONDS\}"[\s\S]*continue[\s\S]*if \[\[ "\$\{launch_status\}" -ne 0 \]\]; then/);
+});
+
 function memoryArenaTask(
   domain: string,
   taskId: number,
