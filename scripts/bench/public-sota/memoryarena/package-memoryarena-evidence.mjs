@@ -153,7 +153,7 @@ async function main() {
   const comparison = compareMemoryArenaSota(result, targetMap);
   const dataset = await scanDataset(args['dataset-dir'], repoRoot, 'memory-arena', replacements);
   assertDatasetMatchesRunManifest(baseManifest, 'memory-arena', dataset);
-  const times = statusTimes(resultsDir, 'memory-arena');
+  const times = statusTimes(resultsDir, 'memory-arena', result.meta.timestamp);
   const startedAt = times.startedAt ?? result.meta.timestamp;
   const finishedAt = result.meta.timestamp;
   const generatedAt = new Date().toISOString();
@@ -224,7 +224,14 @@ async function main() {
   const manifestPath = path.join(outDir, 'MANIFEST.memory-arena.json');
   await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
-  const diagnostics = buildDiagnosticsSummary(resultsDir, manifest.run.id, 'memory-arena', startedAt, finishedAt, generatedAt);
+  const diagnostics = buildDiagnosticsSummary(
+    resultsDir,
+    manifest.run.id,
+    'memory-arena',
+    times.lifecycleStartedAt,
+    finishedAt,
+    generatedAt,
+  );
   assertCodexDiagnostics(diagnostics, result.results.tasks.length);
   const diagnosticsPath = path.join(outDir, 'memory-arena-diagnostics-summary.json');
   await fsp.writeFile(diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`, 'utf8');
