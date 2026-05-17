@@ -22,7 +22,7 @@ export interface ServerConfig {
   remnic: Record<string, unknown>;
   server: {
     host?: string;
-    port?: number;
+    port?: unknown;
     authToken?: string;
     principal?: string;
     maxBodyBytes?: number;
@@ -33,6 +33,19 @@ export interface ServerConfig {
 
 function readCompatEnv(primary: string, legacy: string): string | undefined {
   return process.env[primary] ?? process.env[legacy];
+}
+
+function parseServerPort(value: unknown, source: string): number {
+  const port = typeof value === "string" ? Number(value.trim()) : value;
+  if (
+    typeof port !== "number" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    throw new Error(`Invalid ${source}: expected an integer port from 1 to 65535`);
+  }
+  return port;
 }
 
 function resolveConfigPath(cliPath?: string): string {
@@ -70,7 +83,7 @@ function envOverrides(): Partial<ServerConfig["server"]> & { remnic?: Record<str
   const port = readCompatEnv("REMNIC_PORT", "ENGRAM_PORT");
   const host = readCompatEnv("REMNIC_HOST", "ENGRAM_HOST");
   const authToken = readCompatEnv("REMNIC_AUTH_TOKEN", "ENGRAM_AUTH_TOKEN");
-  if (port) overrides.port = parseInt(port, 10);
+  if (port) overrides.port = port;
   if (host) overrides.host = host;
   if (authToken) overrides.authToken = authToken;
 
@@ -128,16 +141,28 @@ export async function startServer(options?: {
     : { remnic: {}, server: {} };
 
   const env = envOverrides();
+  const { remnic: envRemnic, ...envServer } = env;
 
   // Merge: file < env < cli flags
-  const remnicConfig = { ...fileConfig.remnic, ...(env.remnic ?? {}) };
+  const remnicConfig = { ...fileConfig.remnic, ...(envRemnic ?? {}) };
+  const cliServerConfig: Partial<ServerConfig["server"]> = {};
+  if (options?.host !== undefined) cliServerConfig.host = options.host;
+  if (options?.port !== undefined) cliServerConfig.port = parseServerPort(options.port, "options.port");
+  if (options?.authToken !== undefined) cliServerConfig.authToken = options.authToken;
+
   const serverConfig = {
     ...fileConfig.server,
-    ...env,
-    ...(options?.host ? { host: options.host } : {}),
-    ...(options?.port ? { port: options.port } : {}),
-    ...(options?.authToken ? { authToken: options.authToken } : {}),
+    ...envServer,
+    ...cliServerConfig,
   };
+  const portSource = cliServerConfig.port !== undefined
+    ? "options.port"
+    : envServer.port !== undefined
+      ? "REMNIC_PORT/ENGRAM_PORT"
+      : "server.port";
+  const serverPort = serverConfig.port === undefined
+    ? 4318
+    : parseServerPort(serverConfig.port, portSource);
 
   const config = parseConfig(remnicConfig);
   const orchestrator = new Orchestrator(config);
@@ -158,7 +183,7 @@ export async function startServer(options?: {
   const httpServer = new EngramAccessHttpServer({
     service,
     host: serverConfig.host ?? "127.0.0.1",
-    port: serverConfig.port ?? 4318,
+    port: serverPort,
     authToken: authToken || undefined,
     authTokensGetter: () => getAllValidTokensCached(),
     principal: serverConfig.principal,
@@ -235,10 +260,10 @@ export async function startServer(options?: {
       }
 
       log.warn("QMD startup-sync retry: exhausted all retries; search index may be stale");
-    })().catch((err) => {
+    })().catch((err: unknown) => {
       log.warn(`QMD startup-sync retry: unexpected error: ${err}`);
     });
-  }).catch((err) => {
+  }).catch((err: unknown) => {
     log.warn(`Deferred init error: ${err}`);
   });
 
@@ -247,19 +272,47 @@ export async function startServer(options?: {
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
 
+const BOOLEAN_CLI_OPTIONS = new Set(["help"]);
+const VALUE_CLI_OPTIONS = new Set(["config", "host", "port", "auth-token"]);
+
 function parseCliArgs(argv: string[]): Record<string, string | undefined> {
   const args: Record<string, string | undefined> = {};
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
+    if (token === "-h") {
+      args.help = "true";
+      continue;
+    }
+
     if (token.startsWith("--")) {
-      const key = token.slice(2);
-      const next = argv[i + 1];
-      if (next && !next.startsWith("--")) {
-        args[key] = next;
-        i++;
-      } else {
-        args[key] = "true";
+      const [key, inlineValue] = token.slice(2).split(/=(.*)/s, 2);
+      if (!key) {
+        throw new Error(`Invalid option ${token}`);
       }
+
+      if (BOOLEAN_CLI_OPTIONS.has(key)) {
+        if (inlineValue !== undefined) {
+          throw new Error(`Option --${key} does not accept a value`);
+        }
+        args[key] = "true";
+        continue;
+      }
+
+      if (!VALUE_CLI_OPTIONS.has(key)) {
+        throw new Error(`Unknown option --${key}`);
+      }
+
+      const value = inlineValue ?? argv[i + 1];
+      if (
+        value === undefined ||
+        (inlineValue === undefined && value.startsWith("--")) ||
+        value.trim() === ""
+      ) {
+        throw new Error(`Missing value for --${key}`);
+      }
+
+      args[key] = value;
+      if (inlineValue === undefined) i++;
     }
   }
   return args;
@@ -296,7 +349,7 @@ Environment:
   const result = await startServer({
     configPath: args.config,
     host: args.host,
-    port: args.port ? parseInt(args.port, 10) : undefined,
+    port: args.port === undefined ? undefined : parseServerPort(args.port, "--port"),
     authToken: args["auth-token"],
   });
 

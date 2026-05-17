@@ -1,4 +1,9 @@
-export async function runServerBin(commandName) {
+export function shouldPrintHelpWithoutCli(argv) {
+  return argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h");
+}
+
+export async function runServerBin(commandName, options = {}) {
+  const argv = options.argv ?? process.argv.slice(2);
   const help = `
 ${commandName} - Standalone Remnic memory server
 
@@ -13,15 +18,16 @@ Options:
   --help              Show this help
 `;
 
-  if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log(help);
+  if (shouldPrintHelpWithoutCli(argv)) {
+    (options.stdout ?? console.log)(help);
     return;
   }
 
-  const { cliMain } = await import("../dist/index.js");
+  const loadCliMain = options.loadCliMain ?? (() => import("../dist/index.js"));
+  const { cliMain } = await loadCliMain();
 
-  await cliMain().catch((err) => {
-    process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+  await cliMain(argv).catch((err) => {
+    (options.stderr ?? process.stderr.write.bind(process.stderr))(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
+    (options.exit ?? process.exit)(1);
   });
 }
