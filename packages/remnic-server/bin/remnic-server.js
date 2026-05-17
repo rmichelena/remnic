@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-const commandName = process.argv[1]?.endsWith("engram-server") ? "engram-server" : "remnic-server";
+const commandName = /(?:^|[\\/])engram-server(?:\.js)?$/u.test(process.argv[1] ?? "")
+  ? "engram-server"
+  : "remnic-server";
 
 const help = `
 ${commandName} - Standalone Remnic memory server

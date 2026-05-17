@@ -54,6 +54,9 @@ function verifyBin(name, relativeTarget) {
   if (help.status !== 0) {
     fail(`bin.${name} --help exited ${help.status}: ${help.stderr || help.stdout}`);
   }
+  if (!help.stdout.includes(name)) {
+    fail(`bin.${name} --help must include the command name`);
+  }
 }
 
 const packageJson = readJson(packageJsonPath);
