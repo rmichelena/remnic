@@ -165,7 +165,7 @@ function publicTaskDetails(benchmark, task) {
   }
 }
 
-async function scanDataset(datasetDir, repoRoot, benchmark) {
+async function scanDataset(datasetDir, repoRoot, benchmark, replacements) {
   const root = path.resolve(datasetDir);
   const rootStat = await fsp.lstat(root);
   assert(rootStat.isDirectory() && !rootStat.isSymbolicLink(), `dataset root must be a real directory: ${datasetDir}`);
@@ -195,8 +195,8 @@ async function scanDataset(datasetDir, repoRoot, benchmark) {
   return {
     benchmark,
     status: 'hashed',
-    path: scrubPath(repoRoot, datasetDir),
-    realpath: scrubPath(repoRoot, await fsp.realpath(root)),
+    path: scrubPath(repoRoot, datasetDir, replacements),
+    realpath: scrubPath(repoRoot, await fsp.realpath(root), replacements),
     fileCount: files.length,
     totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
     sha256: sha256String(stableStringify(files)),
@@ -215,15 +215,53 @@ function assertDatasetMatchesRunManifest(baseManifest, benchmark, dataset) {
   assert(manifestDataset.totalBytes === dataset.totalBytes, `dataset byte count for ${benchmark} does not match the run manifest`);
 }
 
-function scrubPath(repoRoot, value) {
-  if (typeof value !== 'string') {
+function safeRealpath(value) {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function addPathReplacement(replacements, value, replacement) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return;
+  }
+  replacements.push([path.resolve(value), replacement]);
+  const realpath = safeRealpath(value);
+  if (realpath) {
+    replacements.push([realpath, replacement]);
+  }
+}
+
+function pathReplacements(repoRoot, resultsDir, outDir, datasetDir) {
+  const replacements = [];
+  addPathReplacement(replacements, repoRoot, '<repo-root>');
+  addPathReplacement(replacements, resultsDir, '<results-dir>');
+  addPathReplacement(replacements, outDir, '<out-dir>');
+  addPathReplacement(replacements, datasetDir, '<dataset-dir>');
+  addPathReplacement(replacements, os.homedir(), '~');
+  const seen = new Set();
+  return replacements
+    .filter(([needle]) => {
+      if (seen.has(needle)) {
+        return false;
+      }
+      seen.add(needle);
+      return true;
+    })
+    .sort(([left], [right]) => right.length - left.length);
+}
+
+function scrubPath(repoRoot, value, replacements = pathReplacements(repoRoot)) {
+  if (typeof value !== 'string' || value.length === 0) {
     return value;
   }
   const rel = path.relative(path.resolve(repoRoot), path.resolve(value));
   if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
     return rel.split(path.sep).join('/');
   }
-  return value.replace(os.homedir(), '~');
+  return replacements.reduce((out, [needle, replacement]) => out.replaceAll(needle, replacement), value);
 }
 
 function fallbackBenchmarkArgv(benchmark) {
@@ -239,14 +277,8 @@ function fallbackBenchmarkArgv(benchmark) {
   ];
 }
 
-function sanitizeArgv(argv, repoRoot, resultsDir, outDir, benchmark) {
+function sanitizeArgv(argv, replacements, benchmark) {
   const sourceArgv = Array.isArray(argv) && argv.length > 0 ? argv : fallbackBenchmarkArgv(benchmark);
-  const replacements = [
-    [path.resolve(repoRoot), '<repo-root>'],
-    [path.resolve(resultsDir), '<results-dir>'],
-    [path.resolve(outDir), '<out-dir>'],
-    [os.homedir(), '~'],
-  ];
   return sourceArgv.map((arg) => {
     if (typeof arg !== 'string') {
       return String(arg);
@@ -453,6 +485,7 @@ async function main() {
   const resultsDir = path.resolve(args['results-dir']);
   const repoRoot = path.resolve(args['repo-root']);
   const outDir = path.resolve(args['out-dir']);
+  const replacements = pathReplacements(repoRoot, resultsDir, outDir, args['dataset-dir']);
   const baseManifestPath = args['base-manifest'] ? path.resolve(args['base-manifest']) : path.join(resultsDir, 'MANIFEST.json');
   const baseManifest = fs.existsSync(baseManifestPath) ? readJson(baseManifestPath) : {};
   const targetMap = readJson(path.resolve(args['target-map'] ?? DEFAULT_TARGET_MAP));
@@ -469,7 +502,7 @@ async function main() {
   assertNoInvalidRawScores(result);
 
   const comparison = comparePublicBenchmarkSota(result, targetMap);
-  const dataset = await scanDataset(args['dataset-dir'], repoRoot, benchmark);
+  const dataset = await scanDataset(args['dataset-dir'], repoRoot, benchmark, replacements);
   assertDatasetMatchesRunManifest(baseManifest, benchmark, dataset);
   const generatedAt = new Date().toISOString();
   const times = statusTimes(resultsDir, benchmark, result.meta.timestamp);
@@ -514,7 +547,7 @@ async function main() {
     git,
     command: {
       cwd: '<repo-root>',
-      argv: sanitizeArgv(baseManifest.command?.argv, repoRoot, resultsDir, outDir, benchmark),
+      argv: sanitizeArgv(baseManifest.command?.argv, replacements, benchmark),
       envKeys: Array.isArray(baseManifest.command?.envKeys) ? [...baseManifest.command.envKeys].sort() : ['OPENAI_API_KEY'],
     },
     environment: {

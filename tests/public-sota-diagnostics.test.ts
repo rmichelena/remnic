@@ -669,6 +669,85 @@ test("MemoryArena public SOTA packager redacts local temp paths from public mani
   }
 });
 
+test("generic public SOTA packager redacts local temp paths from public manifests", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-generic-redact-");
+  try {
+    await writeValidDiagnostics(dirs.diagnosticsDir);
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\namemgym\tstart\t${STARTED_AT}\namemgym\tsuccess\t${FINISHED_AT}\n`,
+      "utf8",
+    );
+    const resultPath = path.join(dirs.resultsDir, "amemgym-result.json");
+    await writeAmemGymResult(resultPath);
+    await writeBaseManifest(dirs.resultsDir, "amemgym", resultPath);
+    const manifestPath = path.join(dirs.resultsDir, "MANIFEST.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.command = {
+      cwd: dirs.root,
+      argv: [
+        "bench",
+        "published",
+        "--name",
+        "amemgym",
+        "--dataset",
+        dirs.datasetDir,
+        "--results-dir",
+        dirs.resultsDir,
+        "--out",
+        dirs.outDir,
+      ],
+      envKeys: ["OPENAI_API_KEY"],
+    };
+    await writeJson(manifestPath, manifest);
+    const targetMapPath = path.join(dirs.root, "target-map.json");
+    await writeJson(targetMapPath, {
+      benchmarks: {
+        amemgym: {
+          targets: {
+            memoryAgent: { score: 0.5 },
+            nativeLlm: { score: 0.25 },
+          },
+        },
+      },
+    });
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.join("scripts", "bench", "public-sota", "package-public-benchmark-evidence.mjs"),
+        "--result", resultPath,
+        "--results-dir", dirs.resultsDir,
+        "--dataset-dir", dirs.datasetDir,
+        "--repo-root", process.cwd(),
+        "--out-dir", dirs.outDir,
+        "--target-map", targetMapPath,
+      ],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    const publicManifest = JSON.parse(await readFile(path.join(dirs.outDir, "MANIFEST.amemgym.json"), "utf8"));
+    const publicManifestBody = JSON.stringify(publicManifest);
+    assert.equal(publicManifest.datasets[0].path, "<dataset-dir>");
+    assert.equal(publicManifest.datasets[0].realpath, "<dataset-dir>");
+    assert.deepEqual(publicManifest.command.argv, [
+      "bench",
+      "published",
+      "--name",
+      "amemgym",
+      "--dataset",
+      "<dataset-dir>",
+      "--results-dir",
+      "<results-dir>",
+      "--out",
+      "<out-dir>",
+    ]);
+    assert.doesNotMatch(publicManifestBody, /remnic-public-sota-generic-redact-/);
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
 test("MemoryArena SOTA verifier rejects raw result git SHA drift", async () => {
   const dirs = await createRunDirs("remnic-public-sota-memoryarena-gitsha-verify-");
   try {
