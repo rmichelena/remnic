@@ -11,6 +11,7 @@ import {
   roundedJsonNumberReplacer,
 } from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
 import { manifestArtifactHashIdentity } from "../scripts/bench/public-sota/evidence-integrity.mjs";
+import { buildDiagnosticsSummary } from "../scripts/bench/public-sota/evidence-run-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -580,6 +581,39 @@ test("MemoryArena public SOTA packager rejects diagnostics that do not cover pub
         "--out-dir", dirs.outDir,
       ],
     );
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("diagnostics summary excludes records that started before benchmark start", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-diagnostics-window-");
+  try {
+    await writeJson(path.join(dirs.diagnosticsDir, "before-start.json"), {
+      runId: RUN_ID,
+      startedAt: "2026-05-15T23:59:50.000Z",
+      finishedAt: "2026-05-16T00:00:10.000Z",
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      result: { status: 0 },
+    });
+    await writeValidDiagnostics(dirs.diagnosticsDir);
+
+    const summary = buildDiagnosticsSummary(
+      dirs.resultsDir,
+      RUN_ID,
+      "amemgym",
+      STARTED_AT,
+      FINISHED_AT,
+      "2026-05-16T00:02:00.000Z",
+    );
+
+    assert.equal(summary?.beforeStart, 1);
+    assert.equal(summary?.checked, 1);
+    assert.equal(summary?.providers["codex-cli"], 1);
+    assert.equal(summary?.minStartedAt, "2026-05-16T00:00:10.000Z");
   } finally {
     await rm(dirs.root, { recursive: true, force: true });
   }
