@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, readFile } from "node:fs/promises";
 import { parseConfig } from "../src/config.js";
 import { Orchestrator } from "../src/orchestrator.js";
-import { getEvalHarnessStatus } from "../src/evals.js";
+import { getEvalHarnessStatus, recordEvalShadowRecall, type EvalShadowRecallRecord } from "../src/evals.js";
 
 async function waitForShadowCount(options: {
   memoryDir: string;
@@ -28,6 +28,40 @@ async function waitForShadowCount(options: {
       return status;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function makeShadowRecord(overrides: Partial<EvalShadowRecallRecord> = {}): EvalShadowRecallRecord {
+  return {
+    schemaVersion: 1,
+    traceId: "trace-001",
+    recordedAt: "2026-03-06T10:03:00.000Z",
+    sessionKey: "agent:main",
+    promptHash: "prompt-hash",
+    promptLength: 42,
+    retrievalQueryHash: "query-hash",
+    retrievalQueryLength: 19,
+    recallMode: "full",
+    recallResultLimit: 8,
+    source: "hot_qmd",
+    recalledMemoryCount: 1,
+    injected: true,
+    contextChars: 120,
+    memoryIds: ["mem-1"],
+    durationMs: 12,
+    ...overrides,
+  };
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -176,4 +210,48 @@ test("shadow recall recording includes no_recall decisions", async () => {
   assert.equal(status.latestShadow?.source, "none");
   assert.equal(status.latestShadow?.injected, false);
   assert.deepEqual(status.latestShadow?.memoryIds, []);
+});
+
+test("recordEvalShadowRecall writes valid records under the dated shadow directory", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-evals-shadow-safe-"));
+  const evalStoreDir = path.join(memoryDir, "evals");
+
+  const targetPath = await recordEvalShadowRecall({
+    memoryDir,
+    evalStoreDir,
+    record: makeShadowRecord(),
+  });
+
+  assert.equal(targetPath, path.join(evalStoreDir, "shadow", "2026-03-06", "trace-001.json"));
+  const written = JSON.parse(await readFile(targetPath, "utf8")) as EvalShadowRecallRecord;
+  assert.equal(written.traceId, "trace-001");
+  assert.equal(written.recordedAt, "2026-03-06T10:03:00.000Z");
+});
+
+test("recordEvalShadowRecall rejects path traversal in shadow path components", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-evals-shadow-traversal-"));
+  const evalStoreDir = path.join(memoryDir, "evals");
+  const escapePath = path.join(memoryDir, "escape.json");
+
+  await assert.rejects(
+    () =>
+      recordEvalShadowRecall({
+        memoryDir,
+        evalStoreDir,
+        record: makeShadowRecord({ traceId: "../escape" }),
+      }),
+    /traceId must be a safe path segment/,
+  );
+  assert.equal(await pathExists(escapePath), false);
+
+  await assert.rejects(
+    () =>
+      recordEvalShadowRecall({
+        memoryDir,
+        evalStoreDir,
+        record: makeShadowRecord({ recordedAt: "../../escape" }),
+      }),
+    /recordedAt must be a valid ISO timestamp/,
+  );
+  assert.equal(await pathExists(path.join(memoryDir, "escape", "trace-001.json")), false);
 });

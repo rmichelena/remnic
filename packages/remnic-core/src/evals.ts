@@ -277,6 +277,34 @@ function assertSafeBenchmarkId(benchmarkId: string): string {
   return assertSafePathSegment(benchmarkId, "benchmarkId");
 }
 
+const ISO_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function assertIsoTimestamp(value: unknown, field: string): string {
+  const timestamp = assertString(value, field);
+  if (!ISO_UTC_TIMESTAMP_RE.test(timestamp)) {
+    throw new Error(`${field} must be a valid ISO timestamp`);
+  }
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${field} must be a valid ISO timestamp`);
+  }
+  const normalized = new Date(parsed).toISOString();
+  if (normalized !== timestamp) {
+    throw new Error(`${field} must be a valid ISO timestamp`);
+  }
+  return normalized;
+}
+
+function assertPathWithin(rootDir: string, targetPath: string, field: string): void {
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    return;
+  }
+  throw new Error(`${field} must stay within ${rootDir}`);
+}
+
 export function validateEvalBenchmarkManifest(
   raw: unknown,
   options?: { memoryRedTeamBenchEnabled?: boolean },
@@ -497,8 +525,8 @@ export function validateEvalShadowRecallRecord(raw: unknown): EvalShadowRecallRe
 
   return {
     schemaVersion: 1,
-    traceId: assertString(raw.traceId, "traceId"),
-    recordedAt: assertString(raw.recordedAt, "recordedAt"),
+    traceId: assertSafePathSegment(assertString(raw.traceId, "traceId"), "traceId"),
+    recordedAt: assertIsoTimestamp(raw.recordedAt, "recordedAt"),
     sessionKey: assertString(raw.sessionKey, "sessionKey"),
     promptHash: assertString(raw.promptHash, "promptHash"),
     promptLength,
@@ -896,8 +924,10 @@ export async function recordEvalShadowRecall(options: {
   const rootDir = resolveEvalStoreDir(options.memoryDir, options.evalStoreDir);
   const validated = validateEvalShadowRecallRecord(options.record);
   const day = validated.recordedAt.slice(0, 10);
-  const shadowDir = path.join(rootDir, "shadow", day);
+  const shadowRoot = path.join(rootDir, "shadow");
+  const shadowDir = path.join(shadowRoot, day);
   const targetPath = path.join(shadowDir, `${validated.traceId}.json`);
+  assertPathWithin(shadowRoot, targetPath, "shadow recall record path");
   await mkdir(shadowDir, { recursive: true });
   await writeFile(targetPath, JSON.stringify(validated, null, 2), "utf-8");
   return targetPath;
