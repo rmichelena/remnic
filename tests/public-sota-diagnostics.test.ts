@@ -1519,6 +1519,19 @@ test("MemoryArena publish watcher ignores derived evidence JSON files", async ()
   assert.match(source, /waiting: MemoryArena completion helper exited \$\{complete_status\}; will retry[\s\S]*sleep "\$\{INTERVAL_SECONDS\}"[\s\S]*continue/);
 });
 
+test("public SOTA status maps MemoryArena publish watcher sessions with run suffixes", async () => {
+  const source = await readFile(
+    path.join("scripts", "bench", "public-sota", "status-public-sota-pipeline.mjs"),
+    "utf8",
+  );
+
+  assert.match(source, /function publishWatcherSessionFor\(benchmark\)/);
+  assert.match(source, /session === 'remnic-memoryarena-publish-watcher'/);
+  assert.match(source, /session\.startsWith\('remnic-memoryarena-publish-watcher-'\)/);
+  assert.match(source, /publishWatcher: publishWatcherSessionFor\(benchmark\)/);
+  assert.doesNotMatch(source, /publishWatcher: watcherSessions\.find\(\(session\) => session === `remnic-\$\{benchmark\}-publish-watcher`\)/);
+});
+
 test("generic public benchmark publish watcher keeps completion and staging evidence roots aligned", async () => {
   const source = await readFile(
     path.join("scripts", "bench", "public-sota", "watch-public-benchmark-publish.sh"),

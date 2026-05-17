@@ -10,31 +10,19 @@ import {
   sha256String,
   stableStringify,
 } from './evidence-integrity.mjs';
+import {
+  assert,
+  assertClose,
+  assertCodexDiagnostics,
+  assertPublicSafeArtifact,
+  compareJson,
+  readJson,
+} from './evidence-run-utils.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TARGET_MAP = path.join(scriptDir, 'current-target-map.json');
 
 const [evidenceDir = '.', targetMapPath = DEFAULT_TARGET_MAP, benchmarkArg] = process.argv.slice(2);
-
-function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-
-function assertClose(actual, expected, label) {
-  assert(typeof actual === 'number' && Number.isFinite(actual), `${label} must be finite`);
-  assert(typeof expected === 'number' && Number.isFinite(expected), `${label} expected must be finite`);
-  assert(Math.abs(actual - expected) < 1e-12, `${label}: expected ${expected}, got ${actual}`);
-}
-
-function compareJson(actual, expected, label) {
-  assert(stableStringify(actual) === stableStringify(expected), `${label} mismatch`);
-}
 
 function findManifest(dir, requestedBenchmark) {
   if (requestedBenchmark) {
@@ -114,52 +102,6 @@ function recomputeMetricMeans(artifact) {
   return out;
 }
 
-function assertPublicSafeArtifact(artifact) {
-  const forbiddenKeys = new Set([
-    'answer',
-    'answers',
-    'answerContext',
-    'context',
-    'expected',
-    'expectedAnswer',
-    'expectedAnswers',
-    'expectedChoiceIndex',
-    'gold',
-    'groundTruth',
-    'messages',
-    'modelAnswer',
-    'modelResponse',
-    'predictedMcqOption',
-    'prompt',
-    'question',
-    'recalledText',
-    'response',
-    'selectedChoiceIndex',
-    'text',
-    'transcript',
-  ]);
-
-  function walk(value, pathLabel) {
-    if (Array.isArray(value)) {
-      value.forEach((entry, index) => walk(entry, `${pathLabel}[${index}]`));
-      return;
-    }
-    if (!value || typeof value !== 'object') {
-      if (typeof value === 'string') {
-        assert(value.length <= 512, `${pathLabel} string is too long for public-safe score metadata`);
-        assert(!value.includes('/Users/'), `${pathLabel} contains local /Users path`);
-      }
-      return;
-    }
-    for (const [key, entry] of Object.entries(value)) {
-      assert(!forbiddenKeys.has(key), `${pathLabel}.${key} is not public-safe`);
-      walk(entry, `${pathLabel}.${key}`);
-    }
-  }
-
-  walk(artifact.perTaskScores, 'artifact.perTaskScores');
-}
-
 const manifestPath = findManifest(evidenceDir, benchmarkArg);
 const manifest = readJson(manifestPath);
 const benchmark = manifest.run?.selectedBenchmarks?.[0];
@@ -233,21 +175,7 @@ for (const check of comparison.checks ?? []) {
 
 assert(diagnostics.runId === manifest.run?.id, 'diagnostics runId must match manifest');
 assert(diagnostics.benchmark === benchmark, `diagnostics benchmark must be ${benchmark}`);
-assert(diagnostics.checked > 0, 'diagnostics must include at least one completed record');
-assert(diagnostics.complete === diagnostics.checked, 'diagnostics complete count must match checked records');
-assert(
-  diagnostics.checked >= artifact.perTaskScores.length,
-  `diagnostics checked count must cover published task count (${diagnostics.checked} < ${artifact.perTaskScores.length})`,
-);
-assert(diagnostics.inFlight === 0, 'diagnostics must have zero in-flight records');
-assert(diagnostics.afterCutoff === 0, 'diagnostics must have zero after-cutoff records');
-assert(diagnostics.invalidTimestamps === 0, 'diagnostics must have zero invalid timestamps');
-assert(diagnostics.errored === 0, 'diagnostics must have zero errors');
-assert(diagnostics.nonzero === 0, 'diagnostics must have zero nonzero exits');
-assert(diagnostics.providers?.['codex-cli'] === diagnostics.checked, 'diagnostics provider distribution must be all codex-cli');
-assert(diagnostics.models?.['gpt-5.5'] === diagnostics.checked, 'diagnostics model distribution must be all gpt-5.5');
-assert(diagnostics.reasoningEfforts?.xhigh === diagnostics.checked, 'diagnostics reasoning distribution must be all xhigh');
-assert(diagnostics.serviceTiers?.fast === diagnostics.checked, 'diagnostics service tier distribution must be all fast');
+assertCodexDiagnostics(diagnostics, artifact.perTaskScores.length);
 
 console.log(JSON.stringify({
   ok: true,

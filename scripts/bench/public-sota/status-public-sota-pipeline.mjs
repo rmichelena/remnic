@@ -107,6 +107,17 @@ try {
   memoryArenaStatus = undefined;
 }
 
+function publishWatcherSessionFor(benchmark) {
+  if (benchmark === 'memory-arena') {
+    return watcherSessions.find((session) => (
+      session === 'remnic-memoryarena-publish-watcher' ||
+      session.startsWith('remnic-memoryarena-publish-watcher-')
+    )) ?? null;
+  }
+  const prefix = `remnic-${benchmark}-publish-watcher`;
+  return watcherSessions.find((session) => session === prefix || session.startsWith(`${prefix}-`)) ?? null;
+}
+
 const benchmarkRows = benchmarks.map((benchmark) => {
   if (benchmark === 'ama-bench') {
     return {
@@ -129,7 +140,7 @@ const benchmarkRows = benchmarks.map((benchmark) => {
     resultCount: results.length,
     latestResult: results.at(-1) ?? null,
     status: statusRows ?? null,
-    publishWatcher: watcherSessions.find((session) => session === `remnic-${benchmark}-publish-watcher`) ?? null,
+    publishWatcher: publishWatcherSessionFor(benchmark),
   };
 });
 
