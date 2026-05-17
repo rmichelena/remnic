@@ -268,7 +268,14 @@ async function main() {
   await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   const comparisonPath = path.join(outDir, `${benchmark}-sota-comparison.json`);
   await fsp.writeFile(comparisonPath, `${JSON.stringify(comparison, null, 2)}\n`, 'utf8');
-  const diagnostics = buildDiagnosticsSummary(resultsDir, manifest.run.id, benchmark, times.startedAt, result.meta.timestamp, generatedAt);
+  const diagnostics = buildDiagnosticsSummary(
+    resultsDir,
+    manifest.run.id,
+    benchmark,
+    times.lifecycleStartedAt,
+    result.meta.timestamp,
+    generatedAt,
+  );
   assertCodexDiagnostics(diagnostics, result.results.tasks.length);
   const diagnosticsPath = path.join(outDir, `${benchmark}-diagnostics-summary.json`);
   await fsp.writeFile(diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`, 'utf8');

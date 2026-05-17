@@ -355,13 +355,18 @@ export function assertCodexDiagnostics(diagnostics, taskCount) {
 export function statusTimes(resultsDir, benchmark, fallback) {
   const statusPath = path.join(resultsDir, 'status.tsv');
   if (!fs.existsSync(statusPath)) {
-    return { startedAt: fallback, successAt: fallback };
+    return { startedAt: fallback, lifecycleStartedAt: fallback, successAt: fallback };
   }
   const body = fs.readFileSync(statusPath, 'utf8').trim();
   const rows = body ? body.split(/\r?\n/).slice(1).map((line) => line.split('\t')) : [];
   const matching = rows.filter(([name]) => name === benchmark);
+  const startedAt = matching.find(([, status]) => status === 'start')?.[2] ?? fallback;
+  const lifecycleStart = [...matching]
+    .reverse()
+    .find(([, status]) => status === 'start' || String(status).startsWith('restart'));
   return {
-    startedAt: matching.find(([, status]) => status === 'start')?.[2] ?? fallback,
+    startedAt,
+    lifecycleStartedAt: lifecycleStart?.[2] ?? startedAt,
     successAt: [...matching].reverse().find(([, status]) => status === 'success')?.[2] ?? fallback,
   };
 }

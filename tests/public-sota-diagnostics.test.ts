@@ -11,7 +11,7 @@ import {
   roundedJsonNumberReplacer,
 } from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
 import { manifestArtifactHashIdentity } from "../scripts/bench/public-sota/evidence-integrity.mjs";
-import { buildDiagnosticsSummary } from "../scripts/bench/public-sota/evidence-run-utils.mjs";
+import { buildDiagnosticsSummary, statusTimes } from "../scripts/bench/public-sota/evidence-run-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -325,6 +325,21 @@ async function writeValidDiagnostics(diagnosticsDir: string, count = 1): Promise
   }
 }
 
+async function writeInstantDiagnostics(diagnosticsDir: string, timestamp: string, count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await writeJson(path.join(diagnosticsDir, `instant-${String(index + 1).padStart(2, "0")}.json`), {
+      runId: RUN_ID,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      result: { status: 0 },
+    });
+  }
+}
+
 async function assertRejectsInvalidDiagnostics(
   script: string,
   args: string[],
@@ -614,6 +629,116 @@ test("diagnostics summary excludes records that started before benchmark start",
     assert.equal(summary?.checked, 1);
     assert.equal(summary?.providers["codex-cli"], 1);
     assert.equal(summary?.minStartedAt, "2026-05-16T00:00:10.000Z");
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("public evidence diagnostics use the latest restart lifecycle start", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-diagnostics-restart-window-");
+  try {
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      [
+        "benchmark\tstatus\ttimestamp",
+        "memory-arena\tstart\t2026-05-17T00:00:00.000Z",
+        "memory-arena\trestart-after-reboot\t2026-05-17T02:00:00.000Z",
+        "memory-arena\tsuccess\t2026-05-17T03:00:00.000Z",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeJson(path.join(dirs.diagnosticsDir, "pre-restart-failed.json"), {
+      runId: RUN_ID,
+      startedAt: "2026-05-17T01:59:00.000Z",
+      finishedAt: "2026-05-17T01:59:30.000Z",
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      error: "Codex CLI completion failed (signal SIGTERM)",
+    });
+    await writeJson(path.join(dirs.diagnosticsDir, "post-restart-ok.json"), {
+      runId: RUN_ID,
+      startedAt: "2026-05-17T02:00:10.000Z",
+      finishedAt: "2026-05-17T02:00:20.000Z",
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      result: { status: 0 },
+    });
+
+    const times = statusTimes(dirs.resultsDir, "memory-arena", FINISHED_AT);
+    assert.equal(times.startedAt, "2026-05-17T00:00:00.000Z");
+    assert.equal(times.lifecycleStartedAt, "2026-05-17T02:00:00.000Z");
+    assert.equal(times.successAt, "2026-05-17T03:00:00.000Z");
+
+    const summary = buildDiagnosticsSummary(
+      dirs.resultsDir,
+      RUN_ID,
+      "memory-arena",
+      times.lifecycleStartedAt,
+      times.successAt,
+      "2026-05-17T03:01:00.000Z",
+    );
+    assert.equal(summary?.beforeStart, 1);
+    assert.equal(summary?.checked, 1);
+    assert.equal(summary?.errored, 0);
+    assert.equal(summary?.complete, 1);
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("public evidence packagers keep artifact start separate from diagnostics restart window", async () => {
+  const generic = await readFile(
+    path.join("scripts", "bench", "public-sota", "package-public-benchmark-evidence.mjs"),
+    "utf8",
+  );
+  const memoryArena = await readFile(
+    path.join("scripts", "bench", "public-sota", "memoryarena", "package-memoryarena-evidence.mjs"),
+    "utf8",
+  );
+
+  assert.match(generic, /const artifact = buildArtifact\(result, dataset, comparison, times\.startedAt\)/);
+  assert.match(generic, /const filename = `\$\{times\.startedAt\.slice\(0, 10\)\}-\$\{benchmark\}-gpt-5\.5-real-/);
+  assert.match(generic, /buildDiagnosticsSummary\([\s\S]*times\.lifecycleStartedAt[\s\S]*result\.meta\.timestamp/);
+
+  assert.match(memoryArena, /const times = statusTimes\(resultsDir, 'memory-arena', result\.meta\.timestamp\)/);
+  assert.match(memoryArena, /const startedAt = times\.startedAt \?\? result\.meta\.timestamp/);
+  assert.match(memoryArena, /buildPublicArtifact\(result, dataset, derived, comparison, startedAt\)/);
+  assert.match(memoryArena, /buildDiagnosticsSummary\([\s\S]*times\.lifecycleStartedAt[\s\S]*finishedAt/);
+});
+
+test("MemoryArena public SOTA packager falls back when status.tsv is missing", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-memoryarena-no-status-");
+  try {
+    await writeInstantDiagnostics(dirs.diagnosticsDir, FINISHED_AT, 5);
+    const resultPath = path.join(dirs.resultsDir, "memory-arena-result.json");
+    await writeMemoryArenaResult(resultPath);
+    await writeBaseManifest(dirs.resultsDir, "memory-arena", resultPath);
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.join("scripts", "bench", "public-sota", "memoryarena", "package-memoryarena-evidence.mjs"),
+        "--result", resultPath,
+        "--results-dir", dirs.resultsDir,
+        "--dataset-dir", dirs.datasetDir,
+        "--repo-root", process.cwd(),
+        "--out-dir", dirs.outDir,
+      ],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    const manifest = JSON.parse(await readFile(path.join(dirs.outDir, "MANIFEST.memory-arena.json"), "utf8"));
+    const artifact = JSON.parse(await readFile(path.join(dirs.outDir, manifest.publicArtifacts[0].path), "utf8"));
+    const diagnostics = JSON.parse(await readFile(path.join(dirs.outDir, "memory-arena-diagnostics-summary.json"), "utf8"));
+
+    assert.equal(artifact.startedAt, FINISHED_AT);
+    assert.equal(diagnostics.checked, 5);
+    assert.equal(diagnostics.minStartedAt, FINISHED_AT);
   } finally {
     await rm(dirs.root, { recursive: true, force: true });
   }
