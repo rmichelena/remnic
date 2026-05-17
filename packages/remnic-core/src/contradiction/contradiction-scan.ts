@@ -165,7 +165,7 @@ export async function runContradictionScan(deps: ScanDependencies): Promise<Scan
     });
   }
 
-  const written = writePairs(memoryDir, queueEntries);
+  const written = writePairs(memoryDir, queueEntries, { cooldownDays: scanConfig.cooldownDays });
   const elapsed = Date.now() - startTime;
   log.info("[contradiction-scan] complete: %d queued in %dms", written.length, elapsed);
 

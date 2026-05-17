@@ -67,15 +67,37 @@ export async function executeResolution(
 
   switch (verb) {
     case "keep-a": {
-      const ok = await supersedeSafe(storage, idB, idA, "contradiction-resolution:keep-a");
+      const sourceB = await loadSourceSnapshot(storage, idB);
+      const ok = sourceB
+        ? await supersedeSafe(storage, idB, idA, "contradiction-resolution:keep-a")
+        : false;
       if (ok) { affectedIds.push(idB); message = `Kept ${idA}, superseded ${idB}`; }
-      else { supersedeFailed = true; message = `Supersede failed for ${idB}; not resolving`; }
+      else {
+        supersedeFailed = true;
+        const rolledBack = sourceB
+          ? await restoreMemorySnapshot(storage, sourceB, "contradiction-resolution:keep-a-rollback")
+          : false;
+        message = rolledBack
+          ? `Supersede failed for ${idB}; restored ${idB} and did not resolve`
+          : `Supersede failed for ${idB}; rollback incomplete for ${idB} and pair is not resolved`;
+      }
       break;
     }
     case "keep-b": {
-      const ok = await supersedeSafe(storage, idA, idB, "contradiction-resolution:keep-b");
+      const sourceA = await loadSourceSnapshot(storage, idA);
+      const ok = sourceA
+        ? await supersedeSafe(storage, idA, idB, "contradiction-resolution:keep-b")
+        : false;
       if (ok) { affectedIds.push(idA); message = `Kept ${idB}, superseded ${idA}`; }
-      else { supersedeFailed = true; message = `Supersede failed for ${idA}; not resolving`; }
+      else {
+        supersedeFailed = true;
+        const rolledBack = sourceA
+          ? await restoreMemorySnapshot(storage, sourceA, "contradiction-resolution:keep-b-rollback")
+          : false;
+        message = rolledBack
+          ? `Supersede failed for ${idA}; restored ${idA} and did not resolve`
+          : `Supersede failed for ${idA}; rollback incomplete for ${idA} and pair is not resolved`;
+      }
       break;
     }
     case "merge": {
@@ -224,7 +246,24 @@ function mergedMemoryCategory(sourceA: MemoryFile, sourceB: MemoryFile): MemoryC
     : "fact";
 }
 
-async function restoreMemorySnapshot(storage: StorageManager, memory: MemoryFile): Promise<boolean> {
+async function loadSourceSnapshot(storage: StorageManager, memoryId: string): Promise<MemoryFile | null> {
+  try {
+    return await storage.getMemoryById(memoryId);
+  } catch (err) {
+    log.warn(
+      "[contradiction-resolution] source snapshot failed for %s: %s",
+      memoryId,
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+async function restoreMemorySnapshot(
+  storage: StorageManager,
+  memory: MemoryFile,
+  reasonCode = "contradiction-resolution:merge-rollback",
+): Promise<boolean> {
   try {
     const current = await storage.getMemoryById(memory.frontmatter.id);
     if (!current) return false;
@@ -236,7 +275,7 @@ async function restoreMemorySnapshot(storage: StorageManager, memory: MemoryFile
     };
     return await storage.writeMemoryFrontmatter(current, restoredFrontmatter, {
       actor: "contradiction-resolution",
-      reasonCode: "contradiction-resolution:merge-rollback",
+      reasonCode,
     });
   } catch (err) {
     log.warn(
