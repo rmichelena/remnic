@@ -30,6 +30,7 @@ export type CommandChildProcess = {
   exitCode?: number | null;
   killed?: boolean;
   pid?: number;
+  signalCode?: NodeJS.Signals | null;
   stderr?: ProcessStream | null;
   stdin?: ProcessStream | null;
   stdout?: ProcessStream | null;

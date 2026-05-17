@@ -34,6 +34,7 @@ const QMD_PROBE_TIMEOUT_MS = 8_000;
 const QMD_UPDATE_BACKOFF_MS = 15 * 60 * 1000; // 15m
 const QMD_EMBED_BACKOFF_MS = 60 * 60 * 1000; // 60m
 const QMD_CLI_WARN_THROTTLE_MS = 15 * 60 * 1000; // 15m
+const QMD_DAEMON_TERMINATE_GRACE_MS = 1_000;
 const QMD_FALLBACK_PATHS = [
   path.join(os.homedir(), ".bun", "bin", "qmd"),
   "/usr/local/bin/qmd",
@@ -630,8 +631,8 @@ class QmdDaemonSession {
     if (opts?.child && this.child !== opts.child) {
       return;
     }
-    if (opts?.killChild && !target.killed) {
-      target.kill("SIGTERM");
+    if (opts?.killChild) {
+      terminateQmdDaemonChild(target);
     }
     this.initialized = false;
     for (const [, pending] of this.pendingRequests) {
@@ -644,6 +645,37 @@ class QmdDaemonSession {
     this.child = null;
     this.buffer = "";
   }
+}
+
+function hasExited(child: CommandChildProcess): boolean {
+  return (
+    (child.exitCode !== null && child.exitCode !== undefined) ||
+    (child.signalCode !== null && child.signalCode !== undefined)
+  );
+}
+
+function terminateQmdDaemonChild(child: CommandChildProcess): void {
+  if (hasExited(child)) return;
+
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearForceTimer = () => {
+    if (forceTimer) {
+      clearTimeout(forceTimer);
+      forceTimer = undefined;
+    }
+  };
+  child.once("close", clearForceTimer);
+
+  if (!child.killed) {
+    child.kill("SIGTERM");
+  }
+
+  forceTimer = setTimeout(() => {
+    if (!hasExited(child)) {
+      child.kill("SIGKILL");
+    }
+  }, QMD_DAEMON_TERMINATE_GRACE_MS);
+  forceTimer.unref?.();
 }
 
 /** Matches `#<hex-docid> <score>% <rest-of-line>` — rest is split in a second pass. */
