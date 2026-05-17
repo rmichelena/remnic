@@ -39,9 +39,71 @@ const SUPERMEMORY_DIR = path.join(
 );
 
 const args = process.argv.slice(2);
-const dryRun = args.includes("--dry-run");
-const sourceArg = args.find((a) => a.startsWith("--source="));
-const source = sourceArg ? sourceArg.split("=")[1] : "all";
+type MigrationSource = "context" | "supermemory" | "honcho" | "all";
+
+const VALID_SOURCES = new Set<MigrationSource>([
+  "context",
+  "supermemory",
+  "honcho",
+  "all",
+]);
+
+function parseSource(value: string | undefined): MigrationSource {
+  if (!value || value.startsWith("--")) {
+    throw new Error("--source requires a value: context|supermemory|honcho|all");
+  }
+  if (!VALID_SOURCES.has(value as MigrationSource)) {
+    throw new Error(
+      `--source must be one of context|supermemory|honcho|all; got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as MigrationSource;
+}
+
+function parseArgs(rawArgs: string[]): { dryRun: boolean; source: MigrationSource } {
+  let dryRun = false;
+  let source: MigrationSource = "all";
+  let sawSource = false;
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--source") {
+      if (sawSource) throw new Error("--source may only be provided once");
+      source = parseSource(rawArgs[i + 1]);
+      sawSource = true;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--source=")) {
+      if (sawSource) throw new Error("--source may only be provided once");
+      source = parseSource(arg.slice("--source=".length));
+      sawSource = true;
+      continue;
+    }
+
+    throw new Error(
+      arg.startsWith("--")
+        ? `Unknown argument: ${arg}`
+        : `Unexpected argument: ${arg}`,
+    );
+  }
+
+  return { dryRun, source };
+}
+
+let parsedArgs: { dryRun: boolean; source: MigrationSource };
+try {
+  parsedArgs = parseArgs(args);
+} catch (err) {
+  console.error(`Invalid arguments: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+
+const { dryRun, source } = parsedArgs;
 
 interface MigrationStats {
   contextFiles: number;
