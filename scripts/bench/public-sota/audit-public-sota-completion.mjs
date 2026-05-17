@@ -21,7 +21,7 @@ const repo = process.env.REPO ?? (() => {
 })();
 const branchRef = process.env.BRANCH_REF ?? 'origin/bench/public-matrix-codex';
 const auditWorktree = process.env.AUDIT_WORKTREE ?? path.join(os.tmpdir(), 'remnic-public-sota-completion-audit');
-const targetMapPath = process.env.TARGET_MAP ?? path.join(scriptDir, 'current-target-map.json');
+const targetMapPath = process.env.TARGET_MAP ?? path.join(os.tmpdir(), 'remnic-public-sota-audit-target-map.json');
 
 function fetchBranchRef() {
   if (!branchRef.startsWith('origin/')) {

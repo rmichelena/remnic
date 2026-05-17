@@ -457,6 +457,8 @@ test("public SOTA completion audit aligns MemoryAgentBench target freshness with
     "utf8",
   );
 
+  assert.match(source, /process\.env\.TARGET_MAP \?\? path\.join\(os\.tmpdir\(\), 'remnic-public-sota-audit-target-map\.json'\)/);
+  assert.doesNotMatch(source, /process\.env\.TARGET_MAP \?\? path\.join\(scriptDir, 'current-target-map\.json'\)/);
   assert.match(source, /function expectedComparisonTargets\(benchmark, checks = \[\]\)/);
   assert.match(source, /const comparisonMetrics = new Set\(checks\.map\(\(check\) => check\.metric\)\)/);
   assert.match(source, /comparisonMetrics\.has\('memoryagentbench_overall_score'\)/);
