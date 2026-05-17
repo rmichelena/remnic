@@ -1,24 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-
-function parseArgs(argv) {
-  const out = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (!arg.startsWith('--')) {
-      throw new Error(`Unexpected positional argument: ${arg}`);
-    }
-    const key = arg.slice(2);
-    const value = argv[index + 1];
-    if (!value || value.startsWith('--')) {
-      throw new Error(`Missing value for --${key}`);
-    }
-    out[key] = value;
-    index += 1;
-  }
-  return out;
-}
+import { parseArgs } from '../evidence-run-utils.mjs';
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
