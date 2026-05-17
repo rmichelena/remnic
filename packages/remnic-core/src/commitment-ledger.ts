@@ -198,6 +198,13 @@ function isDecayEligibleResolvedEntry(entry: CommitmentLedgerEntry, nowMs: numbe
   return Date.parse(reference) < decayCutoff;
 }
 
+function assertPositiveIntegerDays(value: number, keyName: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${keyName} must be an integer greater than or equal to 1; got ${String(value)}`);
+  }
+  return value;
+}
+
 async function findCommitmentLedgerEntryById(options: {
   memoryDir: string;
   commitmentLedgerDir?: string;
@@ -250,6 +257,7 @@ export async function applyCommitmentLedgerLifecycle(options: {
 
   const nowIso = assertIsoRecordedAt(options.now ?? new Date().toISOString(), "now");
   const nowMs = Date.parse(nowIso);
+  const decayDays = assertPositiveIntegerDays(options.decayDays, "decayDays");
   const { entryFiles } = await readCommitmentLedgerEntries(options);
 
   const transitionedToExpired: CommitmentLedgerEntry[] = [];
@@ -269,7 +277,7 @@ export async function applyCommitmentLedgerLifecycle(options: {
       continue;
     }
 
-    if (isDecayEligibleResolvedEntry(entry, nowMs, options.decayDays)) {
+    if (isDecayEligibleResolvedEntry(entry, nowMs, decayDays)) {
       await unlink(filePath);
       deletedResolved.push(entry);
     }

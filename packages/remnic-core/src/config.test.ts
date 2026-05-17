@@ -79,6 +79,20 @@ test("parseConfig activeRecallCacheTtlMs=500 preserves the explicit positive ttl
   assert.equal(result.activeRecallCacheTtlMs, 500);
 });
 
+test("parseConfig validates commitmentDecayDays as a positive integer", () => {
+  assert.equal(parseConfig({}).commitmentDecayDays, 90);
+  assert.equal(parseConfig({ commitmentDecayDays: 30 }).commitmentDecayDays, 30);
+  assert.equal(parseConfig({ commitmentDecayDays: "45" }).commitmentDecayDays, 45);
+
+  for (const value of [0, -1, 1.5, "1.5", "abc", Number.NaN, Infinity]) {
+    assert.throws(
+      () => parseConfig({ commitmentDecayDays: value }),
+      /commitmentDecayDays must be an integer greater than or equal to 1/,
+      `invalid commitmentDecayDays ${String(value)} should throw`,
+    );
+  }
+});
+
 test("parseConfig initGateTimeoutMs defaults to OpenClaw cold-start budget", () => {
   const result = parseConfig({});
   assert.equal(result.initGateTimeoutMs, 30_000);

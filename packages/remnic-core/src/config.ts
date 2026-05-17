@@ -1267,8 +1267,12 @@ export function parseConfig(raw: unknown): PluginConfig {
         : 120_000,
     sessionObserverBands,
     injectQuestions: cfg.injectQuestions === true,
-    commitmentDecayDays:
-      typeof cfg.commitmentDecayDays === "number" ? cfg.commitmentDecayDays : 90,
+    commitmentDecayDays: parseIntegerAtLeast(
+      cfg.commitmentDecayDays,
+      90,
+      1,
+      "commitmentDecayDays",
+    ),
     workspaceDir:
       typeof cfg.workspaceDir === "string" && cfg.workspaceDir.length > 0
         ? cfg.workspaceDir

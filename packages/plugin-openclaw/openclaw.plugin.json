@@ -1346,7 +1346,8 @@
         "description": "Include the most relevant open question in generated memory context"
       },
       "commitmentDecayDays": {
-        "type": "number",
+        "type": "integer",
+        "minimum": 1,
         "default": 90,
         "description": "Days before fulfilled/expired commitments are removed"
       },
@@ -4936,7 +4937,8 @@
     "commitmentDecayDays": {
       "label": "Commitment Decay (days)",
       "advanced": true,
-      "placeholder": "90"
+      "placeholder": "90",
+      "help": "Positive integer days before fulfilled/expired commitments are removed."
     },
     "workspaceDir": {
       "label": "Workspace Directory",
