@@ -52,7 +52,7 @@ while :; do
     --repo "${REPO}" \
     --head "${PREVIOUS_BRANCH}" \
     --base "${BASE_BRANCH}" \
-    --state all \
+    --state open \
     --json number,state \
     --jq 'sort_by(.number) | reverse | .[0].number // empty')"
 

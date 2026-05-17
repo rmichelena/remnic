@@ -28,7 +28,7 @@ pr_number="$(gh pr list \
   --repo "${REPO}" \
   --head "${MEMORYARENA_BRANCH}" \
   --base "${BASE_BRANCH}" \
-  --state all \
+  --state open \
   --json number,state \
   --jq 'sort_by(.number) | reverse | .[0].number // empty')"
 
