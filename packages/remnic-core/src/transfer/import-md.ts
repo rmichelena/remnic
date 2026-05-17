@@ -1,8 +1,9 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileExists, listFilesRecursive, toPosixRelPath, fromPosixRelPath } from "./fs-utils.js";
+import { parseConflictPolicy, type ConflictPolicy } from "./conflict-policy.js";
 
-export type ConflictPolicy = "skip" | "overwrite" | "dedupe";
+export type { ConflictPolicy };
 
 export interface ImportMdOptions {
   targetMemoryDir: string;
@@ -16,7 +17,7 @@ function normalizeForDedupe(s: string): string {
 }
 
 export async function importMarkdownBundle(opts: ImportMdOptions): Promise<{ written: number; skipped: number }> {
-  const conflict = opts.conflict ?? "skip";
+  const conflict = parseConflictPolicy(opts.conflict, "importMarkdownBundle");
   const fromAbs = path.resolve(opts.fromDir);
   const targetAbs = path.resolve(opts.targetMemoryDir);
 
@@ -61,4 +62,3 @@ export async function importMarkdownBundle(opts: ImportMdOptions): Promise<{ wri
 
   return { written: writes.length, skipped };
 }
-

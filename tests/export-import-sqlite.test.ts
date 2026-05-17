@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { writeFixtureMemoryDir } from "./transfer-fixtures.js";
@@ -55,6 +55,31 @@ test("v2.3 sqlite export/import round-trips basic files", async () => {
 
   const importedProfile = await readFile(path.join(targetDir, "profile.md"), "utf-8");
   assert.match(importedProfile, /Profile/);
+});
+
+test("sqlite import rejects invalid conflict policy without overwriting existing files", async () => {
+  const outDir = await mkdtemp(path.join(os.tmpdir(), "engram-sqlite-"));
+  const sqliteFile = path.join(outDir, "export.sqlite");
+  const targetDir = await mkdtemp(path.join(os.tmpdir(), "engram-import-"));
+  const targetPath = path.join(targetDir, "profile.md");
+
+  writeSqliteExport(sqliteFile, [
+    {
+      path: "profile.md",
+      content: "incoming profile\n",
+    },
+  ]);
+  await writeFile(targetPath, "original profile\n", "utf-8");
+
+  await assert.rejects(
+    importSqlite({
+      targetMemoryDir: targetDir,
+      fromFile: sqliteFile,
+      conflict: "replace" as any,
+    }),
+    /invalid conflict policy/i,
+  );
+  assert.equal(await readFile(targetPath, "utf-8"), "original profile\n");
 });
 
 test("sqlite import rejects records that escape the target directory", async () => {

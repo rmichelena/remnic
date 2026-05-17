@@ -6,9 +6,10 @@ import {
   prepareSafeArchiveRoot,
   resolveSafeArchiveTarget,
 } from "./fs-utils.js";
+import { parseConflictPolicy, type ConflictPolicy } from "./conflict-policy.js";
 import { openBetterSqlite3 } from "../runtime/better-sqlite.js";
 
-export type ConflictPolicy = "skip" | "overwrite" | "dedupe";
+export type { ConflictPolicy };
 
 export interface ImportSqliteOptions {
   targetMemoryDir: string;
@@ -22,7 +23,7 @@ function normalizeForDedupe(s: string): string {
 }
 
 export async function importSqlite(opts: ImportSqliteOptions): Promise<{ written: number; skipped: number }> {
-  const conflict = opts.conflict ?? "skip";
+  const conflict = parseConflictPolicy(opts.conflict, "importSqlite");
   const memDirAbs = path.resolve(opts.targetMemoryDir);
   const memoryRoot = await prepareSafeArchiveRoot(
     memDirAbs,

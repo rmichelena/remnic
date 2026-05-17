@@ -67,6 +67,30 @@ test("v2.3 json export/import round-trips (without transcripts by default)", asy
   assert.match(fact, /The user likes pianos/);
 });
 
+test("json import rejects invalid conflict policy without overwriting existing files", async () => {
+  const outDir = await mkdtemp(path.join(os.tmpdir(), "engram-export-"));
+  const targetDir = await mkdtemp(path.join(os.tmpdir(), "engram-import-"));
+  const targetPath = path.join(targetDir, "profile.md");
+
+  await writeJsonBundle(outDir, [
+    {
+      path: "profile.md",
+      content: "incoming profile\n",
+    },
+  ]);
+  await writeFile(targetPath, "original profile\n", "utf-8");
+
+  await assert.rejects(
+    importJsonBundle({
+      targetMemoryDir: targetDir,
+      fromDir: outDir,
+      conflict: "replace" as any,
+    }),
+    /invalid conflict policy/i,
+  );
+  assert.equal(await readFile(targetPath, "utf-8"), "original profile\n");
+});
+
 test("json import rejects memory records that escape the target directory", async () => {
   const outDir = await mkdtemp(path.join(os.tmpdir(), "engram-export-"));
   const targetDir = await mkdtemp(path.join(os.tmpdir(), "engram-import-"));
