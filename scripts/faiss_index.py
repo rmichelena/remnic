@@ -258,7 +258,7 @@ def validate_index_manifest(
         raise SidecarError("missing index manifest; rebuild the FAISS conversation index")
 
     version = manifest.get("version")
-    if not isinstance(version, int) or version != MANIFEST_VERSION:
+    if not isinstance(version, int) or isinstance(version, bool) or version != MANIFEST_VERSION:
         raise SidecarError("unsupported index manifest version; rebuild the FAISS conversation index")
 
     normalized_manifest_model_id = manifest.get("normalizedModelId")
@@ -274,8 +274,12 @@ def validate_index_manifest(
         )
 
     manifest_dimension = manifest.get("dimension")
-    if not isinstance(manifest_dimension, int) or manifest_dimension <= 0:
+    if not isinstance(manifest_dimension, int) or isinstance(manifest_dimension, bool) or manifest_dimension <= 0:
         raise SidecarError("index manifest missing vector dimension; rebuild the FAISS conversation index")
+
+    chunk_count = manifest.get("chunkCount")
+    if not isinstance(chunk_count, int) or isinstance(chunk_count, bool) or chunk_count < 0:
+        raise SidecarError("index manifest missing chunk count; rebuild the FAISS conversation index")
 
     if actual_dimension is not None and manifest_dimension != int(actual_dimension):
         raise SidecarError(
@@ -294,7 +298,7 @@ def validate_index_manifest(
         "modelId": manifest.get("modelId") if isinstance(manifest.get("modelId"), str) else "",
         "normalizedModelId": normalized_manifest_model_id,
         "dimension": manifest_dimension,
-        "chunkCount": manifest.get("chunkCount") if isinstance(manifest.get("chunkCount"), int) else 0,
+        "chunkCount": chunk_count,
         "updatedAt": manifest.get("updatedAt") if isinstance(manifest.get("updatedAt"), str) else "",
         "lastSuccessfulRebuildAt": (
             manifest.get("lastSuccessfulRebuildAt")
@@ -302,6 +306,19 @@ def validate_index_manifest(
             else ""
         ),
     }
+
+
+def validate_artifact_counts(index: Any, rows: list[dict[str, Any]], manifest: dict[str, Any]) -> None:
+    index_count = int(getattr(index, "ntotal", -1))
+    metadata_count = len(rows)
+    manifest_count = manifest["chunkCount"]
+
+    if index_count != metadata_count or index_count != int(manifest_count):
+        raise SidecarError(
+            "index artifact count mismatch "
+            f"(index={index_count}, metadata={metadata_count}, manifest={int(manifest_count)}); "
+            "rebuild the FAISS conversation index"
+        )
 
 
 def parse_chunks(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -387,8 +404,12 @@ def is_process_alive(pid: int) -> bool:
         return False
 
 
-def acquire_index_lock(index_dir: Path) -> Path:
-    lock_path = index_dir / ".index.lock"
+def acquire_lock(index_dir: Path, lock_name: str) -> Path:
+    lock_path = index_dir / lock_name
+    lock_label = lock_name.strip(".")
+    if lock_label.endswith(".lock"):
+        lock_label = lock_label[: -len(".lock")]
+    lock_label = lock_label.replace(".", " ")
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
 
     while True:
@@ -411,12 +432,24 @@ def acquire_index_lock(index_dir: Path) -> Path:
                 continue
 
             if time.monotonic() >= deadline:
-                raise SidecarError("timed out waiting for FAISS index lock")
+                raise SidecarError(f"timed out waiting for FAISS {lock_label} lock")
             time.sleep(0.05)
 
 
-def release_index_lock(lock_path: Path) -> None:
+def acquire_index_lock(index_dir: Path) -> Path:
+    return acquire_lock(index_dir, ".index.lock")
+
+
+def acquire_writer_lock(index_dir: Path) -> Path:
+    return acquire_lock(index_dir, ".writer.lock")
+
+
+def release_lock(lock_path: Path) -> None:
     lock_path.unlink(missing_ok=True)
+
+
+def release_index_lock(lock_path: Path) -> None:
+    release_lock(lock_path)
 
 
 def run_upsert(payload: dict[str, Any]) -> dict[str, Any]:
@@ -430,11 +463,12 @@ def run_upsert(payload: dict[str, Any]) -> dict[str, Any]:
     if not chunks:
         return {"ok": True, "upserted": 0}
 
-    lock_path = acquire_index_lock(index_dir)
+    meta_path = metadata_file(index_dir)
+    idx_path = index_file(index_dir)
+    manifest_path = manifest_file(index_dir)
+
+    writer_lock_path = acquire_writer_lock(index_dir)
     try:
-        meta_path = metadata_file(index_dir)
-        idx_path = index_file(index_dir)
-        manifest_path = manifest_file(index_dir)
         existing = read_metadata(meta_path)
         existing_manifest = read_manifest(manifest_path)
         merged = merge_rows(existing, chunks)
@@ -442,27 +476,31 @@ def run_upsert(payload: dict[str, Any]) -> dict[str, Any]:
         texts = [row["text"] for row in merged]
         vectors, _np, faiss = embed_texts(texts, model_id)
 
-        # Commit FAISS index first; metadata follows so we never point at missing vectors.
-        write_index(idx_path, vectors, faiss)
-        write_metadata(meta_path, merged)
-        preserved_rebuild_at = (
-            existing_manifest.get("lastSuccessfulRebuildAt")
-            if isinstance(existing_manifest, dict)
-            and isinstance(existing_manifest.get("lastSuccessfulRebuildAt"), str)
-            and existing_manifest.get("lastSuccessfulRebuildAt")
-            else None
-        )
-        write_manifest(
-            manifest_path,
-            build_manifest(
-                model_id,
-                int(vectors.shape[1]),
-                len(merged),
-                last_successful_rebuild_at=preserved_rebuild_at,
-            ),
-        )
+        lock_path = acquire_index_lock(index_dir)
+        try:
+            # Commit FAISS index first; metadata follows so we never point at missing vectors.
+            write_index(idx_path, vectors, faiss)
+            write_metadata(meta_path, merged)
+            preserved_rebuild_at = (
+                existing_manifest.get("lastSuccessfulRebuildAt")
+                if isinstance(existing_manifest, dict)
+                and isinstance(existing_manifest.get("lastSuccessfulRebuildAt"), str)
+                and existing_manifest.get("lastSuccessfulRebuildAt")
+                else None
+            )
+            write_manifest(
+                manifest_path,
+                build_manifest(
+                    model_id,
+                    int(vectors.shape[1]),
+                    len(merged),
+                    last_successful_rebuild_at=preserved_rebuild_at,
+                ),
+            )
+        finally:
+            release_index_lock(lock_path)
     finally:
-        release_index_lock(lock_path)
+        release_lock(writer_lock_path)
 
     return {"ok": True, "upserted": len(chunks)}
 
@@ -475,12 +513,8 @@ def run_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
     index_dir = ensure_index_dir(str(payload.get("indexPath", "")))
     chunks = parse_chunks(payload)
 
-    lock_path = acquire_index_lock(index_dir)
+    writer_lock_path = acquire_writer_lock(index_dir)
     try:
-        meta_path = metadata_file(index_dir)
-        idx_path = index_file(index_dir)
-        manifest_path = manifest_file(index_dir)
-
         if chunks:
             texts = [row["text"] for row in chunks]
             vectors, _np, faiss = embed_texts(texts, model_id)
@@ -489,11 +523,19 @@ def run_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
             vectors, faiss = build_empty_vectors(model_id)
             chunk_count = 0
 
-        write_index(idx_path, vectors, faiss)
-        write_metadata(meta_path, chunks)
-        write_manifest(manifest_path, build_manifest(model_id, int(vectors.shape[1]), chunk_count))
+        lock_path = acquire_index_lock(index_dir)
+        try:
+            meta_path = metadata_file(index_dir)
+            idx_path = index_file(index_dir)
+            manifest_path = manifest_file(index_dir)
+
+            write_index(idx_path, vectors, faiss)
+            write_metadata(meta_path, chunks)
+            write_manifest(manifest_path, build_manifest(model_id, int(vectors.shape[1]), chunk_count))
+        finally:
+            release_index_lock(lock_path)
     finally:
-        release_index_lock(lock_path)
+        release_lock(writer_lock_path)
 
     return {"ok": True, "rebuilt": len(chunks)}
 
@@ -514,19 +556,32 @@ def run_search(payload: dict[str, Any]) -> dict[str, Any]:
     idx_path = index_file(index_dir)
     manifest_path = manifest_file(index_dir)
 
-    rows = read_metadata(meta_path)
-    if not rows or not idx_path.exists():
+    lock_path = acquire_index_lock(index_dir)
+    try:
+        has_index = idx_path.exists()
+        has_metadata = meta_path.exists()
+        has_manifest = manifest_path.exists()
+        if not has_index and not has_metadata and not has_manifest:
+            return {"ok": True, "results": []}
+        if not has_index or not has_metadata or not has_manifest:
+            raise SidecarError("conversation index artifacts incomplete; rebuild the FAISS conversation index")
+
+        rows = read_metadata(meta_path)
+        _np, faiss = load_vector_dependencies()
+        index = faiss.read_index(str(idx_path))
+        manifest = validate_index_manifest(
+            read_manifest(manifest_path),
+            requested_model_id=model_id,
+            actual_dimension=int(index.d),
+        )
+        validate_artifact_counts(index, rows, manifest)
+    finally:
+        release_index_lock(lock_path)
+
+    if not rows:
         return {"ok": True, "results": []}
 
-    _np, faiss = load_vector_dependencies()
-    index = faiss.read_index(str(idx_path))
-    manifest = validate_index_manifest(
-        read_manifest(manifest_path),
-        requested_model_id=model_id,
-        actual_dimension=int(index.d),
-    )
-
-    query_vector, _np2, faiss2 = embed_texts([query], model_id)
+    query_vector, _np2, _faiss2 = embed_texts([query], model_id)
     query_dimension = int(query_vector.shape[1])
     if int(manifest["dimension"]) != query_dimension:
         raise SidecarError(
@@ -552,7 +607,7 @@ def run_search(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "results": results}
 
 
-def run_health(payload: dict[str, Any]) -> dict[str, Any]:
+def build_health_response(payload: dict[str, Any], *, include_metadata: bool = False) -> dict[str, Any]:
     index_dir = ensure_index_dir(str(payload.get("indexPath", "")))
     meta_path = metadata_file(index_dir)
     idx_path = index_file(index_dir)
@@ -562,6 +617,7 @@ def run_health(payload: dict[str, Any]) -> dict[str, Any]:
     error = ""
     model_id = normalize_model_id(str(payload.get("modelId", "")))
     manifest_details: dict[str, Any] | None = None
+    metadata_details: dict[str, Any] | None = None
 
     try:
         load_vector_dependencies()
@@ -574,53 +630,85 @@ def run_health(payload: dict[str, Any]) -> dict[str, Any]:
         status = "degraded"
         error = str(exc)
 
-    if idx_path.exists() or meta_path.exists() or manifest_path.exists():
-        if not idx_path.exists() or not meta_path.exists() or not manifest_path.exists():
-            if status == "ok":
-                status = "degraded"
-            if not error:
-                error = "conversation index artifacts incomplete; rebuild the FAISS conversation index"
-        else:
-            try:
-                _np, faiss = load_vector_dependencies()
-                index = faiss.read_index(str(idx_path))
-                manifest_details = validate_index_manifest(
-                    read_manifest(manifest_path),
-                    requested_model_id=model_id,
-                    actual_dimension=int(index.d),
-                )
-            except Exception as exc:
+    lock_path: Path | None = None
+    try:
+        lock_path = acquire_index_lock(index_dir)
+        has_index = idx_path.exists()
+        has_metadata = meta_path.exists()
+        has_manifest = manifest_path.exists()
+        rows: list[dict[str, Any]] | None = None
+
+        if has_index or has_metadata or has_manifest:
+            if not has_index or not has_metadata or not has_manifest:
                 if status == "ok":
                     status = "degraded"
                 if not error:
-                    error = str(exc)
-    elif status == "ok":
-        status = "degraded"
-        error = "conversation index artifacts missing; build the FAISS conversation index"
+                    error = "conversation index artifacts incomplete; rebuild the FAISS conversation index"
+            else:
+                try:
+                    rows = read_metadata(meta_path)
+                    _np, faiss = load_vector_dependencies()
+                    index = faiss.read_index(str(idx_path))
+                    manifest_details = validate_index_manifest(
+                        read_manifest(manifest_path),
+                        requested_model_id=model_id,
+                        actual_dimension=int(index.d),
+                    )
+                    validate_artifact_counts(index, rows, manifest_details)
+                except Exception as exc:
+                    if status == "ok":
+                        status = "degraded"
+                    if not error:
+                        error = str(exc)
+        elif status == "ok":
+            status = "degraded"
+            error = "conversation index artifacts missing; build the FAISS conversation index"
+
+        if include_metadata:
+            if rows is None:
+                rows = read_metadata(meta_path)
+            metadata_details = {
+                "chunkCount": len(rows),
+                "hasIndex": has_index,
+                "hasMetadata": has_metadata,
+                "hasManifest": has_manifest,
+            }
+    except Exception as exc:
+        if status == "ok":
+            status = "degraded"
+        if not error:
+            error = str(exc)
+        if include_metadata:
+            try:
+                chunk_count = len(read_metadata(meta_path))
+            except Exception:
+                chunk_count = 0
+            metadata_details = {
+                "chunkCount": chunk_count,
+                "hasIndex": idx_path.exists(),
+                "hasMetadata": meta_path.exists(),
+                "hasManifest": manifest_path.exists(),
+            }
+    finally:
+        if lock_path is not None:
+            release_index_lock(lock_path)
 
     response: dict[str, Any] = {"ok": True, "status": status}
     if error:
         response["error"] = error
     if manifest_details is not None:
         response["manifest"] = manifest_details
+    if metadata_details is not None:
+        response["metadata"] = metadata_details
     return response
 
 
-def run_inspect(payload: dict[str, Any]) -> dict[str, Any]:
-    index_dir = ensure_index_dir(str(payload.get("indexPath", "")))
-    meta_path = metadata_file(index_dir)
-    idx_path = index_file(index_dir)
-    manifest_path = manifest_file(index_dir)
+def run_health(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_health_response(payload)
 
-    health = run_health(payload)
-    rows = read_metadata(meta_path)
-    health["metadata"] = {
-        "chunkCount": len(rows),
-        "hasIndex": idx_path.exists(),
-        "hasMetadata": meta_path.exists(),
-        "hasManifest": manifest_path.exists(),
-    }
-    return health
+
+def run_inspect(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_health_response(payload, include_metadata=True)
 
 
 def main() -> int:
