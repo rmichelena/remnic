@@ -80,6 +80,7 @@ export function resolveServerBinDetails(options: ResolveServerBinOptions = {}): 
     candidates.push({
       path: pathBin,
       source: "path",
+      requiredPath: serverBinWrapperRequiredPath(pathBin),
     });
   }
 
@@ -110,6 +111,14 @@ function isCandidateReady(
   existsSync: (candidate: string) => boolean,
 ): boolean {
   return existsSync(candidate.path) && (candidate.requiredPath ? existsSync(candidate.requiredPath) : true);
+}
+
+function serverBinWrapperRequiredPath(candidate: string): string | undefined {
+  const filename = path.basename(candidate);
+  if (filename !== "remnic-server.js" && filename !== "engram-server.js") return undefined;
+  const binDir = path.dirname(candidate);
+  if (path.basename(binDir) !== "bin") return undefined;
+  return path.join(path.dirname(binDir), "dist", "index.js");
 }
 
 export function resolveServerBin(options: ResolveServerBinOptions = {}): string {

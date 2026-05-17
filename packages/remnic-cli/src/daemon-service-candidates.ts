@@ -117,7 +117,18 @@ export function resolveServerBinPath(importMetaDir: string, pathEnv = process.en
   if (fs.existsSync(distPath)) return distPath;
 
   const pathBin = findCommandOnPath("remnic-server", pathEnv);
-  if (pathBin) return pathBin;
+  if (pathBin) {
+    const requiredPath = serverBinWrapperRequiredPath(pathBin);
+    if (!requiredPath || fs.existsSync(requiredPath)) return pathBin;
+  }
 
   return path.resolve(importMetaDir, "../../remnic-server/src/index.ts");
+}
+
+function serverBinWrapperRequiredPath(candidate: string): string | undefined {
+  const filename = path.basename(candidate);
+  if (filename !== "remnic-server.js" && filename !== "engram-server.js") return undefined;
+  const binDir = path.dirname(candidate);
+  if (path.basename(binDir) !== "bin") return undefined;
+  return path.join(path.dirname(binDir), "dist", "index.js");
 }
