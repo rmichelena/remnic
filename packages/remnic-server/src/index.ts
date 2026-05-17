@@ -7,9 +7,9 @@
  * and starts the HTTP access server with MCP endpoint — no OpenClaw required.
  *
  * Usage:
- *   npx remnic-server
- *   npx remnic-server --config ./my-remnic.json
- *   npx remnic-server --port 4320
+ *   npx --package @remnic/server remnic-server
+ *   npx --package @remnic/server remnic-server --config ./my-remnic.json
+ *   npx --package @remnic/server remnic-server --port 4320
  */
 
 import fs from "node:fs";

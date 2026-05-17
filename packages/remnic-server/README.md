@@ -26,8 +26,8 @@ Both interfaces connect to the same [`@remnic/core`](https://www.npmjs.com/packa
 Run the standalone server:
 
 ```bash
-npx remnic-server --help
-npx remnic-server --port 4318
+npx --package @remnic/server remnic-server --help
+npx --package @remnic/server remnic-server --port 4318
 ```
 
 The package also ships the legacy `engram-server` binary for compatibility.
