@@ -10,6 +10,7 @@ import {
   summarySnapshotPath,
   writeSummarySnapshot,
 } from "./summary-snapshot.js";
+import { encodeStoragePathSegment } from "./storage-paths.js";
 import type { PluginConfig } from "./types.js";
 
 function makeConfig(memoryDir: string): PluginConfig {
@@ -189,6 +190,79 @@ test("readRecent prefers the materialized summary snapshot over markdown fallbac
   );
 });
 
+test("saveSummary encodes traversal-looking session keys before writing markdown", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-markdown-traversal-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "../escape";
+  const dateStr = "2026-03-26";
+  const summary = {
+    hour: `${dateStr}T08:00:00.000Z`,
+    sessionKey,
+    bullets: ["safe markdown bullet"],
+    turnCount: 1,
+    generatedAt: "2026-03-26T08:15:00.000Z",
+  };
+
+  await summarizer.saveSummary(summary);
+
+  const encodedPath = path.join(
+    memoryDir,
+    "summaries",
+    "hourly",
+    encodeStoragePathSegment(sessionKey, "session"),
+    `${dateStr}.md`,
+  );
+  const unsafePath = path.join(memoryDir, "summaries", "escape", `${dateStr}.md`);
+
+  const markdown = await readFile(encodedPath, "utf-8");
+  assert.match(markdown, /safe markdown bullet/);
+  await assert.rejects(readFile(unsafePath, "utf-8"), /ENOENT/);
+});
+
+test("saveSummary encodes slash-containing session keys before writing markdown", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-markdown-slash-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "thread/a";
+  const dateStr = "2026-03-26";
+  const summary = {
+    hour: `${dateStr}T08:00:00.000Z`,
+    sessionKey,
+    bullets: ["slash markdown bullet"],
+    turnCount: 1,
+    generatedAt: "2026-03-26T08:15:00.000Z",
+  };
+
+  await summarizer.saveSummary(summary);
+
+  const encodedPath = path.join(
+    memoryDir,
+    "summaries",
+    "hourly",
+    encodeStoragePathSegment(sessionKey, "session"),
+    `${dateStr}.md`,
+  );
+  const legacyPath = path.join(
+    memoryDir,
+    "summaries",
+    "hourly",
+    "thread",
+    "a",
+    `${dateStr}.md`,
+  );
+
+  const markdown = await readFile(encodedPath, "utf-8");
+  assert.match(markdown, /slash markdown bullet/);
+  await assert.rejects(readFile(legacyPath, "utf-8"), /ENOENT/);
+});
+
 test("readRecent backfills a summary snapshot from the full parsed markdown history", async () => {
   const memoryDir = await mkdtemp(
     path.join(os.tmpdir(), "engram-summary-backfill-"),
@@ -237,6 +311,99 @@ test("readRecent backfills a summary snapshot from the full parsed markdown hist
   assert.deepEqual(
     widerRecent.map((summary) => summary.bullets),
     [["newer markdown bullet"], ["older markdown bullet"]],
+  );
+});
+
+test("readRecent keeps a safe nested legacy markdown fallback", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-markdown-legacy-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "thread/a";
+  const dateStr = "2026-03-24";
+  const mdDir = path.join(memoryDir, "summaries", "hourly", "thread", "a");
+  await mkdir(mdDir, { recursive: true });
+
+  await writeFile(
+    path.join(mdDir, `${dateStr}.md`),
+    [
+      `# Hourly Summaries — ${dateStr}`,
+      "",
+      `*Session: ${sessionKey}*`,
+      "",
+      "## 14:00",
+      "",
+      "- legacy slash markdown bullet",
+      "  *(4 turns)*",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  assert.equal(await readSummarySnapshot(memoryDir, sessionKey), null);
+
+  const recent = await summarizer.readRecent(sessionKey, 9999);
+  assert.deepEqual(
+    recent.map((summary) => summary.bullets),
+    [["legacy slash markdown bullet"]],
+  );
+  assert.deepEqual(
+    (await readSummarySnapshot(memoryDir, sessionKey))?.map(
+      (summary) => summary.bullets,
+    ),
+    [["legacy slash markdown bullet"]],
+  );
+});
+
+test("readRecent does not duplicate hours during encoded markdown migration", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-markdown-migration-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "thread/a";
+  const dateStr = "2026-03-24";
+  const encodedDir = path.join(
+    memoryDir,
+    "summaries",
+    "hourly",
+    encodeStoragePathSegment(sessionKey, "session"),
+  );
+  const legacyDir = path.join(memoryDir, "summaries", "hourly", "thread", "a");
+  await mkdir(encodedDir, { recursive: true });
+  await mkdir(legacyDir, { recursive: true });
+
+  const markdown = (bullet: string) =>
+    [
+      `# Hourly Summaries — ${dateStr}`,
+      "",
+      `*Session: ${sessionKey}*`,
+      "",
+      "## 14:00",
+      "",
+      `- ${bullet}`,
+      "  *(4 turns)*",
+      "",
+    ].join("\n");
+
+  await writeFile(
+    path.join(encodedDir, `${dateStr}.md`),
+    markdown("encoded markdown bullet"),
+    "utf-8",
+  );
+  await writeFile(
+    path.join(legacyDir, `${dateStr}.md`),
+    markdown("legacy markdown bullet"),
+    "utf-8",
+  );
+
+  const recent = await summarizer.readRecent(sessionKey, 9999);
+  assert.deepEqual(
+    recent.map((summary) => summary.bullets),
+    [["encoded markdown bullet"]],
   );
 });
 
@@ -404,5 +571,75 @@ test("runHourly keeps processing later sessions when snapshot upsert fails after
       (summary) => summary.bullets,
     ),
     [[`summary for ${succeedingSession}`]],
+  );
+});
+
+test("hourly transcript lookup ignores traversal channel paths", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-transcript-traversal-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "agent:worker:..:escape";
+  const timestamp = "2026-03-26T08:15:00.000Z";
+  const escapedDir = path.join(memoryDir, "escape");
+  await mkdir(escapedDir, { recursive: true });
+  await writeFile(
+    path.join(escapedDir, "2026-03-26.jsonl"),
+    JSON.stringify({
+      role: "user",
+      content: "escaped transcript",
+      timestamp,
+      sessionKey,
+    }) + "\n",
+    "utf-8",
+  );
+
+  const entries = await (summarizer as any).getTranscriptEntries(
+    sessionKey,
+    new Date("2026-03-26T08:00:00.000Z"),
+    new Date("2026-03-26T09:00:00.000Z"),
+  );
+
+  assert.deepEqual(entries, []);
+});
+
+test("hourly transcript lookup reads encoded transcript channel directories", async () => {
+  const memoryDir = await mkdtemp(
+    path.join(os.tmpdir(), "engram-summary-transcript-encoded-"),
+  );
+  const summarizer = new HourlySummarizer(makeConfig(memoryDir));
+  await summarizer.initialize();
+
+  const sessionKey = "agent:worker:discord:channel:a/b";
+  const timestamp = "2026-03-26T08:15:00.000Z";
+  const transcriptDir = path.join(
+    memoryDir,
+    "transcripts",
+    encodeStoragePathSegment("discord"),
+    encodeStoragePathSegment("a/b"),
+  );
+  await mkdir(transcriptDir, { recursive: true });
+  await writeFile(
+    path.join(transcriptDir, "2026-03-26.jsonl"),
+    JSON.stringify({
+      role: "user",
+      content: "encoded transcript",
+      timestamp,
+      sessionKey,
+    }) + "\n",
+    "utf-8",
+  );
+
+  const entries = await (summarizer as any).getTranscriptEntries(
+    sessionKey,
+    new Date("2026-03-26T08:00:00.000Z"),
+    new Date("2026-03-26T09:00:00.000Z"),
+  );
+
+  assert.deepEqual(
+    entries.map((entry: any) => entry.content),
+    ["encoded transcript"],
   );
 });

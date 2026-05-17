@@ -9,6 +9,13 @@ import { extractJsonCandidates } from "./json-extract.js";
 import type { HourlySummary, TranscriptEntry, PluginConfig, GatewayConfig } from "./types.js";
 import type { TranscriptManager } from "./transcript.js";
 import { readSummarySnapshot, upsertSummarySnapshot, writeSummarySnapshot } from "./summary-snapshot.js";
+import {
+  encodeStoragePathSegment,
+  encodeStoragePathSegmentWithHash,
+  isSafeLegacyPathSegment,
+  resolveSafeStoragePath,
+  storagePathHash,
+} from "./storage-paths.js";
 
 // Schema for LLM summary output
 const HourlySummarySchema = z.object({
@@ -79,6 +86,30 @@ export class HourlySummarizer {
   async initialize(): Promise<void> {
     await mkdir(this.summariesDir, { recursive: true });
     log.info("hourly summarizer initialized");
+  }
+
+  private async summarySessionDir(sessionKey: string): Promise<string> {
+    return resolveSafeStoragePath(
+      this.summariesDir,
+      encodeStoragePathSegment(sessionKey, "session"),
+    );
+  }
+
+  private async legacySummarySessionDir(sessionKey: string): Promise<string | null> {
+    if (sessionKey.includes("\0")) return null;
+    try {
+      return await resolveSafeStoragePath(this.summariesDir, sessionKey);
+    } catch {
+      return null;
+    }
+  }
+
+  private summaryDateString(hour: string): string {
+    const dateStr = hour.slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      throw new Error(`invalid hourly summary timestamp: ${hour}`);
+    }
+    return dateStr;
   }
 
   // Generate summary for a specific hour and session
@@ -365,12 +396,12 @@ Respond with valid JSON matching this schema:
 
   // Save summary to file
   async saveSummary(summary: HourlySummary): Promise<void> {
-    const sessionDir = path.join(this.summariesDir, summary.sessionKey);
+    const sessionDir = await this.summarySessionDir(summary.sessionKey);
     await mkdir(sessionDir, { recursive: true });
 
     // Format date as YYYY-MM-DD for the filename
-    const dateStr = summary.hour.slice(0, 10);
-    const filePath = path.join(sessionDir, `${dateStr}.md`);
+    const dateStr = this.summaryDateString(summary.hour);
+    const filePath = await resolveSafeStoragePath(sessionDir, `${dateStr}.md`);
 
     // Format hour as HH:00 for display
     const hourStr = summary.hour.slice(11, 13);
@@ -482,22 +513,24 @@ Respond with valid JSON matching this schema:
           .sort((a, b) => new Date(b.hour).getTime() - new Date(a.hour).getTime());
       }
 
-      const sessionDir = path.join(this.summariesDir, sessionKey);
-      const files = await readdir(sessionDir);
-      const mdFiles = files.filter((f) => f.endsWith(".md"));
-
       const summaries: HourlySummary[] = [];
+      const encodedDir = await this.summarySessionDir(sessionKey);
+      const legacyDir = await this.legacySummarySessionDir(sessionKey);
+      const seenDirs = new Set<string>();
 
-      for (const file of mdFiles) {
-        const filePath = path.join(sessionDir, file);
-        const content = await readFile(filePath, "utf-8");
-
-        // Parse the markdown file
-        const parsed = this.parseSummaryFile(content, sessionKey, file);
+      for (const sessionDir of [encodedDir, legacyDir]) {
+        if (!sessionDir || seenDirs.has(sessionDir)) continue;
+        seenDirs.add(sessionDir);
+        const parsed = await this.readSummaryDir(sessionDir, sessionKey);
         summaries.push(...parsed);
       }
 
-      const sortedSummaries = summaries.sort(
+      const byHour = new Map<string, HourlySummary>();
+      for (const summary of summaries) {
+        if (!byHour.has(summary.hour)) byHour.set(summary.hour, summary);
+      }
+
+      const sortedSummaries = Array.from(byHour.values()).sort(
         (a, b) => new Date(b.hour).getTime() - new Date(a.hour).getTime(),
       );
 
@@ -525,6 +558,34 @@ Respond with valid JSON matching this schema:
       // Directory doesn't exist or error reading
       return [];
     }
+  }
+
+  private async readSummaryDir(
+    sessionDir: string,
+    sessionKey: string,
+  ): Promise<HourlySummary[]> {
+    let files: string[];
+    try {
+      files = await readdir(sessionDir);
+    } catch {
+      return [];
+    }
+
+    const summaries: HourlySummary[] = [];
+    const mdFiles = files.filter((f) => f.endsWith(".md"));
+    for (const file of mdFiles) {
+      const filePath = await resolveSafeStoragePath(sessionDir, file).catch(() => null);
+      if (filePath === null) continue;
+
+      try {
+        const content = await readFile(filePath, "utf-8");
+        summaries.push(...this.parseSummaryFile(content, sessionKey, file));
+      } catch {
+        // Skip unreadable summary files.
+      }
+    }
+
+    return summaries;
   }
 
   private parseSummaryFile(
@@ -695,36 +756,63 @@ Respond with valid JSON matching this schema:
       }
     }
 
-    const transcriptDir = path.join(this.config.memoryDir, "transcripts", channelType, channelId);
-
     try {
-      // Read all daily transcript files in the directory
-      const files = await readdir(transcriptDir);
+      const transcriptRoot = path.join(this.config.memoryDir, "transcripts");
+      const encodedDir = path.join(
+        encodeStoragePathSegment(channelType),
+        encodeStoragePathSegment(channelId),
+      );
+      const alternateDir = path.join(
+        encodeStoragePathSegmentWithHash(channelType),
+        `${encodeStoragePathSegmentWithHash(channelId)}--session-${storagePathHash(sessionKey)}`,
+      );
+      const legacyDir =
+        isSafeLegacyPathSegment(channelType) && isSafeLegacyPathSegment(channelId)
+          ? path.join(channelType, channelId)
+          : undefined;
+      const candidateDirs = new Set(
+        [encodedDir, alternateDir, legacyDir].filter(
+          (dir): dir is string => typeof dir === "string" && dir.length > 0,
+        ),
+      );
       const entries: TranscriptEntry[] = [];
 
-      for (const file of files) {
-        if (!file.endsWith(".jsonl")) continue;
+      // Read all daily transcript files in the directory
+      for (const candidateDir of candidateDirs) {
+        const transcriptDir = await resolveSafeStoragePath(transcriptRoot, candidateDir).catch(() => null);
+        if (transcriptDir === null) continue;
 
-        const transcriptPath = path.join(transcriptDir, file);
-        try {
-          const content = await readFile(transcriptPath, "utf-8");
-          const lines = content.trim().split("\n");
+        const files = await readdir(transcriptDir).catch(() => []);
+        for (const file of files) {
+          if (!file.endsWith(".jsonl")) continue;
 
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const entry = JSON.parse(line) as TranscriptEntry;
-              const entryTime = new Date(entry.timestamp).getTime();
+          const transcriptPath = await resolveSafeStoragePath(transcriptDir, file).catch(() => null);
+          if (transcriptPath === null) continue;
 
-              if (entryTime >= startTime.getTime() && entryTime < endTime.getTime()) {
-                entries.push(entry);
+          try {
+            const content = await readFile(transcriptPath, "utf-8");
+            const lines = content.trim().split("\n");
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const entry = JSON.parse(line) as TranscriptEntry;
+                const entryTime = new Date(entry.timestamp).getTime();
+
+                if (
+                  entry.sessionKey === sessionKey &&
+                  entryTime >= startTime.getTime() &&
+                  entryTime < endTime.getTime()
+                ) {
+                  entries.push(entry);
+                }
+              } catch {
+                // Skip malformed lines
               }
-            } catch {
-              // Skip malformed lines
             }
+          } catch {
+            // Skip unreadable files
           }
-        } catch {
-          // Skip unreadable files
         }
       }
 
