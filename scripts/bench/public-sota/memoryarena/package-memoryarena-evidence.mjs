@@ -144,32 +144,67 @@ function gitInfo(repoRoot, result, ignoredRelativePrefixes = []) {
   };
 }
 
-function scrubPath(repoRoot, value) {
+function safeRealpath(value) {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function addPathReplacement(replacements, value, replacement) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return;
+  }
+  replacements.push([path.resolve(value), replacement]);
+  const realpath = safeRealpath(value);
+  if (realpath) {
+    replacements.push([realpath, replacement]);
+  }
+}
+
+function pathReplacements(repoRoot, resultsDir, outDir, datasetDir) {
+  const replacements = [];
+  addPathReplacement(replacements, repoRoot, '<repo-root>');
+  addPathReplacement(replacements, resultsDir, '<results-dir>');
+  addPathReplacement(replacements, outDir, '<out-dir>');
+  addPathReplacement(replacements, datasetDir, '<dataset-dir>');
+  addPathReplacement(replacements, os.homedir(), '~');
+  const seen = new Set();
+  return replacements
+    .filter(([needle]) => {
+      if (seen.has(needle)) {
+        return false;
+      }
+      seen.add(needle);
+      return true;
+    })
+    .sort(([left], [right]) => right.length - left.length);
+}
+
+function scrubPath(repoRoot, value, replacements = pathReplacements(repoRoot)) {
   if (typeof value !== 'string' || value.length === 0) {
     return value;
   }
   const normalizedRepo = path.resolve(repoRoot);
   const normalized = path.resolve(value);
   const rel = path.relative(normalizedRepo, normalized);
-  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
     return rel.split(path.sep).join('/');
   }
-  return value.replace(os.homedir(), '~');
+  return replacements.reduce((out, [needle, replacement]) => out.replaceAll(needle, replacement), value);
 }
 
-function sanitizeArgv(argv) {
+function sanitizeArgv(argv, replacements) {
   return (Array.isArray(argv) ? argv : process.argv.slice(2)).map((arg) => {
     if (typeof arg !== 'string') {
       return String(arg);
     }
-    if (arg.includes(os.homedir())) {
-      return arg.replaceAll(os.homedir(), '~');
-    }
-    return arg;
+    return replacements.reduce((out, [needle, replacement]) => out.replaceAll(needle, replacement), arg);
   });
 }
 
-async function scanDataset(datasetDir, repoRoot) {
+async function scanDataset(datasetDir, repoRoot, replacements) {
   const root = path.resolve(datasetDir);
   const rootStat = await fsp.lstat(root);
   assert(rootStat.isDirectory() && !rootStat.isSymbolicLink(), `dataset root must be a real directory: ${datasetDir}`);
@@ -201,8 +236,8 @@ async function scanDataset(datasetDir, repoRoot) {
   return {
     benchmark: 'memory-arena',
     status: 'hashed',
-    path: scrubPath(repoRoot, datasetDir),
-    realpath: scrubPath(repoRoot, await fsp.realpath(root)),
+    path: scrubPath(repoRoot, datasetDir, replacements),
+    realpath: scrubPath(repoRoot, await fsp.realpath(root), replacements),
     fileCount: files.length,
     totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
     sha256: sha256String(stableStringify(files)),
@@ -427,6 +462,7 @@ async function main() {
   const resultsDir = path.resolve(args['results-dir']);
   const repoRoot = path.resolve(args['repo-root']);
   const outDir = path.resolve(args['out-dir']);
+  const replacements = pathReplacements(repoRoot, resultsDir, outDir, args['dataset-dir']);
   const baseManifestPath = args['base-manifest'] ? path.resolve(args['base-manifest']) : path.join(resultsDir, 'MANIFEST.json');
   const targetMapPath = path.resolve(args['target-map'] ?? DEFAULT_TARGET_MAP);
   const resultRelativePath = path.relative(resultsDir, resultPath);
@@ -450,7 +486,7 @@ async function main() {
   const targetMap = readJson(targetMapPath);
   const derived = deriveMemoryArenaOfficialMetrics(result);
   const comparison = compareMemoryArenaSota(result, targetMap);
-  const dataset = await scanDataset(args['dataset-dir'], repoRoot);
+  const dataset = await scanDataset(args['dataset-dir'], repoRoot, replacements);
   assertDatasetMatchesRunManifest(baseManifest, dataset);
   const times = statusTimes(resultsDir);
   const startedAt = times.startedAt ?? result.meta.timestamp;
@@ -499,7 +535,7 @@ async function main() {
     git,
     command: {
       cwd: '<repo-root>',
-      argv: sanitizeArgv(baseManifest.command?.argv),
+      argv: sanitizeArgv(baseManifest.command?.argv, replacements),
       envKeys: Array.isArray(baseManifest.command?.envKeys) ? [...baseManifest.command.envKeys].sort() : ['OPENAI_API_KEY'],
     },
     environment: {
