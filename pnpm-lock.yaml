@@ -301,6 +301,9 @@ importers:
       '@openclaw/plugin-inspector':
         specifier: 0.3.10
         version: 0.3.10
+      acorn:
+        specifier: ^8.16.0
+        version: 8.16.0
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.10)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.3)
