@@ -487,6 +487,36 @@ test("MemoryArena transition helper retries active-session launch collisions", a
   assert.match(source, /exit 0[\s\S]*if \[\[ "\$\{launch_status\}" -ne 0 \]\]; then/);
 });
 
+test("public SOTA staging helpers start from base and prune stale evidence", async () => {
+  const generic = await readFile(
+    path.join("scripts", "bench", "public-sota", "stage-public-benchmark-evidence-pr.sh"),
+    "utf8",
+  );
+  const memoryArena = await readFile(
+    path.join("scripts", "bench", "public-sota", "memoryarena", "stage-memoryarena-evidence-pr.sh"),
+    "utf8",
+  );
+
+  for (const source of [generic, memoryArena]) {
+    assert.match(source, /worktree add -B "\$\{BRANCH\}" "\$\{WORKTREE\}" "origin\/\$\{BASE_BRANCH\}"/);
+    assert.match(source, /reset --hard "origin\/\$\{BASE_BRANCH\}"/);
+    assert.match(source, /git -C "\$\{WORKTREE\}" clean -fd/);
+    assert.match(source, /find docs\/benchmarks\/results[\s\S]*-exec rm -rf \{\} \+/);
+    assert.match(source, /rm -f "\$\{EVIDENCE_DOC_REL\}" "\$\{VERIFY_SCRIPT_REL\}"/);
+  }
+});
+
+test("MemoryArena verifier template treats zero-target ties as SOTA", async () => {
+  const source = await readFile(
+    path.join("scripts", "bench", "public-sota", "memoryarena", "verify-public-memoryarena-sota-evidence.template.mjs"),
+    "utf8",
+  );
+
+  assert.match(source, /const zeroTargetTie = target === 0 && tied/);
+  assert.match(source, /sota: actual > target \|\| zeroTargetTie/);
+  assert.match(source, /sotaCriterion: 'target is zero; matching the target ties state of the art'/);
+});
+
 function memoryArenaTask(
   domain: string,
   taskId: number,
