@@ -111,37 +111,6 @@ function recomputeMetricMeans(artifact) {
       .map(([metric, values]) => [metric, mean(values)]),
   );
 
-  if (artifact.benchmarkId === 'membench') {
-    const groups = {
-      membench_accuracy_factual_participant: [],
-      membench_accuracy_factual_observation: [],
-      membench_accuracy_reflective_participant: [],
-      membench_accuracy_reflective_observation: [],
-    };
-    for (const task of artifact.perTaskScores ?? []) {
-      const score = task.scores?.membench_accuracy;
-      if (typeof score !== 'number' || !Number.isFinite(score)) {
-        continue;
-      }
-      const memoryType = String(task.details?.memoryType ?? '').toLowerCase();
-      const scenario = String(task.details?.scenario ?? '').toLowerCase();
-      if (memoryType === 'factual' && scenario === 'participant') {
-        groups.membench_accuracy_factual_participant.push(score);
-      } else if (memoryType === 'factual' && scenario === 'observation') {
-        groups.membench_accuracy_factual_observation.push(score);
-      } else if (memoryType === 'reflective' && scenario === 'participant') {
-        groups.membench_accuracy_reflective_participant.push(score);
-      } else if (memoryType === 'reflective' && scenario === 'observation') {
-        groups.membench_accuracy_reflective_observation.push(score);
-      }
-    }
-    for (const [metric, values] of Object.entries(groups)) {
-      if (values.length > 0) {
-        out[metric] = mean(values);
-      }
-    }
-  }
-
   return out;
 }
 

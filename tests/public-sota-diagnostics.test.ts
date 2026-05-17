@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import {
   comparePublicBenchmarkSota,
   roundedJsonNumberReplacer,
@@ -896,6 +896,103 @@ test("generic SOTA verifier preserves MemoryAgentBench aggregate units from comp
   }
 });
 
+test("generic SOTA verifier uses MemBench split aggregate metrics without per-task re-derivation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-membench-verify-"));
+  try {
+    const targetMap = {
+      benchmarks: {
+        membench: {
+          targets: {
+            FirstAgentLowLevel: { score: 0.5 },
+            ThirdAgentLowLevel: { score: 0.5 },
+            FirstAgentHighLevel: { score: 0.5 },
+            ThirdAgentHighLevel: { score: 0.5 },
+          },
+        },
+      },
+    };
+    const rawResult = {
+      meta: {
+        benchmark: "membench",
+        mode: "full",
+        gitSha: "0123456789abcdef0123456789abcdef01234567",
+      },
+      results: {
+        tasks: [
+          {
+            taskId: "membench-factual-participant",
+            details: { memoryType: "factual", scenario: "participant" },
+            scores: { membench_accuracy: 0.1 },
+          },
+          {
+            taskId: "membench-factual-observation",
+            details: { memoryType: "factual", scenario: "observation" },
+            scores: { membench_accuracy: 0.2 },
+          },
+          {
+            taskId: "membench-reflective-participant",
+            details: { memoryType: "reflective", scenario: "participant" },
+            scores: { membench_accuracy: 0.3 },
+          },
+          {
+            taskId: "membench-reflective-observation",
+            details: { memoryType: "reflective", scenario: "observation" },
+            scores: { membench_accuracy: 0.4 },
+          },
+        ],
+        aggregates: {
+          membench_accuracy_factual_participant: { mean: 0.91 },
+          membench_accuracy_factual_observation: { mean: 0.92 },
+          membench_accuracy_reflective_participant: { mean: 0.93 },
+          membench_accuracy_reflective_observation: { mean: 0.94 },
+        },
+      },
+    };
+    const comparison = comparePublicBenchmarkSota(rawResult, targetMap);
+    const evidenceDir = await writeGenericVerifierFixture(
+      root,
+      "membench",
+      {
+        schemaVersion: 1,
+        benchmarkId: "membench",
+        datasetVersion: `sha256:${"c".repeat(64)}`,
+        system: {
+          name: "remnic",
+          version: "test",
+          gitSha: rawResult.meta.gitSha,
+        },
+        model: "gpt-5.5",
+        seed: 1,
+        metrics: Object.fromEntries(
+          Object.entries(rawResult.results.aggregates).map(([metric, aggregate]) => [metric, aggregate.mean]),
+        ),
+        perTaskScores: rawResult.results.tasks.map((task) => ({
+          taskId: task.taskId,
+          category: `${task.details.memoryType}/${task.details.scenario}`,
+          scores: task.scores,
+          details: task.details,
+        })),
+        startedAt: STARTED_AT,
+        finishedAt: FINISHED_AT,
+        durationMs: 60_000,
+        env: {
+          node: process.version,
+          os: process.platform,
+          arch: process.arch,
+        },
+        note: "Fixture public artifact.",
+        sotaComparison: comparison,
+      },
+      comparison,
+      targetMap,
+    );
+
+    await runGenericVerifiers(evidenceDir, "membench");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("public SOTA comparison JSON serializer rejects non-finite numbers", () => {
   assert.equal(roundedJsonNumberReplacer("delta", 1.23456789), 1.234568);
   assert.throws(
@@ -1263,6 +1360,64 @@ test("published SOTA verifier templates delegate to copied core verifier modules
   assert.doesNotMatch(memoryArenaComparator, /function roundedJsonNumberReplacer/);
   assert.match(memoryArenaComparator, /const publishableChecks = checks\.filter\(\(check\) => check\.publishAsSota !== false\)/);
   assert.match(memoryArenaComparator, /sota: delta > 1e-9 \|\| zeroTargetTie/);
+});
+
+test("active public run diagnostics picks latest finished record from full scan", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-active-run-"));
+  try {
+    const runDir = path.join(root, "public-membench-codex-20260516T000000Z");
+    const diagnosticsDir = path.join(runDir, "codex-cli-diagnostics");
+    await mkdir(diagnosticsDir, { recursive: true });
+    await writeFile(
+      path.join(runDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\nmembench\tstart\t${STARTED_AT}\n`,
+      "utf8",
+    );
+    await writeJson(path.join(diagnosticsDir, "finished.json"), {
+      runId: path.basename(runDir),
+      startedAt: "2026-05-16T00:00:10.000Z",
+      finishedAt: "2026-05-16T00:01:00.000Z",
+      durationMs: 50_000,
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      result: { status: 0 },
+    });
+    await utimes(
+      path.join(diagnosticsDir, "finished.json"),
+      new Date("2026-05-16T00:01:00.000Z"),
+      new Date("2026-05-16T00:01:00.000Z"),
+    );
+    for (let index = 0; index < 31; index += 1) {
+      const file = path.join(diagnosticsDir, `in-flight-${String(index).padStart(2, "0")}.json`);
+      await writeJson(file, {
+        runId: path.basename(runDir),
+        startedAt: "2026-05-16T00:02:00.000Z",
+        provider: "codex-cli",
+        model: "gpt-5.5",
+        reasoningEffort: "xhigh",
+        serviceTier: "fast",
+      });
+      await utimes(
+        file,
+        new Date(`2026-05-16T00:02:${String(index).padStart(2, "0")}.000Z`),
+        new Date(`2026-05-16T00:02:${String(index).padStart(2, "0")}.000Z`),
+      );
+    }
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "bench", "public-sota", "check-active-public-run.mjs"), runDir],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+    const status = JSON.parse(stdout);
+    assert.equal(status.diagnostics.sampleSize, 30);
+    assert.equal(status.diagnostics.latestFinished[0].name, "finished.json");
+    assert.equal(status.diagnostics.latestFinished[0].finishedAt, "2026-05-16T00:01:00.000Z");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("public SOTA evidence scripts share manifest hash identity helpers", async () => {

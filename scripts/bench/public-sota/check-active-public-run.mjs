@@ -101,6 +101,10 @@ function newestDiagnostics(diagDir, count) {
     }
   });
   const sample = parsedRecords.slice(0, count);
+  const latestFinished = parsedRecords
+    .filter((record) => record.finishedAt)
+    .sort((left, right) => String(right.finishedAt).localeCompare(String(left.finishedAt)))
+    .slice(0, 5);
   return {
     total: records.length,
     scanned: parsedRecords.length,
@@ -125,10 +129,7 @@ function newestDiagnostics(diagDir, count) {
         serviceTier: record.serviceTier,
         promptChars: record.prompt?.chars,
       })),
-    latestFinished: sample
-      .filter((record) => record.finishedAt)
-      .sort((left, right) => String(right.finishedAt).localeCompare(String(left.finishedAt)))
-      .slice(0, 5)
+    latestFinished: latestFinished
       .map((record) => ({
         name: record.name,
         startedAt: record.startedAt,
