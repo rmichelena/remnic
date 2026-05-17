@@ -669,6 +669,67 @@ test("MemoryArena public SOTA packager redacts local temp paths from public mani
   }
 });
 
+test("MemoryArena SOTA verifier rejects raw result git SHA drift", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-memoryarena-gitsha-verify-");
+  try {
+    await writeValidDiagnostics(dirs.diagnosticsDir);
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\nmemory-arena\tstart\t${STARTED_AT}\nmemory-arena\tsuccess\t${FINISHED_AT}\n`,
+      "utf8",
+    );
+    const resultPath = path.join(dirs.resultsDir, "memory-arena-result.json");
+    await writeMemoryArenaResult(resultPath);
+    await writeBaseManifest(dirs.resultsDir, "memory-arena", resultPath);
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.join("scripts", "bench", "public-sota", "memoryarena", "package-memoryarena-evidence.mjs"),
+        "--result", resultPath,
+        "--results-dir", dirs.resultsDir,
+        "--dataset-dir", dirs.datasetDir,
+        "--repo-root", process.cwd(),
+        "--out-dir", dirs.outDir,
+      ],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    const manifestPath = path.join(dirs.outDir, "MANIFEST.memory-arena.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.git.dirty = false;
+    manifest.git.dirtyEntryCount = 0;
+    manifest.artifactHash = sha256String(stableStringify(manifestArtifactHashIdentity(manifest)));
+    await writeJson(manifestPath, manifest);
+
+    await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "bench", "public-sota", "memoryarena", "verify-memoryarena-sota-evidence.mjs"), dirs.outDir],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    manifest.results[0].gitSha = "fedcba9876543210fedcba9876543210fedcba98";
+    manifest.artifactHash = sha256String(stableStringify(manifestArtifactHashIdentity(manifest)));
+    await writeJson(manifestPath, manifest);
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [path.join("scripts", "bench", "public-sota", "memoryarena", "verify-memoryarena-sota-evidence.mjs"), dirs.outDir],
+        { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+      ),
+      (error: unknown) => {
+        assert(error && typeof error === "object");
+        const output = `${(error as { stdout?: string }).stdout ?? ""}\n${(error as { stderr?: string }).stderr ?? ""}`;
+        assert.match(output, /raw result git SHA must match manifest commit/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
 test("generic SOTA verifier preserves MemoryAgentBench aggregate units from comparison metadata", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-memoryagentbench-verify-"));
   try {
