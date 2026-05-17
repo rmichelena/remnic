@@ -562,11 +562,11 @@ async function acquireLock(homeDir: string): Promise<() => Promise<void>> {
       const lines = details.split("\n");
       const pid = Number.parseInt(lines[0] ?? "", 10);
       const createdAt = Number.parseInt(lines[1] ?? "", 10);
-      const malformed = !Number.isFinite(pid) || !Number.isFinite(createdAt);
+      const malformed = !Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(createdAt);
       const stale = Number.isFinite(createdAt) && Date.now() - createdAt > LOCK_STALE_MS;
-      const deadPid = Number.isFinite(pid) && pid > 0 ? !processIsAlive(pid) : false;
-      if (malformed || stale || deadPid) {
-        await rm(target, { force: true }).catch(() => undefined);
+      const deadPid = !malformed && !processIsAlive(pid);
+      if (malformed || (stale && deadPid)) {
+        await removeLockIfUnchanged(target, details);
         continue;
       }
       if (Date.now() - started > LOCK_TIMEOUT_MS) {
@@ -577,11 +577,18 @@ async function acquireLock(homeDir: string): Promise<() => Promise<void>> {
   }
 }
 
+async function removeLockIfUnchanged(target: string, expectedContent: string): Promise<void> {
+  const current = await readFile(target, "utf8").catch(() => null);
+  if (current !== expectedContent) return;
+  await rm(target, { force: true }).catch(() => undefined);
+}
+
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
     return false;
   }
 }

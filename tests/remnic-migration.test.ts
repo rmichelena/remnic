@@ -425,6 +425,31 @@ test("migrateFromEngram clears malformed migration locks before acquiring a fres
   assert.equal(existsSync(path.join(remnicRoot, ".migrated-from-engram")), true);
 });
 
+test("migrateFromEngram does not steal a stale lock from a live process", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-live-lock-");
+  const legacyRoot = path.join(homeDir, ".engram");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const lockPath = path.join(remnicRoot, ".migration.lock");
+  const lockContent = `${process.pid}\n${Date.now() - 31_000}\n`;
+
+  await mkdir(legacyRoot, { recursive: true });
+  await mkdir(remnicRoot, { recursive: true });
+  await writeFile(path.join(legacyRoot, "tokens.json"), JSON.stringify({ tokens: [] }), "utf8");
+  await writeFile(lockPath, lockContent, "utf8");
+
+  await assert.rejects(
+    migrateFromEngram({
+      homeDir,
+      cwd: homeDir,
+      quiet: true,
+    }),
+    /timed out waiting for migration lock/,
+  );
+
+  assert.equal(await readFile(lockPath, "utf8"), lockContent);
+  assert.equal(existsSync(path.join(remnicRoot, ".migrated-from-engram")), false);
+});
+
 test("migrateFromEngram stops a service command batch after the first command failure", {
   skip: process.platform === "win32",
 }, async () => {
