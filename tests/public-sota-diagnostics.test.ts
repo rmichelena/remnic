@@ -812,6 +812,64 @@ test("MemoryArena SOTA verifier rejects raw result git SHA drift", async () => {
   }
 });
 
+test("MemoryArena SOTA verifier rejects unsafe public task fields", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-memoryarena-safe-verify-");
+  try {
+    await writeValidDiagnostics(dirs.diagnosticsDir);
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\nmemory-arena\tstart\t${STARTED_AT}\nmemory-arena\tsuccess\t${FINISHED_AT}\n`,
+      "utf8",
+    );
+    const resultPath = path.join(dirs.resultsDir, "memory-arena-result.json");
+    await writeMemoryArenaResult(resultPath);
+    await writeBaseManifest(dirs.resultsDir, "memory-arena", resultPath);
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.join("scripts", "bench", "public-sota", "memoryarena", "package-memoryarena-evidence.mjs"),
+        "--result", resultPath,
+        "--results-dir", dirs.resultsDir,
+        "--dataset-dir", dirs.datasetDir,
+        "--repo-root", process.cwd(),
+        "--out-dir", dirs.outDir,
+      ],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    const manifestPath = path.join(dirs.outDir, "MANIFEST.memory-arena.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.git.dirty = false;
+    manifest.git.dirtyEntryCount = 0;
+    const artifactPath = path.join(dirs.outDir, manifest.publicArtifacts[0].path);
+    const artifact = JSON.parse(await readFile(artifactPath, "utf8"));
+    artifact.perTaskScores[0].question = "Leaked prompt text";
+    await writeJson(artifactPath, artifact);
+    const artifactBody = await readFile(artifactPath);
+    manifest.publicArtifacts[0].sha256 = createHash("sha256").update(artifactBody).digest("hex");
+    manifest.publicArtifacts[0].sizeBytes = artifactBody.byteLength;
+    manifest.artifactHash = sha256String(stableStringify(manifestArtifactHashIdentity(manifest)));
+    await writeJson(manifestPath, manifest);
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [path.join("scripts", "bench", "public-sota", "memoryarena", "verify-memoryarena-sota-evidence.mjs"), dirs.outDir],
+        { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+      ),
+      (error: unknown) => {
+        assert(error && typeof error === "object");
+        const output = `${(error as { stdout?: string }).stdout ?? ""}\n${(error as { stderr?: string }).stderr ?? ""}`;
+        assert.match(output, /artifact\.perTaskScores\[0\]\.question is not public-safe/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
 test("generic SOTA verifier preserves MemoryAgentBench aggregate units from comparison metadata", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-memoryagentbench-verify-"));
   try {

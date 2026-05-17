@@ -58,6 +58,52 @@ function compareJson(actual, expected, label) {
   );
 }
 
+function assertPublicSafeArtifact(artifact) {
+  const forbiddenKeys = new Set([
+    'answer',
+    'answers',
+    'answerContext',
+    'context',
+    'expected',
+    'expectedAnswer',
+    'expectedAnswers',
+    'expectedChoiceIndex',
+    'gold',
+    'groundTruth',
+    'messages',
+    'modelAnswer',
+    'modelResponse',
+    'predictedMcqOption',
+    'prompt',
+    'question',
+    'recalledText',
+    'response',
+    'selectedChoiceIndex',
+    'text',
+    'transcript',
+  ]);
+
+  function walk(value, pathLabel) {
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => walk(entry, `${pathLabel}[${index}]`));
+      return;
+    }
+    if (!value || typeof value !== 'object') {
+      if (typeof value === 'string') {
+        assert(value.length <= 512, `${pathLabel} string is too long for public-safe score metadata`);
+        assert(!value.includes('/Users/'), `${pathLabel} contains local /Users path`);
+      }
+      return;
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      assert(!forbiddenKeys.has(key), `${pathLabel}.${key} is not public-safe`);
+      walk(entry, `${pathLabel}.${key}`);
+    }
+  }
+
+  walk(artifact.perTaskScores, 'artifact.perTaskScores');
+}
+
 function officialMetricsForPublicComparison(derived) {
   return {
     benchmark: derived.benchmark,
@@ -107,6 +153,7 @@ assert(artifact.system?.gitSha === manifest.git?.commit, 'artifact git SHA must 
 assert(artifact.model === 'gpt-5.5', 'artifact model must be gpt-5.5');
 assert(artifact.seed === 1, 'artifact seed must be 1');
 assert(Array.isArray(artifact.perTaskScores) && artifact.perTaskScores.length > 0, 'artifact must include perTaskScores');
+assertPublicSafeArtifact(artifact);
 assert(publicArtifactEntry.publicSafe === true, 'public artifact entry must be publicSafe');
 assert(publicArtifactEntry.gitSha === manifest.git?.commit, 'public artifact git SHA must match manifest commit');
 assert(publicArtifactEntry.sha256 === sha256File(artifactPath), 'public artifact sha256 mismatch');
