@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { comparePublicBenchmarkSota } from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
+import { manifestArtifactHashIdentity } from "../scripts/bench/public-sota/evidence-integrity.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,6 +107,146 @@ async function writeBaseManifest(
     datasets: [dataset],
     results: [resultEntry],
   });
+}
+
+async function sha256File(file: string): Promise<string> {
+  return createHash("sha256").update(await readFile(file)).digest("hex");
+}
+
+async function writeGenericVerifierFixture(
+  root: string,
+  benchmark: string,
+  artifact: Record<string, unknown>,
+  comparison: Record<string, unknown>,
+  targetMap: Record<string, unknown>,
+): Promise<string> {
+  const evidenceDir = path.join(root, "evidence");
+  await mkdir(evidenceDir, { recursive: true });
+
+  const artifactName = `${benchmark}-artifact.json`;
+  const artifactPath = path.join(evidenceDir, artifactName);
+  await writeJson(artifactPath, artifact);
+  const artifactBody = await readFile(artifactPath);
+
+  await writeJson(path.join(evidenceDir, `${benchmark}-sota-comparison.json`), comparison);
+  await writeJson(path.join(evidenceDir, `${benchmark}-diagnostics-summary.json`), {
+    runId: RUN_ID,
+    benchmark,
+    checked: 1,
+    complete: 1,
+    inFlight: 0,
+    afterCutoff: 0,
+    invalidTimestamps: 0,
+    errored: 0,
+    nonzero: 0,
+    providers: { "codex-cli": 1 },
+    models: { "gpt-5.5": 1 },
+    reasoningEfforts: { xhigh: 1 },
+    serviceTiers: { fast: 1 },
+  });
+  await writeJson(path.join(evidenceDir, "current-target-map.json"), targetMap);
+
+  const taskCount = Array.isArray(artifact.perTaskScores) ? artifact.perTaskScores.length : 0;
+  const gitSha = String((artifact.system as { gitSha?: string } | undefined)?.gitSha ?? "0123456789abcdef0123456789abcdef01234567");
+  const rawEntry = {
+    path: `${benchmark}-raw-result.json`,
+    sha256: "a".repeat(64),
+    sizeBytes: 123,
+    resultId: `${benchmark}-fixture`,
+    benchmark,
+    mode: "full",
+    gitSha,
+    runCount: 1,
+    seeds: [1],
+    taskCount,
+    configHash: "b".repeat(64),
+  };
+  const manifestWithoutHash = {
+    schemaVersion: 1,
+    run: {
+      id: RUN_ID,
+      mode: "full",
+      selectedBenchmarks: [benchmark],
+      runtimeProfiles: ["real"],
+    },
+    git: {
+      commit: gitSha,
+      shortCommit: gitSha.slice(0, 8),
+      dirty: false,
+      dirtyEntryCount: 0,
+    },
+    command: {
+      cwd: "<repo-root>",
+      argv: ["bench", "published", "--name", benchmark],
+      envKeys: ["OPENAI_API_KEY"],
+    },
+    environment: {
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+    },
+    configFiles: [],
+    datasets: [
+      {
+        benchmark,
+        status: "hashed",
+        path: "fixture",
+        realpath: "fixture",
+        fileCount: 0,
+        totalBytes: 0,
+        sha256: "c".repeat(64),
+        files: [],
+      },
+    ],
+    results: [rawEntry],
+    publicArtifacts: [
+      {
+        path: artifactName,
+        sha256: createHash("sha256").update(artifactBody).digest("hex"),
+        sizeBytes: artifactBody.byteLength,
+        resultId: rawEntry.resultId,
+        benchmark,
+        mode: "full",
+        gitSha,
+        runCount: 1,
+        seeds: [1],
+        taskCount,
+        publicSafe: true,
+        sourceResultPath: rawEntry.path,
+        sourceResultSha256: rawEntry.sha256,
+        sourceResultSizeBytes: rawEntry.sizeBytes,
+      },
+    ],
+  };
+  const manifest = {
+    ...manifestWithoutHash,
+    artifactHash: sha256String(stableStringify(manifestArtifactHashIdentity(manifestWithoutHash))),
+  };
+  await writeJson(path.join(evidenceDir, `MANIFEST.${benchmark}.json`), manifest);
+  assert.equal(await sha256File(artifactPath), manifest.publicArtifacts[0].sha256);
+  return evidenceDir;
+}
+
+async function runGenericVerifiers(evidenceDir: string, benchmark: string): Promise<void> {
+  await execFileAsync(
+    process.execPath,
+    [
+      path.join("scripts", "bench", "public-sota", "verify-public-benchmark-sota-evidence.mjs"),
+      evidenceDir,
+      path.join(evidenceDir, "current-target-map.json"),
+      benchmark,
+    ],
+    { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+  );
+  await execFileAsync(
+    process.execPath,
+    [
+      path.join("scripts", "bench", "public-sota", "verify-public-generic-sota-evidence.template.mjs"),
+      evidenceDir,
+      benchmark,
+    ],
+    { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+  );
 }
 
 async function writeDiagnostics(diagnosticsDir: string): Promise<void> {
@@ -482,6 +624,173 @@ test("MemoryArena public SOTA packager redacts local temp paths from public mani
     assert.doesNotMatch(publicManifestBody, /remnic-public-sota-memoryarena-redact-/);
   } finally {
     await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("generic SOTA verifier preserves MemoryAgentBench aggregate units from comparison metadata", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-memoryagentbench-verify-"));
+  try {
+    const targetMap = {
+      benchmarks: {
+        memoryagentbench: {
+          targets: {
+            overallScore: { score: 80 },
+          },
+        },
+      },
+    };
+    const rawResult = {
+      meta: {
+        benchmark: "memoryagentbench",
+        mode: "full",
+        gitSha: "0123456789abcdef0123456789abcdef01234567",
+      },
+      results: {
+        tasks: [
+          {
+            taskId: "memoryagentbench-public-task",
+            details: {
+              source: "aggregate_fixture",
+              officialProtocol: "aggregate",
+            },
+            scores: {
+              official_protocol_ready: 1,
+            },
+          },
+        ],
+        aggregates: {
+          overall_score: {
+            mean: 87,
+            units: "percent",
+          },
+        },
+      },
+    };
+    const comparison = comparePublicBenchmarkSota(rawResult, targetMap);
+    const evidenceDir = await writeGenericVerifierFixture(
+      root,
+      "memoryagentbench",
+      {
+        schemaVersion: 1,
+        benchmarkId: "memoryagentbench",
+        datasetVersion: `sha256:${"c".repeat(64)}`,
+        system: {
+          name: "remnic",
+          version: "test",
+          gitSha: rawResult.meta.gitSha,
+        },
+        model: "gpt-5.5",
+        seed: 1,
+        metrics: {
+          overall_score: 87,
+        },
+        perTaskScores: rawResult.results.tasks.map((task) => ({
+          taskId: task.taskId,
+          category: "aggregate",
+          scores: task.scores,
+          details: task.details,
+        })),
+        startedAt: STARTED_AT,
+        finishedAt: FINISHED_AT,
+        durationMs: 60_000,
+        env: {
+          node: process.version,
+          os: process.platform,
+          arch: process.arch,
+        },
+        note: "Fixture public artifact.",
+        sotaComparison: comparison,
+      },
+      comparison,
+      targetMap,
+    );
+
+    await runGenericVerifiers(evidenceDir, "memoryagentbench");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("generic SOTA verifier mirrors BEAM incomplete llm_judge split fallback", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-public-sota-beam-verify-"));
+  try {
+    const targetMap = {
+      benchmarks: {
+        beam: {
+          targets: {
+            "4k": { score: 0.2 },
+          },
+        },
+      },
+    };
+    const rawResult = {
+      meta: {
+        benchmark: "beam",
+        mode: "full",
+        gitSha: "0123456789abcdef0123456789abcdef01234567",
+      },
+      results: {
+        tasks: [
+          {
+            taskId: "4k-1",
+            details: { scale: "4k" },
+            scores: {
+              llm_judge: 1,
+              rubric_coverage: 0.2,
+            },
+          },
+          {
+            taskId: "4k-2",
+            details: { scale: "4k" },
+            scores: {
+              rubric_coverage: 0.4,
+            },
+          },
+        ],
+      },
+    };
+    const comparison = comparePublicBenchmarkSota(rawResult, targetMap);
+    const evidenceDir = await writeGenericVerifierFixture(
+      root,
+      "beam",
+      {
+        schemaVersion: 1,
+        benchmarkId: "beam",
+        datasetVersion: `sha256:${"c".repeat(64)}`,
+        system: {
+          name: "remnic",
+          version: "test",
+          gitSha: rawResult.meta.gitSha,
+        },
+        model: "gpt-5.5",
+        seed: 1,
+        metrics: {
+          rubric_coverage: 0.3,
+        },
+        perTaskScores: rawResult.results.tasks.map((task) => ({
+          taskId: task.taskId,
+          category: "4k",
+          scores: task.scores,
+          details: task.details,
+        })),
+        startedAt: STARTED_AT,
+        finishedAt: FINISHED_AT,
+        durationMs: 60_000,
+        env: {
+          node: process.version,
+          os: process.platform,
+          arch: process.arch,
+        },
+        note: "Fixture public artifact.",
+        sotaComparison: comparison,
+      },
+      comparison,
+      targetMap,
+    );
+
+    await runGenericVerifiers(evidenceDir, "beam");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

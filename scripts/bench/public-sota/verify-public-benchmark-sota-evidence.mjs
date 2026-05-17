@@ -47,15 +47,29 @@ function findManifest(dir, requestedBenchmark) {
   return path.join(dir, matches[0]);
 }
 
-function aggregateObjects(metrics) {
-  return Object.fromEntries(
+function aggregateObjects(metrics, comparison) {
+  const out = Object.fromEntries(
     Object.entries(metrics ?? {})
       .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
       .map(([metric, value]) => [metric, { mean: value }]),
   );
+  for (const check of comparison?.checks ?? []) {
+    if (
+      check?.metric === 'memoryagentbench_overall_score' &&
+      typeof check.sourceMetric === 'string' &&
+      typeof check.units === 'string' &&
+      out[check.sourceMetric]
+    ) {
+      out[check.sourceMetric] = {
+        ...out[check.sourceMetric],
+        units: check.units,
+      };
+    }
+  }
+  return out;
 }
 
-function pseudoRawResultFromArtifact(artifact) {
+function pseudoRawResultFromArtifact(artifact, comparison) {
   return {
     meta: {
       benchmark: artifact.benchmarkId,
@@ -68,7 +82,7 @@ function pseudoRawResultFromArtifact(artifact) {
         scores: task.scores,
         details: task.details,
       })),
-      aggregates: aggregateObjects(artifact.metrics),
+      aggregates: aggregateObjects(artifact.metrics, comparison),
     },
   };
 }
@@ -234,7 +248,7 @@ for (const [metric, recomputed] of Object.entries(recomputedMetricMeans)) {
   }
 }
 
-const pseudoRawResult = pseudoRawResultFromArtifact(artifact);
+const pseudoRawResult = pseudoRawResultFromArtifact(artifact, comparison);
 const recomputedComparison = comparePublicBenchmarkSota(pseudoRawResult, targetMap);
 compareJson(comparison, recomputedComparison, 'SOTA comparison');
 assert(comparison.sotaAllCheckedMetrics === true, `${benchmark} comparison must beat all publishable metrics for SOTA publication`);
