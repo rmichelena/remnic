@@ -16,6 +16,14 @@ function round(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
+function roundedJsonNumberReplacer(key, value) {
+  if (typeof value !== 'number') {
+    return value;
+  }
+  assert(Number.isFinite(value), `${key || '<root>'} must be finite before JSON serialization`);
+  return round(value);
+}
+
 function verdict(actual, target, metricName) {
   assert(typeof actual === 'number' && Number.isFinite(actual), `${metricName} actual is not finite`);
   assert(typeof target === 'number' && Number.isFinite(target), `${metricName} target is not finite`);
@@ -146,7 +154,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     targetMapPath,
   };
 
-  console.log(JSON.stringify(report, (_key, value) => (
-    typeof value === 'number' ? round(value) : value
-  ), 2));
+  console.log(JSON.stringify(report, roundedJsonNumberReplacer, 2));
 }

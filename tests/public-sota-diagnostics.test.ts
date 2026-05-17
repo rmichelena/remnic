@@ -6,7 +6,10 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { comparePublicBenchmarkSota } from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
+import {
+  comparePublicBenchmarkSota,
+  roundedJsonNumberReplacer,
+} from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
 import { manifestArtifactHashIdentity } from "../scripts/bench/public-sota/evidence-integrity.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -891,6 +894,18 @@ test("generic SOTA verifier preserves MemoryAgentBench aggregate units from comp
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("public SOTA comparison JSON serializer rejects non-finite numbers", () => {
+  assert.equal(roundedJsonNumberReplacer("delta", 1.23456789), 1.234568);
+  assert.throws(
+    () => roundedJsonNumberReplacer("delta", Number.POSITIVE_INFINITY),
+    /delta must be finite before JSON serialization/,
+  );
+  assert.throws(
+    () => roundedJsonNumberReplacer("actual", Number.NaN),
+    /actual must be finite before JSON serialization/,
+  );
 });
 
 test("generic SOTA verifier mirrors BEAM incomplete llm_judge split fallback", async () => {

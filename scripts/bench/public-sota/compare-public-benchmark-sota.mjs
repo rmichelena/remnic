@@ -344,6 +344,14 @@ function round(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
+export function roundedJsonNumberReplacer(key, value) {
+  if (typeof value !== 'number') {
+    return value;
+  }
+  assert(Number.isFinite(value), `${key || '<root>'} must be finite before JSON serialization`);
+  return round(value);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [resultPath, targetMapPath = DEFAULT_TARGET_MAP] = process.argv.slice(2);
   if (!resultPath) {
@@ -358,7 +366,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       resultPath,
       targetMapPath,
     },
-    (_key, value) => typeof value === 'number' ? round(value) : value,
+    roundedJsonNumberReplacer,
     2,
   ));
 }
