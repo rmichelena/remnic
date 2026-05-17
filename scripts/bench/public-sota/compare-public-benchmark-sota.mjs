@@ -36,6 +36,15 @@ function taskScores(result, metric, predicate = () => true) {
     .filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0);
 }
 
+function scoredTasks(result, metric, predicate = () => true) {
+  return (result.results?.tasks ?? [])
+    .filter(predicate)
+    .filter((task) => {
+      const value = task.scores?.[metric];
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    });
+}
+
 function metricFromTasks(result, metric, predicate = () => true) {
   const values = taskScores(result, metric, predicate);
   assert(values.length > 0, `no scored tasks for ${metric}`);
@@ -124,18 +133,17 @@ function compareBeam(result, targets) {
   const checks = [];
   for (const [split, targetEntry] of Object.entries(targets)) {
     const splitKey = normalizeSplit(split);
-    const values = taskScores(result, 'llm_judge', (task) =>
+    const splitPredicate = (task) =>
       normalizeSplit(task.details?.scale) === splitKey ||
-      String(task.taskId ?? '').toLowerCase().startsWith(`${splitKey}-`),
-    );
-    const fallbackValues = values.length > 0
-      ? values
-      : taskScores(result, 'rubric_coverage', (task) =>
-          normalizeSplit(task.details?.scale) === splitKey ||
-          String(task.taskId ?? '').toLowerCase().startsWith(`${splitKey}-`),
-        );
-    assert(fallbackValues.length > 0, `no BEAM scored tasks for split ${split}`);
-    checks.push(metricResult(`beam_${splitKey}`, mean(fallbackValues), finiteScore(targetEntry.score, `BEAM ${split} target`)));
+      String(task.taskId ?? '').toLowerCase().startsWith(`${splitKey}-`);
+    const splitTasks = (result.results?.tasks ?? []).filter(splitPredicate);
+    assert(splitTasks.length > 0, `no BEAM tasks for split ${split}`);
+    const llmJudgeTasks = scoredTasks(result, 'llm_judge', splitPredicate);
+    const values = llmJudgeTasks.length === splitTasks.length
+      ? llmJudgeTasks.map((task) => task.scores.llm_judge)
+      : taskScores(result, 'rubric_coverage', splitPredicate);
+    assert(values.length === splitTasks.length, `BEAM split ${split} missing complete llm_judge and rubric_coverage scores`);
+    checks.push(metricResult(`beam_${splitKey}`, mean(values), finiteScore(targetEntry.score, `BEAM ${split} target`)));
   }
   return checks;
 }
