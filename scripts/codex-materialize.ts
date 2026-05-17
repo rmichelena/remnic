@@ -16,9 +16,11 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 
 import { parseConfig } from "../packages/remnic-core/src/config.js";
 import { runCodexMaterialize } from "../packages/remnic-core/src/connectors/codex-materialize-runner.js";
+import { resolveRemnicPluginEntry } from "../packages/remnic-core/src/plugin-id.js";
 
 interface Args {
   namespace?: string;
@@ -66,64 +68,107 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-/**
- * Resolve a plugin config block from an OpenClaw-shaped config file.
- *
- * OpenClaw stores Remnic settings under
- * `plugins.entries["openclaw-engram"].config`; the legacy Remnic/Engram layouts
- * kept them at the top level. We accept both so we can run uniformly in
- * standard OpenClaw installs AND in developer sandboxes.
- */
-function unwrapOpenClawEntry(raw: unknown): Record<string, unknown> | null {
-  if (!raw || typeof raw !== "object") return null;
-  const obj = raw as Record<string, unknown>;
-  const entry = (obj.plugins as Record<string, unknown> | undefined)?.entries as
-    | Record<string, unknown>
-    | undefined;
-  const pluginConfig = (entry?.["openclaw-engram"] as Record<string, unknown> | undefined)
-    ?.config;
-  if (pluginConfig && typeof pluginConfig === "object") {
-    return pluginConfig as Record<string, unknown>;
-  }
-  // Legacy / developer config layout — the top-level object IS the plugin config.
-  return obj;
+interface ConfigCandidate {
+  path: string;
+  label: string;
 }
 
-function loadRawConfig(): Record<string, unknown> {
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function envValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export function configCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+): ConfigCandidate[] {
+  const home = envValue(env, "HOME") ?? "";
+  const openclawConfigPath =
+    envValue(env, "OPENCLAW_CONFIG_PATH") ??
+    envValue(env, "OPENCLAW_ENGRAM_CONFIG_PATH") ??
+    path.join(home, ".openclaw", "openclaw.json");
+  return [
+    { path: envValue(env, "REMNIC_CONFIG"), label: "REMNIC_CONFIG" },
+    {
+      path: openclawConfigPath,
+      label:
+        envValue(env, "OPENCLAW_CONFIG_PATH") !== undefined
+          ? "OPENCLAW_CONFIG_PATH"
+          : envValue(env, "OPENCLAW_ENGRAM_CONFIG_PATH") !== undefined
+            ? "OPENCLAW_ENGRAM_CONFIG_PATH"
+            : "default OpenClaw config",
+    },
+    {
+      path: path.join(home, ".config", "remnic", "config.json"),
+      label: "default Remnic config",
+    },
+    {
+      path: path.join(home, ".config", "engram", "config.json"),
+      label: "legacy Engram config",
+    },
+    {
+      path: path.join(home, ".remnic", "config.json"),
+      label: "legacy Remnic config",
+    },
+  ].filter((candidate): candidate is ConfigCandidate => {
+    return typeof candidate.path === "string" && candidate.path.length > 0;
+  });
+}
+
+export function extractRemnicConfigFromRaw(
+  raw: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const entry = resolveRemnicPluginEntry(raw);
+  if (isPlainRecord(entry)) {
+    const config = entry["config"];
+    return isPlainRecord(config) ? config : entry;
+  }
+  // Legacy / developer config layout: the top-level object IS the plugin
+  // config. Only accept it when this is not an OpenClaw-shaped config.
+  if (!Object.prototype.hasOwnProperty.call(raw, "plugins")) {
+    return raw;
+  }
+  return undefined;
+}
+
+export function loadRawConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
   // Try the common config locations without importing bootstrap.ts (which
   // pulls in the full orchestrator). A missing config is fine — parseConfig
   // produces sane defaults.
   //
   // Order of precedence:
   //   1. `REMNIC_CONFIG` env var (developer escape hatch)
-  //   2. `OPENCLAW_ENGRAM_CONFIG_PATH` / `OPENCLAW_CONFIG_PATH` — the same
+  //   2. `OPENCLAW_CONFIG_PATH` / `OPENCLAW_ENGRAM_CONFIG_PATH` — the same
   //      env vars the Remnic plugin reads at runtime
   //   3. `~/.openclaw/openclaw.json` — standard OpenClaw install location
   //   4. Legacy `~/.config/remnic/config.json`, `~/.config/engram/config.json`,
   //      `~/.remnic/config.json`
   //
-  // For (3) and (2) we unwrap `plugins.entries["openclaw-engram"].config`.
-  const home = process.env.HOME ?? "";
-  const openclawConfigPath =
-    process.env.OPENCLAW_ENGRAM_CONFIG_PATH ??
-    process.env.OPENCLAW_CONFIG_PATH ??
-    path.join(home, ".openclaw", "openclaw.json");
-  const candidates = [
-    process.env.REMNIC_CONFIG,
-    openclawConfigPath,
-    path.join(home, ".config", "remnic", "config.json"),
-    path.join(home, ".config", "engram", "config.json"),
-    path.join(home, ".remnic", "config.json"),
-  ].filter((p): p is string => typeof p === "string" && p.length > 0);
-
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue;
+  // OpenClaw-shaped configs are resolved through the shared slot-aware helper.
+  for (const candidate of configCandidates(env)) {
+    if (!fs.existsSync(candidate.path)) continue;
+    let raw: unknown;
     try {
-      const raw = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-      const unwrapped = unwrapOpenClawEntry(raw);
-      if (unwrapped) return unwrapped;
-    } catch {
-      // fall through to next candidate
+      raw = JSON.parse(fs.readFileSync(candidate.path, "utf-8"));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Invalid JSON in ${candidate.label} (${candidate.path}): ${message}`,
+      );
+    }
+    if (!isPlainRecord(raw)) {
+      throw new Error(
+        `Invalid config in ${candidate.label} (${candidate.path}): expected a JSON object`,
+      );
+    }
+    const resolved = extractRemnicConfigFromRaw(raw);
+    if (resolved) {
+      return resolved;
     }
   }
   return {};
@@ -192,13 +237,21 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main().then(
-  (code) => process.exit(code),
-  (error) => {
-    // eslint-disable-next-line no-console
-    console.error(
-      `codex-materialize failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    process.exit(1);
-  },
-);
+function isCliEntrypoint(): boolean {
+  return process.argv[1] !== undefined
+    ? pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+    : false;
+}
+
+if (isCliEntrypoint()) {
+  main().then(
+    (code) => process.exit(code),
+    (error) => {
+      // eslint-disable-next-line no-console
+      console.error(
+        `codex-materialize failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exit(1);
+    },
+  );
+}
