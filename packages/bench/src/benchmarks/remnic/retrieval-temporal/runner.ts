@@ -9,11 +9,11 @@ import type {
   ResolvedRunBenchmarkOptions,
   TaskResult,
 } from "../../../types.js";
+import type { Message } from "../../../adapters/types.js";
 import { getGitSha, getRemnicVersion } from "../../../reporter.js";
 import type { SchemaTierPage } from "../../../fixtures/schema-tiers/index.js";
 import {
   buildTieredAggregates,
-  overlapCount,
 } from "../retrieval-shared.js";
 import {
   RETRIEVAL_TEMPORAL_FIXTURE,
@@ -47,10 +47,20 @@ export async function runRetrievalTemporalBenchmark(
     validateHalfOpenWindow(sample.window.start, sample.window.end);
     validateExpectedPageIds(sample);
     const startedAt = performance.now();
-    const rankedPages = rankPages(sample.query, sample.pages);
+    const sessionId = `retrieval-temporal:${sample.id}`;
+    await options.system.reset(sessionId);
+    await options.system.store(sessionId, buildTemporalMessages(sample.pages));
+    await options.system.drain?.();
+    const recallText = await options.system.recall(
+      sessionId,
+      sample.query,
+      12_000,
+      { asOf: sample.window.end },
+    );
     const latencyMs = Math.round(performance.now() - startedAt);
-    const topRetrievedPageIds = rankedPages.slice(0, 5).map((page) => page.id);
-    const matchedPageIds = matchingPageIds(rankedPages, sample);
+    const retrievedPageIds = extractRankedPageIds(recallText, sample.pages);
+    const topRetrievedPageIds = retrievedPageIds.slice(0, 5);
+    const matchedPageIds = matchingPageIds(retrievedPageIds, sample);
     const expectedJson = JSON.stringify({
       expectedPageIds: sample.expectedPageIds,
       window: sample.window,
@@ -66,15 +76,17 @@ export async function runRetrievalTemporalBenchmark(
       expected: expectedJson,
       actual: actualJson,
       scores: {
-        qrel_at_1: temporalQrelAtK(rankedPages, sample, 1),
-        qrel_at_3: temporalQrelAtK(rankedPages, sample, 3),
-        qrel_at_5: temporalQrelAtK(rankedPages, sample, 5),
+        qrel_at_1: temporalQrelAtK(retrievedPageIds, sample, 1),
+        qrel_at_3: temporalQrelAtK(retrievedPageIds, sample, 3),
+        qrel_at_5: temporalQrelAtK(retrievedPageIds, sample, 5),
       },
       latencyMs,
       tokens: { input: 0, output: 0 },
       details: {
         tier: sample.tier,
         window: sample.window,
+        asOf: sample.window.end,
+        recallLengthChars: recallText.length,
         retrievedPageIds: topRetrievedPageIds,
         matchingPageIds: matchedPageIds,
       },
@@ -146,33 +158,17 @@ function loadCases(
   return limited;
 }
 
-function rankPages(query: string, pages: SchemaTierPage[]): SchemaTierPage[] {
-  return [...pages].sort((left, right) => {
-    const scoreDelta = scorePage(query, right) - scorePage(query, left);
-    if (scoreDelta !== 0) return scoreDelta;
-    return left.id.localeCompare(right.id);
-  });
-}
-
-function scorePage(query: string, page: SchemaTierPage): number {
-  const queryTokens = tokenize(query);
-  const ownerHit = queryTokens.has(page.owner.toLowerCase()) ? 3 : 0;
-  const titleScore = overlapCount(queryTokens, tokenize(page.title)) * 4;
-  const canonicalTitleScore = overlapCount(queryTokens, tokenize(page.canonicalTitle)) * 3;
-  const aliasScore = overlapCount(queryTokens, tokenize(page.aliases.join(" "))) * 2;
-  const bodyScore = overlapCount(queryTokens, tokenize(page.body)) * 2;
-  const timelineScore = overlapCount(queryTokens, tokenize(page.timeline.join(" "))) * 1.5;
-
-  return ownerHit + titleScore + canonicalTitleScore + aliasScore + bodyScore + timelineScore;
-}
-
 function temporalQrelAtK(
-  rankedPages: SchemaTierPage[],
+  rankedPageIds: string[],
   sample: RetrievalTemporalCase,
   k: number,
 ): number {
-  const topK = rankedPages.slice(0, k);
-  return topK.some((page) => pageQualifies(page, sample)) ? 1 : 0;
+  const pageById = new Map(sample.pages.map((page) => [page.id, page]));
+  const topK = rankedPageIds.slice(0, k);
+  return topK.some((pageId) => {
+    const page = pageById.get(pageId);
+    return page ? pageQualifies(page, sample) : false;
+  }) ? 1 : 0;
 }
 
 function pageQualifies(page: SchemaTierPage, sample: RetrievalTemporalCase): boolean {
@@ -218,6 +214,9 @@ function validateExpectedPageIds(sample: RetrievalTemporalCase): void {
 
 function collectEvidenceTimestamps(page: SchemaTierPage): number[] {
   const timestamps = new Set<number>();
+
+  const createdAt = parseTimestamp(page.createdAt);
+  if (createdAt !== null) timestamps.add(createdAt);
 
   const created = parseTimestamp(page.frontmatter.created);
   if (created !== null) timestamps.add(created);
@@ -269,20 +268,57 @@ function parseStrictIsoTimestamp(value: string): number | null {
 }
 
 function matchingPageIds(
-  rankedPages: SchemaTierPage[],
+  rankedPageIds: string[],
   sample: RetrievalTemporalCase,
 ): string[] {
-  return rankedPages
-    .filter((page) => pageQualifies(page, sample))
-    .map((page) => page.id);
+  const pageById = new Map(sample.pages.map((page) => [page.id, page]));
+  return rankedPageIds.filter((pageId) => {
+    const page = pageById.get(pageId);
+    return page ? pageQualifies(page, sample) : false;
+  });
 }
 
-function tokenize(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .split(/[^a-z0-9]+/g)
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 3 || (token.length >= 2 && /\d/.test(token))),
-  );
+function buildTemporalMessages(pages: SchemaTierPage[]): Message[] {
+  return pages.map((page) => ({
+    role: "user",
+    timestamp: page.createdAt,
+    content: [
+      `page_id: ${page.id}`,
+      `owner: ${page.owner}`,
+      `namespace: ${page.namespace}`,
+      `title: ${page.title}`,
+      `canonical_title: ${page.canonicalTitle}`,
+      `type: ${page.type}`,
+      `created_at: ${page.createdAt}`,
+      `aliases: ${page.aliases.join(", ")}`,
+      `timeline: ${page.timeline.join(" | ")}`,
+      `see_also: ${page.seeAlso.join(", ")}`,
+      `body: ${page.body}`,
+      page.dirtySignals.length > 0
+        ? `dirty_signals: ${page.dirtySignals.join(" | ")}`
+        : undefined,
+    ].filter((line): line is string => Boolean(line)).join("\n"),
+  }));
+}
+
+function extractRankedPageIds(recallText: string, pages: SchemaTierPage[]): string[] {
+  const matches: Array<{ id: string; index: number }> = [];
+  const lowerRecallText = recallText.toLowerCase();
+
+  for (const page of pages) {
+    const marker = `page_id: ${page.id.toLowerCase()}`;
+    const index = lowerRecallText.indexOf(marker);
+    if (index >= 0) {
+      matches.push({ id: page.id, index });
+    }
+  }
+
+  matches.sort((left, right) => {
+    if (left.index !== right.index) {
+      return left.index - right.index;
+    }
+    return left.id.localeCompare(right.id);
+  });
+
+  return matches.map((match) => match.id);
 }
