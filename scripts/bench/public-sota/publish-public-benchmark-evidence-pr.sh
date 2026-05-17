@@ -78,6 +78,15 @@ publish_or_update_pr() {
   node "${SCRIPT_DIR}/verify-pr-clean.mjs" --repo "${REPO}" --pr "${pr_number}" --wait-seconds 1800
 }
 
+pr_head_matches_worktree() {
+  local pr_number="$1"
+  local worktree_head
+  local pr_head
+  worktree_head="$(git -C "${WORKTREE}" rev-parse HEAD)"
+  pr_head="$(gh pr view "${pr_number}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')"
+  [[ "${pr_head}" == "${worktree_head}" ]]
+}
+
 if [[ -z "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; then
   existing_pr="$(gh pr list --repo "${REPO}" --head "${BRANCH}" --base "${BASE_BRANCH}" --state all --json number --jq 'sort_by(.number) | reverse | .[0].number // empty')"
   if [[ -z "${existing_pr}" ]]; then
@@ -87,6 +96,11 @@ if [[ -z "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; 
       exit 0
     fi
     echo "resuming: ${benchmark} evidence commit exists on clean ${BRANCH}; pushing and creating PR" >&2
+    publish_or_update_pr
+    exit 0
+  fi
+  if ! pr_head_matches_worktree "${existing_pr}"; then
+    echo "resuming: ${benchmark} evidence commit on clean ${BRANCH} is newer than PR #${existing_pr}; pushing and creating/updating PR" >&2
     publish_or_update_pr
     exit 0
   fi

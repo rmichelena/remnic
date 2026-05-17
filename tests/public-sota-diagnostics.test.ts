@@ -429,6 +429,9 @@ test("public SOTA publish helpers resume clean committed branches without a PR",
     ["memoryarena", memoryArena],
   ] as const) {
     assert.match(source, /resuming: .*evidence commit exists on clean .*\$\{BRANCH\}; pushing and creating PR/);
+    assert.match(source, /pr_head_matches_worktree\(\)/);
+    assert.match(source, /gh pr view "\$\{pr_number\}" --repo "\$\{REPO\}" --json headRefOid --jq '\.headRefOid'/);
+    assert.match(source, /evidence commit on clean \$\{BRANCH\} is newer than PR #\$\{existing_pr\}/);
     assert.match(source, /publish_or_update_pr\(\)/);
     assert.doesNotMatch(
       source,

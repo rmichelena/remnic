@@ -44,6 +44,15 @@ publish_or_update_pr() {
   node "${SCRIPT_DIR}/../verify-pr-clean.mjs" --repo "${REPO}" --pr "${pr_number}" --wait-seconds 1800
 }
 
+pr_head_matches_worktree() {
+  local pr_number="$1"
+  local worktree_head
+  local pr_head
+  worktree_head="$(git -C "${WORKTREE}" rev-parse HEAD)"
+  pr_head="$(gh pr view "${pr_number}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')"
+  [[ "${pr_head}" == "${worktree_head}" ]]
+}
+
 resume_clean_publish=0
 
 if [[ -z "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; then
@@ -59,9 +68,20 @@ if [[ -z "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; 
     echo "resuming: MemoryArena evidence commit exists on clean ${BRANCH}; pushing and creating PR" >&2
     resume_clean_publish=1
   else
-    gh pr view "${existing_pr}" --repo "${REPO}" --json number,url,state,isDraft,headRefOid,baseRefName
-    node "${SCRIPT_DIR}/../verify-pr-clean.mjs" --repo "${REPO}" --pr "${existing_pr}" --wait-seconds 1800
-    exit 0
+    if pr_head_matches_worktree "${existing_pr}"; then
+      gh pr view "${existing_pr}" --repo "${REPO}" --json number,url,state,isDraft,headRefOid,baseRefName
+      node "${SCRIPT_DIR}/../verify-pr-clean.mjs" --repo "${REPO}" --pr "${existing_pr}" --wait-seconds 1800
+      exit 0
+    fi
+    manifest_rel="$(cd "${WORKTREE}" && find docs/benchmarks/results -mindepth 2 -maxdepth 2 -name 'MANIFEST.memory-arena.json' -print 2>/dev/null | sort | tail -1)"
+    if [[ -z "${manifest_rel}" ]]; then
+      echo "waiting: no staged or unstaged MemoryArena evidence changes in ${WORKTREE}, and PR #${existing_pr} does not match ${BRANCH} HEAD" >&2
+      exit 0
+    fi
+    results_rel="$(dirname "${manifest_rel}")"
+    run_id="$(basename "${results_rel}")"
+    echo "resuming: MemoryArena evidence commit on clean ${BRANCH} is newer than PR #${existing_pr}; pushing and creating/updating PR" >&2
+    resume_clean_publish=1
   fi
 else
   manifest_rel="$(cd "${WORKTREE}" && find docs/benchmarks/results -mindepth 2 -maxdepth 2 -name 'MANIFEST.memory-arena.json' -print | sort | tail -1)"
