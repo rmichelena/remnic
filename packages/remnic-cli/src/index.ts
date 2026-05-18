@@ -3845,6 +3845,41 @@ async function cmdStatus(json: boolean): Promise<void> {
   }
 }
 
+interface QueryRenderableResult {
+  content?: string;
+  preview?: string;
+  context?: string;
+}
+
+export function renderQueryTextLines(result: {
+  results?: QueryRenderableResult[];
+  context?: string;
+}): string[] {
+  const results = Array.isArray(result.results) ? result.results : [];
+  if (results.length === 0) return ["No results."];
+
+  return results.map((memory) => {
+    const text =
+      memory.content?.trim()
+      || memory.preview?.trim()
+      || memory.context?.trim()
+      || "(no preview available)";
+    return `- ${text}`;
+  });
+}
+
+export function buildQueryRecallRequest(queryText: string): {
+  query: string;
+  mode: "auto";
+  sessionKey: string;
+} {
+  return {
+    query: queryText,
+    mode: "auto",
+    sessionKey: `remnic-cli:query:${process.pid}`,
+  };
+}
+
 async function cmdQuery(queryText: string, json: boolean, explain: boolean): Promise<void> {
   if (!queryText) {
     console.error("Usage: remnic query <text>");
@@ -3861,6 +3896,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
   const orchestrator = new Orchestrator(config);
   await orchestrator.initialize();
   const service = new EngramAccessService(orchestrator);
+  const recallRequest = buildQueryRecallRequest(queryText);
 
   try {
     if (explain) {
@@ -3886,7 +3922,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
       }
 
       const explainStart = Date.now();
-      const recallResult = await service.recall({ query: queryText, mode: "auto" });
+      const recallResult = await service.recall(recallRequest);
       const totalDurationMs = Date.now() - explainStart;
       // recall() returns { count, results, memoryIds, ... } (see
       // EngramAccessRecallResponse). A prior version of this fallback
@@ -3917,17 +3953,12 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
       return;
     }
 
-    const result = await service.recall({ query: queryText, mode: "auto" });
+    const result = await service.recall(recallRequest);
     if (json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
-      const memories = (result as { memories?: Array<{ content: string }> }).memories ?? [];
-      if (memories.length === 0) {
-        console.log("No results.");
-        return;
-      }
-      for (const m of memories) {
-        console.log(`- ${m.content}`);
+      for (const line of renderQueryTextLines(result)) {
+        console.log(line);
       }
     }
   } finally {
