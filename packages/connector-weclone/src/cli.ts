@@ -33,7 +33,10 @@ import { homedir } from "node:os";
  * substitute it).
  */
 function defaultConfigPath(): string {
-  const override = process.env.REMNIC_HOME ?? process.env.ENGRAM_HOME;
+  const override =
+    process.env.REMNIC_HOME && process.env.REMNIC_HOME.length > 0
+      ? process.env.REMNIC_HOME
+      : process.env.ENGRAM_HOME;
   if (override && override.length > 0) {
     return resolve(override, "connectors", "weclone.json");
   }

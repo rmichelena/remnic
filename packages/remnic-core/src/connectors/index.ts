@@ -2998,7 +2998,8 @@ const WECLONE_PROXY_CONFIG_FILENAME = "weclone.json";
  * `os.homedir()` in both places — the same rule the proxy CLI follows.
  */
 export function resolveWeCloneProxyConfigPath(): string {
-  const override = readEnvVar("REMNIC_HOME") ?? readEnvVar("ENGRAM_HOME");
+  const remnicHome = readEnvVar("REMNIC_HOME");
+  const override = remnicHome && remnicHome.length > 0 ? remnicHome : readEnvVar("ENGRAM_HOME");
   if (override && override.length > 0) {
     return path.resolve(override, "connectors", WECLONE_PROXY_CONFIG_FILENAME);
   }

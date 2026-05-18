@@ -146,6 +146,33 @@ test("installConnector weclone writes registry config AND proxy config with defa
   );
 });
 
+test("installConnector weclone falls back to ENGRAM_HOME when REMNIC_HOME is empty", async (t) => {
+  const sandbox = makeSandbox(t);
+  const legacyHome = path.join(sandbox.root, "legacy-remnic-home");
+  await withEnv(
+    {
+      HOME: sandbox.home,
+      USERPROFILE: sandbox.home,
+      XDG_CONFIG_HOME: sandbox.xdgConfigHome,
+      REMNIC_HOME: "",
+      ENGRAM_HOME: legacyHome,
+    },
+    () => {
+      const result = installConnector({ connectorId: "weclone" });
+      assert.equal(result.status, "installed", `expected installed, got: ${result.status} — ${result.message}`);
+
+      const proxyConfigPath = resolveWeCloneProxyConfigPath();
+      assert.equal(proxyConfigPath, path.join(legacyHome, "connectors", "weclone.json"));
+      assert.ok(fs.existsSync(proxyConfigPath), "proxy config must be written under legacy ENGRAM_HOME");
+
+      const registryConfig = JSON.parse(
+        fs.readFileSync(result.configPath as string, "utf8"),
+      ) as Record<string, unknown>;
+      assert.equal(registryConfig.proxyConfigPath, proxyConfigPath);
+    },
+  );
+});
+
 test("installConnector weclone honours user-supplied overrides", async (t) => {
   const sandbox = makeSandbox(t);
   await withEnv(

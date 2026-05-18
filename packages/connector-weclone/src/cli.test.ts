@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -25,6 +25,18 @@ function runCliWithConfig(config: unknown) {
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function runCliWithoutConfig(env: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, [tsxCli, cliPath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env,
+    },
+    timeout: 5_000,
+  });
 }
 
 function listenOnEphemeralPort(): Promise<{ server: net.Server; port: number }> {
@@ -61,6 +73,38 @@ describe("remnic-weclone-proxy CLI", () => {
     assert.match(result.stderr, /Invalid config at .*weclone\.json:/);
     assert.match(result.stderr, /wecloneApiUrl/);
     assert.doesNotMatch(result.stderr, /at parseConfig/);
+  });
+
+  it("falls back to ENGRAM_HOME when REMNIC_HOME is empty", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "remnic-weclone-env-"));
+    const remnicHome = join(tempDir, "legacy-home");
+    const configDir = join(remnicHome, "connectors");
+    const configPath = join(configDir, "weclone.json");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        proxyPort: 8100,
+        remnicDaemonUrl: "http://127.0.0.1:4318",
+      }),
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = runCliWithoutConfig({
+        REMNIC_HOME: "",
+        ENGRAM_HOME: remnicHome,
+        HOME: join(tempDir, "home"),
+      });
+
+      assert.ifError(result.error);
+      assert.equal(result.status, 1);
+      assert.ok(result.stderr.includes(`Invalid config at ${configPath}:`));
+      assert.match(result.stderr, /wecloneApiUrl/);
+      assert.doesNotMatch(result.stderr, /Config not found/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("prints a controlled error when proxy startup fails", async () => {
