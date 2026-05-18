@@ -167,7 +167,8 @@ test("bench CLI validates and resolves explicit dataset overrides for full packa
   );
   assert.match(parserSource, /const benchmarks = collectBenchmarks\(benchmarkArgs\);/);
   assert.match(parserSource, /requires a value\./);
-  assert.match(parserSource, /arg === "--dataset-dir"[\s\S]*arg === "--results-dir"[\s\S]*arg === "--baselines-dir"[\s\S]*arg === "--threshold"[\s\S]*arg === "--custom"[\s\S]*arg === "--format"[\s\S]*arg === "--output"/);
+  assert.match(parserSource, /const BENCH_VALUE_FLAGS = Object\.freeze\(\[[\s\S]*"--dataset-dir"[\s\S]*"--results-dir"[\s\S]*"--baselines-dir"[\s\S]*"--threshold"[\s\S]*"--custom"[\s\S]*"--format"[\s\S]*"--output"/);
+  assert.match(parserSource, /function isBenchValueFlag\(arg: string\): arg is BenchValueFlag \{\s*return BENCH_VALUE_FLAG_SET\.has\(arg\);\s*\}/);
   assert.match(parserSource, /datasetDir: datasetDir \? path\.resolve\(expandTilde\(datasetDir\)\) : undefined/);
   assert.match(parserSource, /custom: customRaw \? path\.resolve\(expandTilde\(customRaw\)\) : undefined/);
   assert.match(source, /resolveBenchDatasetDir\(\s*benchmarkId,\s*parsed\.quick,\s*parsed\.datasetDir/s);
@@ -1041,7 +1042,7 @@ test("bench publish routes through the stored package feed helpers", async () =>
   assert.match(source, /Published \$\{feed\.benchmarks\.length\} benchmark entries for \$\{parsed\.target\} to \$\{writtenPath\}/);
   assert.match(source, /if \(parsed\.action === "publish"\) \{\s*await publishBenchPackageResults\(parsed\);/s);
   assert.match(parserSource, /export type BenchPublishTarget = "remnic-ai";/);
-  assert.match(parserSource, /arg === "--target"/);
+  assert.match(parserSource, /const BENCH_VALUE_FLAGS = Object\.freeze\(\[[\s\S]*"--target"/);
   assert.match(parserSource, /const targetRaw = readBenchOptionValue\(args, "--target"\);/);
   assert.match(parserSource, /ERROR: --target must be "remnic-ai"\./);
   assert.match(parserSource, /target,/);

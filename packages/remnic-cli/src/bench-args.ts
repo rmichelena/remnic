@@ -219,69 +219,292 @@ export function readBenchOptionValue(argv: string[], flag: string): string | und
   return value;
 }
 
+const BENCH_VALUE_FLAGS = Object.freeze([
+  "--dataset-dir",
+  "--results-dir",
+  "--baselines-dir",
+  "--runtime-profile",
+  "--matrix",
+  "--remnic-config",
+  "--openclaw-config",
+  "--model-source",
+  "--gateway-agent-id",
+  "--fast-gateway-agent-id",
+  "--system-provider",
+  "--system-model",
+  "--system-base-url",
+  "--system-api-key",
+  "--system-codex-reasoning-effort",
+  "--system-responder-context-budget-chars",
+  "--system-responder-prompt-budget-chars",
+  "--judge-provider",
+  "--judge-model",
+  "--judge-base-url",
+  "--judge-api-key",
+  "--judge-codex-reasoning-effort",
+  "--internal-provider",
+  "--internal-model",
+  "--internal-base-url",
+  "--internal-api-key",
+  "--internal-codex-reasoning-effort",
+  "--threshold",
+  "--custom",
+  "--format",
+  "--output",
+  "--target",
+  "--name",
+  "--dataset",
+  "--model",
+  "--limit",
+  "--trial-limit",
+  "--trial-concurrency",
+  "--ingest-concurrency",
+  "--task-filter",
+  "--seed",
+  "--out",
+  "--provider",
+  "--base-url",
+  "--request-timeout",
+  "--drain-timeout",
+  "--max-429-wait",
+  "--ama-bench-judge-protocol",
+  "--ama-bench-cross-judge-provider",
+  "--ama-bench-cross-judge-model",
+  "--ama-bench-cross-judge-base-url",
+  "--ama-bench-cross-judge-api-key",
+  "--ama-bench-cross-judge-codex-reasoning-effort",
+] as const);
+
+const BENCH_BOOLEAN_FLAGS = Object.freeze([
+  "--quick",
+  "--all",
+  "--json",
+  "--detail",
+  "--internal-disable-thinking",
+  "--dry-run",
+  "--disable-thinking",
+  "--resume",
+  "--retry-failed",
+  "--help",
+  "-h",
+  "--explain",
+] as const);
+
+type BenchValueFlag = (typeof BENCH_VALUE_FLAGS)[number];
+type BenchBooleanFlag = (typeof BENCH_BOOLEAN_FLAGS)[number];
+
+const BENCH_VALUE_FLAG_SET: ReadonlySet<string> = new Set(BENCH_VALUE_FLAGS);
+const BENCH_BOOLEAN_FLAG_SET: ReadonlySet<string> = new Set(BENCH_BOOLEAN_FLAGS);
+
+function isBenchValueFlag(arg: string): arg is BenchValueFlag {
+  return BENCH_VALUE_FLAG_SET.has(arg);
+}
+
+function isBenchBooleanFlag(arg: string): arg is BenchBooleanFlag {
+  return BENCH_BOOLEAN_FLAG_SET.has(arg);
+}
+
+const RUN_VALUE_FLAGS = Object.freeze([
+  "--dataset-dir",
+  "--results-dir",
+  "--runtime-profile",
+  "--matrix",
+  "--remnic-config",
+  "--openclaw-config",
+  "--model-source",
+  "--gateway-agent-id",
+  "--fast-gateway-agent-id",
+  "--system-provider",
+  "--system-model",
+  "--system-base-url",
+  "--system-api-key",
+  "--system-codex-reasoning-effort",
+  "--system-responder-context-budget-chars",
+  "--system-responder-prompt-budget-chars",
+  "--judge-provider",
+  "--judge-model",
+  "--judge-base-url",
+  "--judge-api-key",
+  "--judge-codex-reasoning-effort",
+  "--internal-provider",
+  "--internal-model",
+  "--internal-base-url",
+  "--internal-api-key",
+  "--internal-codex-reasoning-effort",
+  "--custom",
+  "--dataset",
+  "--model",
+  "--limit",
+  "--trial-limit",
+  "--trial-concurrency",
+  "--ingest-concurrency",
+  "--task-filter",
+  "--seed",
+  "--provider",
+  "--base-url",
+  "--request-timeout",
+  "--drain-timeout",
+  "--max-429-wait",
+  "--ama-bench-judge-protocol",
+  "--ama-bench-cross-judge-provider",
+  "--ama-bench-cross-judge-model",
+  "--ama-bench-cross-judge-base-url",
+  "--ama-bench-cross-judge-api-key",
+  "--ama-bench-cross-judge-codex-reasoning-effort",
+] as const satisfies readonly BenchValueFlag[]);
+
+const RUN_BOOLEAN_FLAGS = Object.freeze([
+  "--quick",
+  "--all",
+  "--json",
+  "--internal-disable-thinking",
+  "--disable-thinking",
+  "--resume",
+  "--retry-failed",
+  "--help",
+  "-h",
+] as const satisfies readonly BenchBooleanFlag[]);
+
+const PUBLISHED_VALUE_FLAGS = Object.freeze([
+  ...RUN_VALUE_FLAGS,
+  "--name",
+  "--out",
+] as const satisfies readonly BenchValueFlag[]);
+
+const PUBLISHED_BOOLEAN_FLAGS = Object.freeze([
+  ...RUN_BOOLEAN_FLAGS,
+  "--dry-run",
+] as const satisfies readonly BenchBooleanFlag[]);
+
+const BENCH_ACTION_FLAGS: Record<
+  BenchAction,
+  {
+    value: readonly BenchValueFlag[];
+    boolean: readonly BenchBooleanFlag[];
+    legacyEqualsPrefixes?: readonly string[];
+  }
+> = {
+  help: { value: [], boolean: ["--help", "-h"] },
+  list: { value: [], boolean: ["--json", "--help", "-h"] },
+  run: { value: RUN_VALUE_FLAGS, boolean: RUN_BOOLEAN_FLAGS },
+  datasets: {
+    value: [],
+    boolean: ["--all", "--json", "--help", "-h"],
+  },
+  runs: {
+    value: ["--results-dir"],
+    boolean: ["--detail", "--json", "--help", "-h"],
+  },
+  compare: {
+    value: ["--results-dir", "--threshold"],
+    boolean: ["--json", "--help", "-h"],
+  },
+  ui: { value: ["--results-dir"], boolean: ["--help", "-h"] },
+  results: {
+    value: ["--results-dir"],
+    boolean: ["--detail", "--json", "--help", "-h"],
+  },
+  baseline: {
+    value: ["--results-dir", "--baselines-dir"],
+    boolean: ["--json", "--help", "-h"],
+  },
+  export: {
+    value: ["--results-dir", "--format", "--output"],
+    boolean: ["--json", "--help", "-h"],
+  },
+  providers: { value: [], boolean: ["--json", "--help", "-h"] },
+  publish: {
+    value: ["--results-dir", "--target", "--output"],
+    boolean: ["--json", "--help", "-h"],
+  },
+  published: {
+    value: PUBLISHED_VALUE_FLAGS,
+    boolean: PUBLISHED_BOOLEAN_FLAGS,
+  },
+  check: {
+    value: [],
+    boolean: ["--json", "--explain", "--help", "-h"],
+    legacyEqualsPrefixes: ["--baseline=", "--report="],
+  },
+  report: {
+    value: [],
+    boolean: ["--json", "--explain", "--help", "-h"],
+    legacyEqualsPrefixes: ["--baseline=", "--report="],
+  },
+};
+
+function formatBenchOptions(
+  valueFlags: readonly string[],
+  booleanFlags: readonly string[],
+  legacyEqualsPrefixes: readonly string[] = [],
+): string {
+  return [...valueFlags, ...booleanFlags, ...legacyEqualsPrefixes]
+    .sort((left, right) => left.localeCompare(right))
+    .join(", ");
+}
+
+function validateBenchFlags(action: BenchAction, args: string[]): void {
+  const allowed = BENCH_ACTION_FLAGS[action];
+  const allowedValue = new Set<string>(allowed.value);
+  const allowedBoolean = new Set<string>(allowed.boolean);
+  const supportedOptions = formatBenchOptions(
+    allowed.value,
+    allowed.boolean,
+    allowed.legacyEqualsPrefixes,
+  );
+  const allOptions = formatBenchOptions(BENCH_VALUE_FLAGS, BENCH_BOOLEAN_FLAGS, [
+    "--baseline=",
+    "--report=",
+  ]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (!arg.startsWith("-")) {
+      continue;
+    }
+
+    if (allowed.legacyEqualsPrefixes?.some((prefix) => arg.startsWith(prefix))) {
+      continue;
+    }
+
+    if (isBenchValueFlag(arg)) {
+      if (!allowedValue.has(arg)) {
+        throw new Error(
+          `ERROR: ${arg} is not supported for bench ${action}. Supported options: ${supportedOptions || "(none)"}.`,
+        );
+      }
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(`ERROR: ${arg} requires a value.`);
+      }
+      index += 1;
+      continue;
+    }
+
+    if (isBenchBooleanFlag(arg)) {
+      if (!allowedBoolean.has(arg)) {
+        throw new Error(
+          `ERROR: ${arg} is not supported for bench ${action}. Supported options: ${supportedOptions || "(none)"}.`,
+        );
+      }
+      continue;
+    }
+
+    throw new Error(
+      `ERROR: unknown bench option ${arg}. Supported options: ${allOptions}.`,
+    );
+  }
+}
+
 export function collectBenchmarks(argv: string[]): string[] {
   const benchmarks: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (
-      arg === "--dataset-dir" ||
-      arg === "--results-dir" ||
-      arg === "--baselines-dir" ||
-      arg === "--runtime-profile" ||
-      arg === "--matrix" ||
-      arg === "--remnic-config" ||
-      arg === "--openclaw-config" ||
-      arg === "--model-source" ||
-      arg === "--gateway-agent-id" ||
-      arg === "--fast-gateway-agent-id" ||
-      arg === "--system-provider" ||
-      arg === "--system-model" ||
-      arg === "--system-base-url" ||
-      arg === "--system-api-key" ||
-      arg === "--system-codex-reasoning-effort" ||
-      arg === "--system-responder-context-budget-chars" ||
-      arg === "--system-responder-prompt-budget-chars" ||
-      arg === "--judge-provider" ||
-      arg === "--judge-model" ||
-      arg === "--judge-base-url" ||
-      arg === "--judge-api-key" ||
-      arg === "--judge-codex-reasoning-effort" ||
-      arg === "--internal-provider" ||
-      arg === "--internal-model" ||
-      arg === "--internal-base-url" ||
-      arg === "--internal-api-key" ||
-      arg === "--internal-codex-reasoning-effort" ||
-      arg === "--threshold" ||
-      arg === "--custom" ||
-      arg === "--format" ||
-      arg === "--output" ||
-      arg === "--target" ||
-      arg === "--name" ||
-      arg === "--dataset" ||
-      arg === "--model" ||
-      arg === "--limit" ||
-      arg === "--trial-limit" ||
-      arg === "--trial-concurrency" ||
-      arg === "--ingest-concurrency" ||
-      arg === "--task-filter" ||
-      arg === "--seed" ||
-      arg === "--out" ||
-      arg === "--provider" ||
-      arg === "--base-url" ||
-      arg === "--request-timeout" ||
-      arg === "--drain-timeout" ||
-      arg === "--max-429-wait" ||
-      arg === "--ama-bench-judge-protocol" ||
-      arg === "--ama-bench-cross-judge-provider" ||
-      arg === "--ama-bench-cross-judge-model" ||
-      arg === "--ama-bench-cross-judge-base-url" ||
-      arg === "--ama-bench-cross-judge-api-key" ||
-      arg === "--ama-bench-cross-judge-codex-reasoning-effort"
-    ) {
+    if (isBenchValueFlag(arg)) {
       index += 1;
       continue;
     }
-    if (arg === "--resume" || arg === "--retry-failed") {
+    if (isBenchBooleanFlag(arg)) {
       continue;
     }
     if (!arg.startsWith("-")) {
@@ -360,6 +583,7 @@ export function parseBenchArgs(argv: string[]): ParsedBenchArgs {
   if (action === "runs" && runAction === undefined) {
     throw new Error("ERROR: runs requires a subcommand: list, show, or delete.");
   }
+  validateBenchFlags(action, args);
 
   const benchmarkArgs =
     action === "baseline" ||

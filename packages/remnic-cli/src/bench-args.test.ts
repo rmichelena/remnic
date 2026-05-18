@@ -18,6 +18,24 @@ test("parseBenchArgs keeps validated matrix profiles typed and ordered", () => {
   ]);
 });
 
+test("parseBenchArgs rejects unknown bench flags", () => {
+  assert.throws(
+    () => parseBenchArgs(["run", "locomo", "--jsoon"]),
+    /unknown bench option --jsoon/,
+  );
+});
+
+test("parseBenchArgs rejects action-incompatible bench flags", () => {
+  assert.throws(
+    () => parseBenchArgs(["run", "locomo", "--dry-run"]),
+    /--dry-run is not supported for bench run/,
+  );
+  assert.throws(
+    () => parseBenchArgs(["run", "locomo", "--format", "json"]),
+    /--format is not supported for bench run/,
+  );
+});
+
 // ---------- `bench published` (issue #566 PR 4/7) ----------
 
 test("parseBenchArgs accepts published action with --name, --dataset, --model", () => {
