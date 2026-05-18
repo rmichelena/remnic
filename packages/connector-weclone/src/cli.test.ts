@@ -12,6 +12,27 @@ const repoRoot = resolve(__dirname, "../../..");
 const tsxCli = join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const cliPath = join(__dirname, "cli.ts");
 
+function buildCliEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete env[key];
+    } else {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function runCliWithArgs(args: string[], env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, [tsxCli, cliPath, ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: buildCliEnv(env),
+    timeout: 5_000,
+  });
+}
+
 function runCliWithConfig(config: unknown) {
   const tempDir = mkdtempSync(join(tmpdir(), "remnic-weclone-cli-"));
   const configPath = join(tempDir, "weclone.json");
@@ -31,10 +52,7 @@ function runCliWithoutConfig(env: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, [tsxCli, cliPath], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      ...env,
-    },
+    env: buildCliEnv(env),
     timeout: 5_000,
   });
 }
@@ -95,6 +113,70 @@ describe("remnic-weclone-proxy CLI", () => {
         REMNIC_HOME: "",
         ENGRAM_HOME: remnicHome,
         HOME: join(tempDir, "home"),
+      });
+
+      assert.ifError(result.error);
+      assert.equal(result.status, 1);
+      assert.ok(result.stderr.includes(`Invalid config at ${configPath}:`));
+      assert.match(result.stderr, /wecloneApiUrl/);
+      assert.doesNotMatch(result.stderr, /Config not found/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands tilde in --config paths", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "remnic-weclone-tilde-config-"));
+    const home = join(tempDir, "home");
+    const configDir = join(home, ".remnic", "connectors");
+    const configPath = join(configDir, "weclone.json");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        proxyPort: 8100,
+        remnicDaemonUrl: "http://127.0.0.1:4318",
+      }),
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = runCliWithArgs(["--config", "~/.remnic/connectors/weclone.json"], {
+        HOME: home,
+        REMNIC_HOME: undefined,
+        ENGRAM_HOME: undefined,
+      });
+
+      assert.ifError(result.error);
+      assert.equal(result.status, 1);
+      assert.ok(result.stderr.includes(`Invalid config at ${configPath}:`));
+      assert.match(result.stderr, /wecloneApiUrl/);
+      assert.doesNotMatch(result.stderr, /Config not found/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands tilde in REMNIC_HOME default config paths", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "remnic-weclone-tilde-home-"));
+    const home = join(tempDir, "home");
+    const configDir = join(home, "remnic-home", "connectors");
+    const configPath = join(configDir, "weclone.json");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        proxyPort: 8100,
+        remnicDaemonUrl: "http://127.0.0.1:4318",
+      }),
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = runCliWithoutConfig({
+        HOME: home,
+        REMNIC_HOME: "~/remnic-home",
+        ENGRAM_HOME: undefined,
       });
 
       assert.ifError(result.error);

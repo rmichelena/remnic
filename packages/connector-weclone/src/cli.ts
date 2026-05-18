@@ -11,7 +11,7 @@
 import { createWeCloneProxy } from "./proxy.js";
 import { parseConfig, type WeCloneConnectorConfig } from "./config.js";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 /**
@@ -32,17 +32,28 @@ import { homedir } from "node:os";
  * cleared (empty string is not nullish, so `?? os.homedir()` does NOT
  * substitute it).
  */
+function homeDir(): string {
+  const envHome = process.env.HOME;
+  return envHome && envHome.length > 0 ? envHome : homedir();
+}
+
+function expandTildePath(input: string): string {
+  if (input === "~") return homeDir();
+  if (input.startsWith("~/") || input.startsWith("~\\")) {
+    return join(homeDir(), input.slice(2));
+  }
+  return input;
+}
+
 function defaultConfigPath(): string {
   const override =
     process.env.REMNIC_HOME && process.env.REMNIC_HOME.length > 0
       ? process.env.REMNIC_HOME
       : process.env.ENGRAM_HOME;
   if (override && override.length > 0) {
-    return resolve(override, "connectors", "weclone.json");
+    return resolve(expandTildePath(override), "connectors", "weclone.json");
   }
-  const envHome = process.env.HOME;
-  const home = envHome && envHome.length > 0 ? envHome : homedir();
-  return resolve(home, ".remnic", "connectors", "weclone.json");
+  return resolve(homeDir(), ".remnic", "connectors", "weclone.json");
 }
 
 function errorMessage(err: unknown): string {
@@ -65,7 +76,7 @@ async function main(): Promise<void> {
         console.error("Error: --config requires a path argument");
         process.exit(1);
       }
-      configPath = resolve(args[i + 1]);
+      configPath = resolve(expandTildePath(args[i + 1]));
       i++;
     }
   }

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { generateToken, revokeToken, buildTokenEntry, commitTokenEntry, loadTokenStore, saveTokenStore } from "../tokens.js";
 import { launchProcessSync } from "../runtime/child-process.js";
 import { mergeEnv, readEnvVar, resolveHomeDir } from "../runtime/env.js";
+import { expandTildePath } from "../utils/path.js";
 import { coerceInstallExtension } from "./coerce.js";
 
 // Native memory artifact materialization for Codex CLI (#378). Surfaced here
@@ -3001,7 +3002,7 @@ export function resolveWeCloneProxyConfigPath(): string {
   const remnicHome = readEnvVar("REMNIC_HOME");
   const override = remnicHome && remnicHome.length > 0 ? remnicHome : readEnvVar("ENGRAM_HOME");
   if (override && override.length > 0) {
-    return path.resolve(override, "connectors", WECLONE_PROXY_CONFIG_FILENAME);
+    return path.resolve(expandTildePath(override), "connectors", WECLONE_PROXY_CONFIG_FILENAME);
   }
   const envHome = readEnvVar("HOME");
   const home = envHome && envHome.length > 0 ? envHome : os.homedir();
