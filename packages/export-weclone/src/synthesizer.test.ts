@@ -367,6 +367,24 @@ describe("synthesizeTrainingPairs", () => {
     assert.equal(pairs.length, 1);
   });
 
+  it("rejects invalid maxPairsPerRecord values", () => {
+    const records = [
+      makeRecord({
+        instruction: "Recall a user preference (music)",
+        category: "preference",
+        output: "I enjoy jazz.",
+      }),
+    ];
+
+    for (const maxPairsPerRecord of [1.5, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => synthesizeTrainingPairs(records, { maxPairsPerRecord }),
+        /maxPairsPerRecord must be a finite positive integer/,
+        `expected ${String(maxPairsPerRecord)} to be rejected`,
+      );
+    }
+  });
+
   it("applies style markers - lowercase output", () => {
     const records = [
       makeRecord({
