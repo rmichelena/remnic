@@ -3863,7 +3863,6 @@ export function renderQueryTextLines(result: {
       memory.content?.trim()
       || memory.preview?.trim()
       || memory.context?.trim()
-      || result.context?.trim()
       || "(no preview available)";
     return `- ${text}`;
   });

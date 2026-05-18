@@ -11,7 +11,7 @@ test("plain text query output renders recall results content", () => {
   assert.deepEqual(lines, ["- known fact"]);
 });
 
-test("plain text query output falls back to preview and context", () => {
+test("plain text query output falls back to preview and per-result context", () => {
   assert.deepEqual(
     renderQueryTextLines({
       results: [{ preview: "short preview" }],
@@ -20,14 +20,23 @@ test("plain text query output falls back to preview and context", () => {
   );
   assert.deepEqual(
     renderQueryTextLines({
-      context: "recall context",
-      results: [{}],
+      results: [{ context: "memory context" }],
     }),
-    ["- recall context"],
+    ["- memory context"],
   );
 });
 
 test("plain text query output reports no results when recall results are empty", () => {
   assert.deepEqual(renderQueryTextLines({ results: [] }), ["No results."]);
   assert.deepEqual(renderQueryTextLines({}), ["No results."]);
+});
+
+test("plain text query output does not use aggregate recall context as item text", () => {
+  assert.deepEqual(
+    renderQueryTextLines({
+      context: "first memory\n\nsecond memory",
+      results: [{}],
+    }),
+    ["- (no preview available)"],
+  );
 });
