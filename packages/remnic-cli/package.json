@@ -28,7 +28,7 @@
     "build": "tsup --config tsup.config.ts && node scripts/copy-bench-assets.mjs",
     "precheck-types": "node ../../scripts/ensure-cli-bench-build-deps.mjs",
     "check-types": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts ../../tests/remnic-cli-bin-wrapper.test.ts",
+    "test": "tsx --test src/*.test.ts ../../tests/remnic-cli-bin-wrapper.test.ts ../../tests/evals-engram-adapter-buffering.test.ts ../../tests/shim-openclaw-engram-package.test.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

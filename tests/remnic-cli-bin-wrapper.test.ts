@@ -2,15 +2,34 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { constants as osConstants, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageBinDir = join(repoRoot, "packages", "remnic-cli", "bin");
+const remnicCliPackageJson = join(repoRoot, "packages", "remnic-cli", "package.json");
 const remnicBin = join(packageBinDir, "remnic.cjs");
 const engramBin = join(packageBinDir, "engram.cjs");
+
+test("@remnic/cli package test script includes linked root tests", async () => {
+  const raw = await readFile(remnicCliPackageJson, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  assert.equal(typeof parsed, "object");
+  assert.notEqual(parsed, null);
+  assert.equal(Array.isArray(parsed), false);
+
+  const scripts = (parsed as Record<string, unknown>).scripts;
+  assert.equal(typeof scripts, "object");
+  assert.notEqual(scripts, null);
+  assert.equal(Array.isArray(scripts), false);
+
+  const testScript = (scripts as Record<string, unknown>).test;
+  assert.equal(typeof testScript, "string");
+  assert.match(testScript, /\.\.\/\.\.\/tests\/evals-engram-adapter-buffering\.test\.ts/);
+  assert.match(testScript, /\.\.\/\.\.\/tests\/shim-openclaw-engram-package\.test\.ts/);
+});
 
 test("remnic package bins are executable on POSIX checkouts", async () => {
   if (process.platform === "win32") {
