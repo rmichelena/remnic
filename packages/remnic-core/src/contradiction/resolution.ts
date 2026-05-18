@@ -67,6 +67,12 @@ export async function executeResolution(
 
   switch (verb) {
     case "keep-a": {
+      const keepTarget = await validateKeepTarget(storage, pairId, idA);
+      if (!keepTarget.ok) {
+        supersedeFailed = true;
+        message = keepTarget.message;
+        break;
+      }
       const sourceB = await loadSourceSnapshot(storage, idB);
       const ok = sourceB
         ? await supersedeSafe(storage, idB, idA, "contradiction-resolution:keep-a")
@@ -84,6 +90,12 @@ export async function executeResolution(
       break;
     }
     case "keep-b": {
+      const keepTarget = await validateKeepTarget(storage, pairId, idB);
+      if (!keepTarget.ok) {
+        supersedeFailed = true;
+        message = keepTarget.message;
+        break;
+      }
       const sourceA = await loadSourceSnapshot(storage, idA);
       const ok = sourceA
         ? await supersedeSafe(storage, idA, idB, "contradiction-resolution:keep-b")
@@ -244,6 +256,28 @@ function mergedMemoryCategory(sourceA: MemoryFile, sourceB: MemoryFile): MemoryC
   return sourceA.frontmatter.category === sourceB.frontmatter.category
     ? sourceA.frontmatter.category
     : "fact";
+}
+
+type KeepTargetValidation =
+  | { ok: true }
+  | { ok: false; message: string };
+
+async function validateKeepTarget(
+  storage: StorageManager,
+  pairId: string,
+  keepId: string,
+): Promise<KeepTargetValidation> {
+  const target = await loadSourceSnapshot(storage, keepId);
+  if (!target) {
+    return { ok: false, message: `Kept memory ${keepId} not found; not resolving ${pairId}` };
+  }
+
+  const status = target.frontmatter.status ?? "active";
+  if (status !== "active") {
+    return { ok: false, message: `Kept memory ${keepId} is ${status}; not resolving ${pairId}` };
+  }
+
+  return { ok: true };
 }
 
 async function loadSourceSnapshot(storage: StorageManager, memoryId: string): Promise<MemoryFile | null> {

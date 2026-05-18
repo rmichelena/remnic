@@ -775,6 +775,53 @@ test("executeResolution merge keeps created replacement when rollback fails", as
   }
 });
 
+test("executeResolution keep-a does not supersede when the kept memory is missing", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const written = writePair(dir, makePair());
+    const storage = makeResolutionStorage();
+    storage.memories.delete("mem-a-001");
+
+    const result = await executeResolution(dir, storage, written.pairId, "keep-a");
+
+    assert.match(result.message, /Kept memory mem-a-001 not found/);
+    assert.deepEqual(result.affectedIds, []);
+    assert.deepEqual(storage.supersedeCalls, []);
+    assert.equal(storage.memories.get("mem-b-002")?.frontmatter.status, undefined);
+    assert.equal(readPair(dir, written.pairId)?.resolution, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("executeResolution keep-b does not supersede when the kept memory is inactive", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const written = writePair(dir, makePair());
+    const storage = makeResolutionStorage();
+    const keepB = storage.memories.get("mem-b-002");
+    assert.ok(keepB);
+    storage.memories.set("mem-b-002", {
+      ...keepB,
+      frontmatter: {
+        ...keepB.frontmatter,
+        status: "superseded",
+        supersededBy: "replacement",
+      },
+    });
+
+    const result = await executeResolution(dir, storage, written.pairId, "keep-b");
+
+    assert.match(result.message, /Kept memory mem-b-002 is superseded/);
+    assert.deepEqual(result.affectedIds, []);
+    assert.deepEqual(storage.supersedeCalls, []);
+    assert.equal(storage.memories.get("mem-a-001")?.frontmatter.status, undefined);
+    assert.equal(readPair(dir, written.pairId)?.resolution, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("executeResolution keep-a restores source after partial supersede failure", async () => {
   const { dir, cleanup } = await makeTempDir();
   try {
