@@ -82,7 +82,7 @@ export function synthesizeTrainingPairs(
   records: TrainingExportRecord[],
   options?: SynthesizerOptions,
 ): TrainingExportRecord[] {
-  const maxPairs = options?.maxPairsPerRecord ?? DEFAULT_MAX_PAIRS;
+  const maxPairs = resolveMaxPairsPerRecord(options?.maxPairsPerRecord);
   const style = options?.styleMarkers;
   const result: TrainingExportRecord[] = [];
 
@@ -118,6 +118,18 @@ export function synthesizeTrainingPairs(
 }
 
 // ── Internals ────────────────────────────────────────────
+
+function resolveMaxPairsPerRecord(maxPairsPerRecord: number | undefined): number {
+  const maxPairs = maxPairsPerRecord ?? DEFAULT_MAX_PAIRS;
+  if (
+    !Number.isFinite(maxPairs) ||
+    !Number.isInteger(maxPairs) ||
+    maxPairs <= 0
+  ) {
+    throw new RangeError("maxPairsPerRecord must be a finite positive integer");
+  }
+  return maxPairs;
+}
 
 /**
  * Resolve a record's category field to a QUESTION_TEMPLATES key.
