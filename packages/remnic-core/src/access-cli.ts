@@ -40,6 +40,7 @@ type UsageErrorKind =
   | "unsupported-command"
   | "unexpected-positional"
   | "unknown-option"
+  | "invalid-option"
   | "option-does-not-take-value"
   | "missing-option"
   | "missing-content"
@@ -50,6 +51,7 @@ class UsageError extends Error {
   constructor(
     readonly kind: UsageErrorKind,
     readonly optionName?: string,
+    readonly acceptedValues?: readonly string[],
   ) {
     super("invalid access-cli arguments");
   }
@@ -63,6 +65,10 @@ function formatUsageError(error: UsageError): string {
       return "unexpected positional argument";
     case "unknown-option":
       return `unknown option: --${error.optionName ?? "unknown"}`;
+    case "invalid-option": {
+      const accepted = error.acceptedValues?.length ? `. Accepted: ${error.acceptedValues.join(", ")}.` : "";
+      return `invalid value for --${error.optionName ?? "unknown"}${accepted}`;
+    }
     case "option-does-not-take-value":
       return `option does not accept a value: --${error.optionName ?? "unknown"}`;
     case "missing-option":
@@ -142,6 +148,15 @@ const COMMAND_SPECS: Record<CommandName, CommandSpec> = {
     flagOptions: new Set(["dry-run"]),
   },
 };
+
+const BROWSE_SORT_VALUES = Object.freeze([
+  "updated_desc",
+  "updated_asc",
+  "created_desc",
+  "created_asc",
+] as const);
+
+type BrowseSort = (typeof BROWSE_SORT_VALUES)[number];
 
 function parseArgs(argv: string[]): ParsedArgs {
   const [commandRaw, ...rest] = argv;
@@ -229,7 +244,11 @@ function requireOption(args: ParsedArgs, name: string): string {
   return value;
 }
 
-function parseIntegerOption(args: ParsedArgs, name: string): number | undefined {
+function parseIntegerOption(
+  args: ParsedArgs,
+  name: string,
+  options: { min?: number } = {},
+): number | undefined {
   const raw = getLastOption(args, name);
   if (!raw) return undefined;
   const trimmed = raw.trim();
@@ -240,7 +259,19 @@ function parseIntegerOption(args: ParsedArgs, name: string): number | undefined 
   if (!Number.isSafeInteger(value)) {
     throw new UsageError("invalid-integer", name);
   }
+  if (options.min !== undefined && value < options.min) {
+    throw new UsageError("invalid-option", name, [`integer >= ${options.min}`]);
+  }
   return value;
+}
+
+function parseBrowseSortOption(args: ParsedArgs, name: string): BrowseSort | undefined {
+  const raw = getLastOption(args, name);
+  if (!raw) return undefined;
+  if ((BROWSE_SORT_VALUES as readonly string[]).includes(raw)) {
+    return raw as BrowseSort;
+  }
+  throw new UsageError("invalid-option", name, BROWSE_SORT_VALUES);
 }
 
 function parseFloatOption(
@@ -296,9 +327,9 @@ async function runBrowse(args: ParsedArgs, preferredId?: string): Promise<void> 
     query: getLastOption(args, "query"),
     category: getLastOption(args, "category"),
     status: getLastOption(args, "status"),
-    sort: getLastOption(args, "sort") as "updated_desc" | "updated_asc" | "created_desc" | "created_asc" | undefined,
-    limit: parseIntegerOption(args, "limit"),
-    offset: parseIntegerOption(args, "offset"),
+    sort: parseBrowseSortOption(args, "sort"),
+    limit: parseIntegerOption(args, "limit", { min: 1 }),
+    offset: parseIntegerOption(args, "offset", { min: 0 }),
   };
   const { service } = buildRuntime(preferredId);
   const result = await service.memoryBrowse(request);
