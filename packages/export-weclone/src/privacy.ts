@@ -18,7 +18,43 @@ export interface PrivacySweepResult {
 interface PiiPattern {
   name: string;
   regex: RegExp;
+  validate?: (match: string) => boolean;
 }
+
+function normalizeCardCandidate(value: string): string {
+  return value.replace(/[-\s]/g, "");
+}
+
+function passesLuhn(value: string): boolean {
+  let sum = 0;
+  let doubleDigit = false;
+
+  for (let i = value.length - 1; i >= 0; i -= 1) {
+    let digit = Number(value[i]);
+    if (!Number.isInteger(digit)) return false;
+    if (doubleDigit) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    doubleDigit = !doubleDigit;
+  }
+
+  return sum > 0 && sum % 10 === 0;
+}
+
+function isCreditCardCandidate(match: string): boolean {
+  const digits = normalizeCardCandidate(match);
+  return digits.length >= 13 && digits.length <= 19 && passesLuhn(digits);
+}
+
+const CREDIT_CARD_PATTERNS: PiiPattern[] = [19, 18, 17, 16, 15, 14, 13].map(
+  (digitCount) => ({
+    name: "credit_card",
+    regex: new RegExp(`\\b\\d(?:[-\\s]?\\d){${digitCount - 1}}\\b`, "g"),
+    validate: isCreditCardCandidate,
+  }),
+);
 
 /**
  * Ordered list of PII patterns.
@@ -37,11 +73,10 @@ const PII_PATTERNS: PiiPattern[] = [
     name: "ssn",
     regex: /\b\d{3}-\d{2}-\d{4}\b/g,
   },
-  {
-    // Credit card: 4 groups of 4 digits separated by dashes or spaces
-    name: "credit_card",
-    regex: /\b\d{4}[-\s]\d{4}[-\s]\d{4}[-\s]\d{4}\b/g,
-  },
+  // Credit card: 13-19 digits, optionally separated by dashes or spaces.
+  // Try longest candidates first so valid 19-digit cards are preserved while
+  // shorter cards next to numeric metadata can still be reconsidered.
+  ...CREDIT_CARD_PATTERNS,
   {
     // IP address: four octets 0-255
     name: "ip_address",
@@ -83,16 +118,16 @@ export function sweepPii(records: TrainingExportRecord[]): PrivacySweepResult {
       for (const pattern of PII_PATTERNS) {
         // Reset lastIndex for global regex reuse
         pattern.regex.lastIndex = 0;
-        if (pattern.regex.test(value)) {
-          pattern.regex.lastIndex = 0;
-          value = value.replace(pattern.regex, "[REDACTED]");
+        value = value.replace(pattern.regex, (match) => {
+          if (pattern.validate && !pattern.validate(match)) return match;
           recordHasRedaction.add(idx);
           redactionDetails.push({
             index: idx,
             field,
             pattern: pattern.name,
           });
-        }
+          return "[REDACTED]";
+        });
       }
 
       cleaned[field] = value;

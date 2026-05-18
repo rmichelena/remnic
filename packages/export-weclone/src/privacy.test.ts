@@ -73,6 +73,50 @@ describe("sweepPii", () => {
     assert.equal(result.redactedCount, 1);
   });
 
+  it("redacts contiguous credit card numbers that pass Luhn", () => {
+    const records = [
+      makeRecord({ output: "Card: 4111111111111111." }),
+    ];
+    const result = sweepPii(records);
+
+    assert.equal(result.cleanRecords[0].output, "Card: [REDACTED].");
+    assert.equal(result.redactedCount, 1);
+    assert.equal(result.redactionDetails[0].pattern, "credit_card");
+  });
+
+  it("redacts card numbers followed by adjacent numeric metadata", () => {
+    const records = [
+      makeRecord({ output: "Card: 4111 1111 1111 1111 123." }),
+    ];
+    const result = sweepPii(records);
+
+    assert.equal(result.cleanRecords[0].output, "Card: [REDACTED] 123.");
+    assert.equal(result.redactedCount, 1);
+    assert.equal(result.redactionDetails[0].pattern, "credit_card");
+  });
+
+  it("redacts valid 19-digit card candidates without truncating them", () => {
+    const records = [
+      makeRecord({ output: "Card: 4000000000000000006." }),
+    ];
+    const result = sweepPii(records);
+
+    assert.equal(result.cleanRecords[0].output, "Card: [REDACTED].");
+    assert.equal(result.redactedCount, 1);
+    assert.equal(result.redactionDetails[0].pattern, "credit_card");
+  });
+
+  it("does not redact non-card digit runs that fail Luhn", () => {
+    const records = [
+      makeRecord({ output: "Reference number: 1234567890123456." }),
+    ];
+    const result = sweepPii(records);
+
+    assert.equal(result.cleanRecords[0].output, "Reference number: 1234567890123456.");
+    assert.equal(result.redactedCount, 0);
+    assert.equal(result.redactionDetails.length, 0);
+  });
+
   it("redacts IP addresses", () => {
     const records = [makeRecord({ output: "Server is at 192.168.1.100 on port 80." })];
     const result = sweepPii(records);
@@ -125,6 +169,22 @@ describe("sweepPii", () => {
     assert.equal(result.redactedCount, 1);
     assert.equal(result.redactionDetails[0].index, 1);
     assert.equal(result.redactionDetails[0].field, "output");
+  });
+
+  it("records one redaction detail for each repeated match in a field", () => {
+    const records = [
+      makeRecord({ output: "Email a@example.com and b@example.com." }),
+    ];
+    const result = sweepPii(records);
+
+    assert.equal(result.cleanRecords[0].output, "Email [REDACTED] and [REDACTED].");
+    assert.equal(result.redactedCount, 1);
+    assert.equal(
+      result.redactionDetails.filter(
+        (detail) => detail.field === "output" && detail.pattern === "email",
+      ).length,
+      2,
+    );
   });
 
   it("handles multiple PII types in a single record", () => {
