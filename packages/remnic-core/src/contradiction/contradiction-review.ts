@@ -12,8 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { log } from "../logger.js";
+import { createHash, randomUUID } from "node:crypto";
 import type { ContradictionVerdict } from "./contradiction-judge.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -120,6 +119,25 @@ function ensureDir(memoryDir: string): void {
   }
 }
 
+function uniqueTempPath(filePath: string): string {
+  return `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+}
+
+function writePairFile(filePath: string, pair: ContradictionPair): void {
+  const tmpPath = uniqueTempPath(filePath);
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(pair, null, 2), "utf-8");
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup only; preserve the original write failure.
+    }
+    throw error;
+  }
+}
+
 // ── Write ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -185,11 +203,7 @@ export function writePair(
   };
 
   const filePath = pairPath(memoryDir, pairId);
-  const tmpPath = `${filePath}.tmp`;
-
-  // Atomic write: temp then rename (rule 54)
-  fs.writeFileSync(tmpPath, JSON.stringify(full, null, 2), "utf-8");
-  fs.renameSync(tmpPath, filePath);
+  writePairFile(filePath, full);
 
   return full;
 }
@@ -334,10 +348,7 @@ export function resolvePair(
   };
 
   const filePath = pairPath(memoryDir, pairId);
-  const tmpPath = `${filePath}.tmp`;
-
-  fs.writeFileSync(tmpPath, JSON.stringify(updated, null, 2), "utf-8");
-  fs.renameSync(tmpPath, filePath);
+  writePairFile(filePath, updated);
 
   return updated;
 }
@@ -362,10 +373,7 @@ export function deferPair(
   };
 
   const filePath = pairPath(memoryDir, pairId);
-  const tmpPath = `${filePath}.tmp`;
-
-  fs.writeFileSync(tmpPath, JSON.stringify(updated, null, 2), "utf-8");
-  fs.renameSync(tmpPath, filePath);
+  writePairFile(filePath, updated);
 
   return updated;
 }

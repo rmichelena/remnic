@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -215,6 +216,63 @@ test("writePair is idempotent", async () => {
     const second = writePair(dir, pair);
     assert.equal(first.pairId, second.pairId);
   } finally {
+    await cleanup();
+  }
+});
+
+test("review queue writes use unique temporary paths", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  const tempPaths: string[] = [];
+  const originalWriteFileSync = fs.writeFileSync;
+
+  (fs as any).writeFileSync = (file: unknown, ...args: unknown[]) => {
+    const filePath = String(file);
+    if (filePath.includes(`${path.sep}.review${path.sep}contradictions${path.sep}`)) {
+      tempPaths.push(filePath);
+    }
+    return (originalWriteFileSync as any).call(fs, file, ...args);
+  };
+
+  try {
+    const first = writePair(dir, makePair({ memoryIds: ["mem-a-001", "mem-b-002"] }));
+    const second = writePair(dir, makePair({ memoryIds: ["mem-a-003", "mem-b-004"] }));
+    resolvePair(dir, first.pairId, "both-valid");
+    deferPair(dir, second.pairId);
+
+    assert.equal(tempPaths.length, 4);
+    assert.equal(new Set(tempPaths).size, tempPaths.length);
+    for (const tempPath of tempPaths) {
+      assert.match(tempPath, /\.json\.\d+\.\d+\.[0-9a-f-]+\.tmp$/);
+      assert.equal(tempPath.endsWith(".json.tmp"), false);
+    }
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+    await cleanup();
+  }
+});
+
+test("review queue write failures clean up unique temporary files", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  const originalRenameSync = fs.renameSync;
+  let attemptedTempPath: string | null = null;
+
+  (fs as any).renameSync = (oldPath: unknown, newPath: unknown) => {
+    if (String(newPath).includes(`${path.sep}.review${path.sep}contradictions${path.sep}`)) {
+      attemptedTempPath = String(oldPath);
+      throw new Error("simulated rename failure");
+    }
+    return (originalRenameSync as any).call(fs, oldPath, newPath);
+  };
+
+  try {
+    assert.throws(
+      () => writePair(dir, makePair()),
+      /simulated rename failure/,
+    );
+    assert.ok(attemptedTempPath);
+    assert.equal(fs.existsSync(attemptedTempPath), false);
+  } finally {
+    fs.renameSync = originalRenameSync;
     await cleanup();
   }
 });
