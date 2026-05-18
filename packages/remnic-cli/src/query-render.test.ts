@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderQueryTextLines } from "./index.js";
+import { buildQueryRecallRequest, renderQueryTextLines } from "./index.js";
+
+test("query recall requests include a one-shot CLI session key", () => {
+  const request = buildQueryRecallRequest("known fact");
+
+  assert.equal(request.query, "known fact");
+  assert.equal(request.mode, "auto");
+  assert.equal(request.sessionKey, `remnic-cli:query:${process.pid}`);
+});
 
 test("plain text query output renders recall results content", () => {
   const lines = renderQueryTextLines({

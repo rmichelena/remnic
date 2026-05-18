@@ -3868,6 +3868,18 @@ export function renderQueryTextLines(result: {
   });
 }
 
+export function buildQueryRecallRequest(queryText: string): {
+  query: string;
+  mode: "auto";
+  sessionKey: string;
+} {
+  return {
+    query: queryText,
+    mode: "auto",
+    sessionKey: `remnic-cli:query:${process.pid}`,
+  };
+}
+
 async function cmdQuery(queryText: string, json: boolean, explain: boolean): Promise<void> {
   if (!queryText) {
     console.error("Usage: remnic query <text>");
@@ -3884,6 +3896,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
   const orchestrator = new Orchestrator(config);
   await orchestrator.initialize();
   const service = new EngramAccessService(orchestrator);
+  const recallRequest = buildQueryRecallRequest(queryText);
 
   try {
     if (explain) {
@@ -3909,7 +3922,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
       }
 
       const explainStart = Date.now();
-      const recallResult = await service.recall({ query: queryText, mode: "auto" });
+      const recallResult = await service.recall(recallRequest);
       const totalDurationMs = Date.now() - explainStart;
       // recall() returns { count, results, memoryIds, ... } (see
       // EngramAccessRecallResponse). A prior version of this fallback
@@ -3940,7 +3953,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
       return;
     }
 
-    const result = await service.recall({ query: queryText, mode: "auto" });
+    const result = await service.recall(recallRequest);
     if (json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
