@@ -790,6 +790,62 @@ test("runContradictionScan loads memories from namespace-scoped storage", async 
   }
 });
 
+test("runContradictionScan caps candidates during generation and preserves strategy priority", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const entityA = makeMemory("entity-a");
+    entityA.frontmatter.entityRef = "entity:shared";
+    const entityB = makeMemory("entity-b");
+    entityB.frontmatter.entityRef = "entity:shared";
+
+    const topicA = makeMemory("topic-a");
+    topicA.frontmatter.tags = ["shared-topic"];
+    const topicB = makeMemory("topic-b");
+    topicB.frontmatter.tags = ["shared-topic"];
+
+    const embedA = makeMemory("embed-0-a");
+    embedA.frontmatter.tags = ["embed-a"];
+    const embedB = makeMemory("embed-0-b");
+    embedB.frontmatter.tags = ["embed-b"];
+
+    const storage = makeScanStorage([embedB, topicB, entityB, embedA, topicA, entityA]);
+    const config = parseConfig({
+      memoryDir: dir,
+      contradictionScan: {
+        enabled: true,
+        maxPairsPerRun: 2,
+        topicOverlapFloor: 0.5,
+        similarityFloor: 0.8,
+      },
+    });
+    let embeddingCalls = 0;
+
+    const result = await runContradictionScan({
+      storage,
+      config,
+      memoryDir: dir,
+      embeddingLookup: async (content) => {
+        embeddingCalls += 1;
+        return content === embedA.content ? [{ id: "embed-0-b", score: 0.99 }] : [];
+      },
+      localLlm: null,
+      fallbackLlm: null,
+    });
+
+    assert.equal(result.candidates, 2);
+    assert.equal(result.judged, 2);
+    assert.equal(result.queued, 2);
+    assert.equal(embeddingCalls, 0);
+
+    const queuedPairs = listPairs(dir, { filter: "all" }).pairs
+      .map((pair) => [...pair.memoryIds].sort().join(":"))
+      .sort();
+    assert.deepEqual(queuedPairs, ["entity-a:entity-b", "topic-a:topic-b"]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("runContradictionScan resolves default namespace scans through namespace storage resolver", async () => {
   const { dir, cleanup } = await makeTempDir();
   try {

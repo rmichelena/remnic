@@ -149,13 +149,9 @@ export async function runContradictionScan(deps: ScanDependencies): Promise<Scan
     };
   }
 
-  // 4. Cap at maxPairsPerRun (deterministic selection by pairId)
-  const capped = candidates.pairs
-    .sort((a, b) => computePairId(a.idA, a.idB, namespace).localeCompare(computePairId(b.idA, b.idB, namespace)))
-    .slice(0, scanConfig.maxPairsPerRun);
-
-  // 5. Build judge inputs
-  const judgeInputs: ContradictionJudgeInput[] = capped.map((pair) => ({
+  // 4. Build judge inputs. Candidate generation already preserves strategy
+  // priority and caps work at maxPairsPerRun.
+  const judgeInputs: ContradictionJudgeInput[] = candidates.pairs.map((pair) => ({
     memoryIdA: pair.idA,
     memoryIdB: pair.idB,
     textA: pair.textA,
@@ -222,13 +218,22 @@ async function generatePairs(
   embeddingLookup?: SemanticDedupLookup,
 ): Promise<PairGenResult> {
   const pairs: CandidatePair[] = [];
-  const embeddingPairs: CandidatePair[] = [];
   let skipped = 0;
   const seen = new Set<string>();
+  const maxPairs = Math.max(0, Math.floor(scanConfig.maxPairsPerRun));
+  if (maxPairs === 0) return { pairs, skipped };
+
+  const orderedMemories = [...memories].sort(compareMemoryId);
+
+  const pushCandidate = (pair: CandidatePair): void => {
+    if (pairs.length < maxPairs) pairs.push(pair);
+  };
+
+  const hasCapacity = (): boolean => pairs.length < maxPairs;
 
   // Build index by entityRef for fast lookup
   const byEntity = new Map<string, MemoryFile[]>();
-  for (const mem of memories) {
+  for (const mem of orderedMemories) {
     const entity = mem.frontmatter.entityRef;
     if (entity) {
       const existing = byEntity.get(entity) ?? [];
@@ -238,10 +243,13 @@ async function generatePairs(
   }
 
   // Strategy 1: Entity-ref based pairing (high precision)
-  for (const [, group] of byEntity) {
+  entityPairs:
+  for (const entity of [...byEntity.keys()].sort()) {
+    const group = byEntity.get(entity) ?? [];
     if (group.length < 2) continue;
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
+        if (!hasCapacity()) break entityPairs;
         const a = group[i];
         const b = group[j];
         const pairId = computePairId(a.frontmatter.id!, b.frontmatter.id!, namespace);
@@ -256,7 +264,7 @@ async function generatePairs(
           continue;
         }
 
-        pairs.push({
+        pushCandidate({
           idA: a.frontmatter.id!,
           idB: b.frontmatter.id!,
           textA: a.content,
@@ -269,9 +277,11 @@ async function generatePairs(
   }
 
   // Strategy 2: Tag/topic overlap for memories without shared entityRef
-  const noEntity = memories.filter((m) => !m.frontmatter.entityRef);
+  const noEntity = orderedMemories.filter((m) => !m.frontmatter.entityRef);
+  topicPairs:
   for (let i = 0; i < noEntity.length; i++) {
     for (let j = i + 1; j < noEntity.length; j++) {
+      if (!hasCapacity()) break topicPairs;
       const a = noEntity[i];
       const b = noEntity[j];
       const overlap = jaccardOverlap(
@@ -291,7 +301,7 @@ async function generatePairs(
         continue;
       }
 
-      pairs.push({
+      pushCandidate({
         idA: a.frontmatter.id!,
         idB: b.frontmatter.id!,
         textA: a.content,
@@ -303,13 +313,18 @@ async function generatePairs(
   }
 
   // Strategy 3: Embedding cosine similarity (enforces similarityFloor config)
-  if (embeddingLookup) {
-    const memoryById = new Map(memories.map((m) => [m.frontmatter.id!, m]));
-    for (const mem of memories) {
+  if (embeddingLookup && hasCapacity()) {
+    const memoryById = new Map(orderedMemories.map((m) => [m.frontmatter.id!, m]));
+    embeddingPairs:
+    for (const mem of orderedMemories) {
+      if (!hasCapacity()) break;
       const id = mem.frontmatter.id!;
       try {
-        const hits = await embeddingLookup(mem.content, 20);
+        const hits = (await embeddingLookup(mem.content, 20)).sort((a, b) =>
+          b.score - a.score || a.id.localeCompare(b.id),
+        );
         for (const hit of hits) {
+          if (!hasCapacity()) break embeddingPairs;
           if (hit.score < scanConfig.similarityFloor) continue;
           if (hit.id === id) continue;
           const peer = memoryById.get(hit.id);
@@ -325,7 +340,7 @@ async function generatePairs(
             continue;
           }
 
-          embeddingPairs.push({
+          pushCandidate({
             idA: id,
             idB: hit.id,
             textA: mem.content,
@@ -339,10 +354,6 @@ async function generatePairs(
       }
     }
   }
-
-  // Append embedding pairs after high-precision entity/topic pairs so the
-  // downstream sort+slice(maxPairsPerRun) keeps precision-first ordering.
-  pairs.push(...embeddingPairs);
 
   return { pairs, skipped };
 }
@@ -453,4 +464,8 @@ function jaccardOverlap(a: string[], b: string[]): number {
   }
   const union = setA.size + setB.size - intersection;
   return union === 0 ? 0 : intersection / union;
+}
+
+function compareMemoryId(a: MemoryFile, b: MemoryFile): number {
+  return (a.frontmatter.id ?? "").localeCompare(b.frontmatter.id ?? "");
 }
