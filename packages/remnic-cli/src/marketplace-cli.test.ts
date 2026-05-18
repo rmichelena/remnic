@@ -121,3 +121,39 @@ test("connectors marketplace rejects a bare --config flag before using defaults"
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("connectors marketplace generate rejects a duplicate bare --output flag", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "remnic-marketplace-cli-"));
+  const outputDir = path.join(home, "out");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        tsxCli,
+        cliPath,
+        "connectors",
+        "marketplace",
+        "generate",
+        "--output",
+        outputDir,
+        "--output",
+      ],
+      {
+        cwd: home,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          REMNIC_HOME: home,
+        },
+      },
+    );
+
+    const textResult = toTextResult(result);
+    assert.notEqual(textResult.status, 0);
+    assert.match(textResult.stderr, /connectors marketplace generate: --output requires a value/);
+    assert.equal(await pathExists(path.join(outputDir, "marketplace.json")), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

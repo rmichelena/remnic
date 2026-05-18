@@ -3435,20 +3435,26 @@ function resolveMemoryDir(): string {
  * config path. Use this variant only for flags that require a value argument.
  */
 function resolveFlagStrict(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  if (idx + 1 >= args.length) {
-    throw new Error(
-      `${flag} requires a value. Provide it as \`${flag} <value>\`, not as a bare flag.`,
-    );
+  let value: string | undefined;
+  for (let idx = 0; idx < args.length; idx++) {
+    if (args[idx] !== flag) continue;
+
+    if (idx + 1 >= args.length) {
+      throw new Error(
+        `${flag} requires a value. Provide it as \`${flag} <value>\`, not as a bare flag.`,
+      );
+    }
+    const next = args[idx + 1];
+    if (next.startsWith("-")) {
+      throw new Error(
+        `${flag} requires a value. Provide it as \`${flag} <value>\`, not as a bare flag.`,
+      );
+    }
+
+    value ??= next;
+    idx++;
   }
-  const next = args[idx + 1];
-  if (next.startsWith("-")) {
-    throw new Error(
-      `${flag} requires a value. Provide it as \`${flag} <value>\`, not as a bare flag.`,
-    );
-  }
-  return next;
+  return value;
 }
 // ── OpenClaw config helpers ───────────────────────────────────────────────────
 
