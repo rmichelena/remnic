@@ -193,14 +193,12 @@ export function parseImportArgs(rest: readonly string[]): ImportDispatchArgs {
   const dryRun = consumeFlag(args, "--dry-run");
   const includeConversations = consumeFlag(args, "--include-conversations");
 
-  // Any remaining unknown --flag tokens should be rejected rather than
-  // silently ignored (CLAUDE.md rule 51). We allow positional leftovers to
-  // pass through untouched because adapters may define their own hints in
-  // future slices.
-  const unknownFlags = args.filter((a) => a.startsWith("--"));
-  if (unknownFlags.length > 0) {
+  // Any remaining tokens should be rejected rather than silently ignored
+  // (CLAUDE.md rule 51). There is no structured passthrough field in the
+  // returned args, so accepting positional leftovers would discard them.
+  if (args.length > 0) {
     throw new Error(
-      `Unknown flag(s) for 'remnic import': ${unknownFlags.join(", ")}. ` +
+      `Unknown argument(s) for 'remnic import': ${args.join(", ")}. ` +
         `Run 'remnic import --help' for the full option list.`,
     );
   }
@@ -362,10 +360,9 @@ export function parseImportBundleArgs(
   const dryRun = consumeFlag(args, "--dry-run");
   const includeConversations = consumeFlag(args, "--include-conversations");
 
-  const unknownFlags = args.filter((a) => a.startsWith("--"));
-  if (unknownFlags.length > 0) {
+  if (args.length > 0) {
     throw new Error(
-      `Unknown flag(s) for 'remnic import --all-from-bundle': ${unknownFlags.join(", ")}.`,
+      `Unknown argument(s) for 'remnic import --all-from-bundle': ${args.join(", ")}.`,
     );
   }
 

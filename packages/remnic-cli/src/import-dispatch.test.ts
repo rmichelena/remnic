@@ -173,7 +173,14 @@ describe("parseImportArgs", () => {
   it("rejects unknown flags rather than silently ignoring", () => {
     assert.throws(
       () => parseImportArgs(["--adapter", "chatgpt", "--unknown-opt", "x"]),
-      /Unknown flag/,
+      /Unknown argument/,
+    );
+  });
+
+  it("rejects stray positional arguments rather than silently dropping them", () => {
+    assert.throws(
+      () => parseImportArgs(["--adapter", "chatgpt", "/tmp/export.json"]),
+      /Unknown argument.*\/tmp\/export\.json/,
     );
   });
 
@@ -467,7 +474,19 @@ describe("parseImportBundleArgs", () => {
           "/tmp/bundle",
           "--bogus",
         ]),
-      /Unknown flag/,
+      /Unknown argument/,
+    );
+  });
+
+  it("rejects extra positional arguments in bundle mode", () => {
+    assert.throws(
+      () =>
+        parseImportBundleArgs([
+          "--all-from-bundle",
+          "/tmp/bundle",
+          "/tmp/other",
+        ]),
+      /Unknown argument.*\/tmp\/other/,
     );
   });
 });
