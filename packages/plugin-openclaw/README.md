@@ -211,12 +211,13 @@ tools.
 
 OpenClaw 2026.5.16-beta.7 through 2026.5.19-beta.1 keep the Remnic-required
 plugin install, ClawHub fallback, manifest contract, hook, memory-slot, gateway
-LLM, and plugin security-scan surfaces compatible. The only package-level
-compatibility change Remnic needs for this range is publishing the OpenClaw
-runtime floor of Node.js `>=22.19.0` on the OpenClaw adapter packages. The
-manifest continues to avoid `setup.providers.openai`; OpenClaw still treats
-provider ids there as ownership metadata, while Remnic only advertises an
-optional plugin-mode OpenAI key through `providerAuthChoices` and the deprecated
+LLM, and plugin security-scan surfaces compatible. Those newer OpenClaw hosts
+raise their runtime floor to Node.js `>=22.19.0`, but the Remnic adapter package
+keeps its broad host peer range so older advertised 2026.5.16 hosts do not
+select a package with an incompatible package-level engine gate. The manifest
+continues to avoid `setup.providers.openai`; OpenClaw still treats provider ids
+there as ownership metadata, while Remnic only advertises an optional
+plugin-mode OpenAI key through `providerAuthChoices` and the deprecated
 `providerAuthEnvVars.openai` compatibility probe.
 
 Native memory registrars are tracked separately in

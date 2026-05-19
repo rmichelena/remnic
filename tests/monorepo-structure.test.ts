@@ -159,11 +159,6 @@ test("published OpenClaw packages require an OpenClaw release with registerComma
       ">=2026.5.16-beta.1",
       `${packageDir} must require openclaw >=2026.5.16-beta.1`,
     );
-    assert.equal(
-      pkg.engines?.node,
-      ">=22.19.0",
-      `${packageDir} must publish the OpenClaw 2026.5.19 Node.js runtime floor`,
-    );
   }
 });
 

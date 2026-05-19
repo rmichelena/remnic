@@ -168,8 +168,9 @@ The plugin manifest advertises compatibility on two surfaces:
   surfaces compatible. Remnic stays on the full `definePluginEntry` SDK path
   instead of the simple `defineToolPlugin` helper because the adapter combines
   memory-slot hooks, lifecycle handlers, command metadata, public artifacts,
-  and runtime tools. Published OpenClaw adapter packages declare Node.js
-  `>=22.19.0` to match the current OpenClaw runtime floor.
+  and runtime tools. Newer OpenClaw hosts enforce their Node.js `>=22.19.0`
+  runtime floor at the host level while Remnic keeps the package-level host
+  range broad for older advertised 2026.5.16 runtimes.
 
 Keep the supported blocks. `contracts.tools` is additive for older OpenClaw runtimes, but
 OpenClaw 2026.5 rejects plugin tool registration when a runtime tool is missing

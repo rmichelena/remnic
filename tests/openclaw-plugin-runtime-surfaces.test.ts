@@ -385,9 +385,6 @@ for (const expectation of OPENCLAW_PACKAGE_EXPECTATIONS) {
     const openclaw = packageJson.openclaw ?? {};
 
     assert.equal(packageJson.name, expectation.name);
-    assert.deepEqual(packageJson.engines, {
-      node: ">=22.19.0",
-    });
     assert.deepEqual(openclaw.extensions, ["./dist/index.js"]);
     assert.deepEqual(
       openclaw.runtimeExtensions,
