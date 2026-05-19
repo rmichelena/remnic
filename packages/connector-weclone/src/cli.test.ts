@@ -6,6 +6,7 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createGracefulShutdownHandler } from "./shutdown.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
@@ -77,6 +78,20 @@ function closeServer(server: net.Server): Promise<void> {
       else resolveClose();
     });
   });
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void;
+  let rejectPromise!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
 describe("remnic-weclone-proxy CLI", () => {
@@ -205,5 +220,63 @@ describe("remnic-weclone-proxy CLI", () => {
     } finally {
       await closeServer(server);
     }
+  });
+
+  it("awaits proxy stop before exiting and ignores duplicate shutdown signals", async () => {
+    const stopGate = deferred();
+    const exitGate = deferred<number>();
+    const exitCodes: number[] = [];
+    let stopCalls = 0;
+
+    const handler = createGracefulShutdownHandler(
+      {
+        async stop() {
+          stopCalls += 1;
+          await stopGate.promise;
+        },
+      },
+      {
+        exit(code) {
+          exitCodes.push(code);
+          exitGate.resolve(code);
+        },
+        logError() {},
+      },
+    );
+
+    handler();
+    handler();
+
+    assert.equal(stopCalls, 1);
+    assert.deepEqual(exitCodes, []);
+
+    stopGate.resolve();
+    assert.equal(await exitGate.promise, 0);
+    assert.deepEqual(exitCodes, [0]);
+  });
+
+  it("reports a failed proxy stop and exits nonzero", async () => {
+    const exitGate = deferred<number>();
+    const logged: string[] = [];
+    const handler = createGracefulShutdownHandler(
+      {
+        async stop() {
+          throw new Error("flush failed");
+        },
+      },
+      {
+        exit(code) {
+          exitGate.resolve(code);
+        },
+        logError(message) {
+          logged.push(message);
+        },
+      },
+    );
+
+    handler();
+
+    assert.equal(await exitGate.promise, 1);
+    assert.match(logged.join("\n"), /Failed to stop WeClone proxy: flush failed/);
   });
 });

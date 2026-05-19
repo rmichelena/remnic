@@ -10,6 +10,7 @@
 
 import { createWeCloneProxy } from "./proxy.js";
 import { parseConfig, type WeCloneConnectorConfig } from "./config.js";
+import { createGracefulShutdownHandler, errorMessage } from "./shutdown.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -54,10 +55,6 @@ function defaultConfigPath(): string {
     return resolve(expandTildePath(override), "connectors", "weclone.json");
   }
   return resolve(homeDir(), ".remnic", "connectors", "weclone.json");
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 async function main(): Promise<void> {
@@ -124,10 +121,7 @@ async function main(): Promise<void> {
   console.log(`  WeClone API: ${config.wecloneApiUrl}`);
   console.log(`  Remnic daemon: ${config.remnicDaemonUrl}`);
 
-  const stopAndExit = () => {
-    void proxy.stop();
-    process.exit(0);
-  };
+  const stopAndExit = createGracefulShutdownHandler(proxy);
   process.on("SIGINT", stopAndExit);
   process.on("SIGTERM", stopAndExit);
 }
