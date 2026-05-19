@@ -478,6 +478,7 @@ export async function cmdImport(
   rest: string[],
   targetFactory: () => Promise<ImporterWriteTarget>,
   disposeTarget?: () => Promise<void>,
+  ioOverrides: Partial<Pick<ImportDispatchIO, "loadAdapter" | "readFile" | "runImporter">> = {},
 ): Promise<RunImporterResult | RunImporterResult[] | undefined> {
   if (rest.includes("--help") || rest.includes("-h")) {
     process.stdout.write(IMPORT_USAGE);
@@ -511,10 +512,11 @@ export async function cmdImport(
     }
   }
 
-  // Track whether `getWriteTarget` was actually called so dispose only runs
-  // when a target was materialized. An install-hint miss (loadAdapter throws)
-  // must NOT trigger dispose — there's nothing to dispose and disposing may
-  // itself throw, masking the original error.
+  // Track whether `getWriteTarget` was actually called so dispose runs after
+  // target construction starts, even if the factory rejects before resolving.
+  // An install-hint miss (loadAdapter throws) must NOT trigger dispose —
+  // there's nothing to dispose and disposing may itself throw, masking the
+  // original error.
   //
   // Cursor review on PR #610 — memoize the materialized target across all
   // calls to `getWriteTarget`. `runBundleImportCommand` invokes
@@ -527,9 +529,9 @@ export async function cmdImport(
   let materializedTarget: ImporterWriteTarget | undefined;
   let materializePromise: Promise<ImporterWriteTarget> | undefined;
   const io: ImportDispatchIO = {
-    readFile: async (p) => fs.promises.readFile(p, "utf-8"),
-    loadAdapter: async (name) => (await loadImporterModule(name)).adapter,
-    runImporter,
+    readFile: ioOverrides.readFile ?? (async (p) => fs.promises.readFile(p, "utf-8")),
+    loadAdapter: ioOverrides.loadAdapter ?? (async (name) => (await loadImporterModule(name)).adapter),
+    runImporter: ioOverrides.runImporter ?? runImporter,
     getWriteTarget: async () => {
       if (materializedTarget !== undefined) return materializedTarget;
       if (materializePromise === undefined) {
@@ -568,10 +570,10 @@ export async function cmdImport(
     process.exitCode = 1;
     return undefined;
   } finally {
-    // Only dispose when the write target was actually constructed. Checking
+    // Only dispose when write target construction actually started. Checking
     // `parsed.dryRun` alone would incorrectly dispose after install-hint
     // misses or parse errors that happen BEFORE `getWriteTarget` is called.
-    if (materializedTarget !== undefined && disposeTarget !== undefined) {
+    if (materializePromise !== undefined && disposeTarget !== undefined) {
       try {
         await disposeTarget();
       } catch {

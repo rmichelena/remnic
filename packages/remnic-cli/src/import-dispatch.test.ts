@@ -417,6 +417,44 @@ describe("cmdImport dispose contract", () => {
       process.exitCode = savedExitCode;
     }
   });
+
+  it("disposes when target construction starts and then rejects", async () => {
+    const savedExitCode = process.exitCode;
+    process.exitCode = 0;
+    try {
+      let factoryCalls = 0;
+      let disposeCalls = 0;
+      let constructed = false;
+      const adapter = makeFakeAdapter([]);
+
+      const factory = async () => {
+        factoryCalls += 1;
+        constructed = true;
+        throw new Error("target initialization failed");
+      };
+      const dispose = async () => {
+        assert.equal(constructed, true);
+        disposeCalls += 1;
+      };
+
+      const result = await cmdImport(
+        ["--adapter", "chatgpt", "--file", "/tmp/export.json"],
+        factory,
+        dispose,
+        {
+          loadAdapter: async () => adapter,
+          readFile: async () => "{}",
+        },
+      );
+
+      assert.equal(result, undefined);
+      assert.equal(process.exitCode, 1);
+      assert.equal(factoryCalls, 1);
+      assert.equal(disposeCalls, 1);
+    } finally {
+      process.exitCode = savedExitCode;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
