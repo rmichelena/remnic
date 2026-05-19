@@ -80,6 +80,7 @@ export class SmartBuffer {
   private state: BufferState;
   private loaded = false;
   private readonly surpriseProbe: BufferSurpriseProbe | null;
+  private mutationChain: Promise<unknown> = Promise.resolve();
   /**
    * Serialized write chain for `BUFFER_SURPRISE` telemetry events.
    *
@@ -103,6 +104,12 @@ export class SmartBuffer {
   ) {
     this.state = { turns: [], lastExtractionAt: null, extractionCount: 0 };
     this.surpriseProbe = surpriseProbe;
+  }
+
+  private enqueueMutation<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.mutationChain.catch(() => {}).then(op);
+    this.mutationChain = run.catch(() => {});
+    return run;
   }
 
   private entryFor(key: string): BufferEntryState {
@@ -211,10 +218,14 @@ export class SmartBuffer {
     }
   }
 
-  async load(): Promise<void> {
+  private async loadUnlocked(): Promise<void> {
     if (this.loaded) return;
     this.state = this.normalizeState(await this.storage.loadBuffer());
     this.loaded = true;
+  }
+
+  async load(): Promise<void> {
+    await this.enqueueMutation(async () => this.loadUnlocked());
   }
 
   /**
@@ -227,12 +238,20 @@ export class SmartBuffer {
     this.loaded = true;
   }
 
-  async save(): Promise<void> {
+  private async saveUnlocked(): Promise<void> {
     await this.storage.saveBuffer(this.state);
   }
 
+  async save(): Promise<void> {
+    await this.enqueueMutation(async () => this.saveUnlocked());
+  }
+
   async addTurn(bufferKey: string, turn: BufferTurn): Promise<TriggerDecision> {
-    await this.load();
+    return this.enqueueMutation(async () => this.addTurnUnlocked(bufferKey, turn));
+  }
+
+  private async addTurnUnlocked(bufferKey: string, turn: BufferTurn): Promise<TriggerDecision> {
+    await this.loadUnlocked();
     const entry = this.entryFor(bufferKey);
     entry.turns.push(turn);
     if (bufferKey === "default") {
@@ -307,7 +326,7 @@ export class SmartBuffer {
     );
 
     this.pruneEntries([bufferKey]);
-    await this.save();
+    await this.saveUnlocked();
     return decision;
   }
 
@@ -505,48 +524,50 @@ export class SmartBuffer {
     turns: BufferTurn[],
     max = 10,
   ): Promise<void> {
-    await this.load();
-    const entry = this.entryFor(bufferKey);
-    if (!Array.isArray(turns) || turns.length === 0 || max <= 0) {
-      delete entry.retainedTurns;
-    } else {
-      // Guard `slice(-max)` against `max === 0` (CLAUDE.md gotcha 27):
-      // `slice(-0)` equals `slice(0)` and would return ALL entries. We
-      // already early-return above when max <= 0.
-      const tail = turns.slice(-max);
-      // Copy explicit fields only — never spread an external object into a
-      // plain object because spread preserves any own `__proto__` /
-      // `constructor` keys that may have arrived via JSON deserialization
-      // of untrusted input (CodeQL js/prototype-polluting-assignment).
-      entry.retainedTurns = tail.map<BufferTurn>((t) => {
-        const copy: BufferTurn = {
-          role: t.role,
-          content: typeof t.content === "string" ? t.content : "",
-          timestamp:
-            typeof t.timestamp === "string"
-              ? t.timestamp
-              : new Date().toISOString(),
-        };
-        if (typeof t.sessionKey === "string") copy.sessionKey = t.sessionKey;
-        if (typeof t.logicalSessionKey === "string") {
-          copy.logicalSessionKey = t.logicalSessionKey;
-        }
-        if (
-          t.providerThreadId === null ||
-          typeof t.providerThreadId === "string"
-        ) {
-          copy.providerThreadId = t.providerThreadId;
-        }
-        if (typeof t.turnFingerprint === "string") {
-          copy.turnFingerprint = t.turnFingerprint;
-        }
-        if (typeof t.persistProcessedFingerprint === "boolean") {
-          copy.persistProcessedFingerprint = t.persistProcessedFingerprint;
-        }
-        return copy;
-      });
-    }
-    await this.save();
+    await this.enqueueMutation(async () => {
+      await this.loadUnlocked();
+      const entry = this.entryFor(bufferKey);
+      if (!Array.isArray(turns) || turns.length === 0 || max <= 0) {
+        delete entry.retainedTurns;
+      } else {
+        // Guard `slice(-max)` against `max === 0` (CLAUDE.md gotcha 27):
+        // `slice(-0)` equals `slice(0)` and would return ALL entries. We
+        // already early-return above when max <= 0.
+        const tail = turns.slice(-max);
+        // Copy explicit fields only — never spread an external object into a
+        // plain object because spread preserves any own `__proto__` /
+        // `constructor` keys that may have arrived via JSON deserialization
+        // of untrusted input (CodeQL js/prototype-polluting-assignment).
+        entry.retainedTurns = tail.map<BufferTurn>((t) => {
+          const copy: BufferTurn = {
+            role: t.role,
+            content: typeof t.content === "string" ? t.content : "",
+            timestamp:
+              typeof t.timestamp === "string"
+                ? t.timestamp
+                : new Date().toISOString(),
+          };
+          if (typeof t.sessionKey === "string") copy.sessionKey = t.sessionKey;
+          if (typeof t.logicalSessionKey === "string") {
+            copy.logicalSessionKey = t.logicalSessionKey;
+          }
+          if (
+            t.providerThreadId === null ||
+            typeof t.providerThreadId === "string"
+          ) {
+            copy.providerThreadId = t.providerThreadId;
+          }
+          if (typeof t.turnFingerprint === "string") {
+            copy.turnFingerprint = t.turnFingerprint;
+          }
+          if (typeof t.persistProcessedFingerprint === "boolean") {
+            copy.persistProcessedFingerprint = t.persistProcessedFingerprint;
+          }
+          return copy;
+        });
+      }
+      await this.saveUnlocked();
+    });
   }
 
   /**
@@ -565,6 +586,7 @@ export class SmartBuffer {
 
   async findBufferKeysForSession(sessionKey: string): Promise<string[]> {
     if (typeof sessionKey !== "string" || sessionKey.length === 0) return [];
+    await this.mutationChain.catch(() => {});
     await this.load();
 
     const matches: string[] = [];
@@ -590,18 +612,20 @@ export class SmartBuffer {
   }
 
   async clearAfterExtraction(bufferKey = "default"): Promise<void> {
-    await this.load();
-    const entry = this.entryFor(bufferKey);
-    entry.turns = [];
-    entry.lastExtractionAt = new Date().toISOString();
-    entry.extractionCount += 1;
-    if (bufferKey === "default") {
-      this.state.turns = entry.turns;
-      this.state.lastExtractionAt = entry.lastExtractionAt;
-      this.state.extractionCount = entry.extractionCount;
-    }
-    this.pruneEntries([bufferKey]);
-    await this.save();
+    await this.enqueueMutation(async () => {
+      await this.loadUnlocked();
+      const entry = this.entryFor(bufferKey);
+      entry.turns = [];
+      entry.lastExtractionAt = new Date().toISOString();
+      entry.extractionCount += 1;
+      if (bufferKey === "default") {
+        this.state.turns = entry.turns;
+        this.state.lastExtractionAt = entry.lastExtractionAt;
+        this.state.extractionCount = entry.extractionCount;
+      }
+      this.pruneEntries([bufferKey]);
+      await this.saveUnlocked();
+    });
   }
 
   getExtractionCount(bufferKey = "default"): number {

@@ -151,6 +151,38 @@ test("BoxBuilder does not seal when same topics continue", async () => {
   }
 });
 
+test("BoxBuilder serializes concurrent open-box updates", async () => {
+  const dir = await makeTmp();
+  try {
+    const builder = new BoxBuilder(dir, {
+      memoryBoxesEnabled: true,
+      traceWeaverEnabled: false,
+      boxTopicShiftThreshold: 0.5,
+      boxTimeGapMs: 60 * 60 * 1000,
+      boxMaxMemories: 100,
+      traceWeaverLookbackDays: 7,
+      traceWeaverOverlapThreshold: 0.4,
+    });
+
+    const now = new Date().toISOString();
+    await Promise.all([
+      builder.onExtraction({ topics: ["postgres", "database"], memoryIds: ["m1"], timestamp: now }),
+      builder.onExtraction({ topics: ["postgres", "database"], memoryIds: ["m2"], timestamp: now }),
+    ]);
+    await builder.sealCurrent("forced");
+
+    const boxDir = path.join(dir, BOX_DIR);
+    const allBoxes = await collectAllBoxFiles(boxDir);
+    assert.equal(allBoxes.length, 1, `expected one merged box, got ${allBoxes.length}`);
+
+    const content = await readFile(allBoxes[0]!, "utf-8");
+    const parsed = parseBoxFrontmatter(content);
+    assert.deepEqual(parsed?.memoryIds.sort(), ["m1", "m2"]);
+  } finally {
+    await cleanup(dir);
+  }
+});
+
 // ── BoxBuilder: sealed box format ─────────────────────────────────────────
 
 test("BoxBuilder writes valid frontmatter when sealing", async () => {

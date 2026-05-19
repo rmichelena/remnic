@@ -175,10 +175,24 @@ export class BoxBuilder {
   private cfg: BoxBuilderConfig;
   private openBox: OpenBoxState | null = null;
   private stateLoaded = false;
+  private openBoxMutationChain: Promise<unknown> = Promise.resolve();
+  private traceMutationChain: Promise<unknown> = Promise.resolve();
 
   constructor(baseDir: string, cfg: BoxBuilderConfig) {
     this.baseDir = baseDir;
     this.cfg = cfg;
+  }
+
+  private enqueueOpenBoxMutation<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.openBoxMutationChain.catch(() => {}).then(op);
+    this.openBoxMutationChain = run.catch(() => {});
+    return run;
+  }
+
+  private enqueueTraceMutation<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.traceMutationChain.catch(() => {}).then(op);
+    this.traceMutationChain = run.catch(() => {});
+    return run;
   }
 
   private get boxBaseDir(): string {
@@ -248,6 +262,10 @@ export class BoxBuilder {
    * Decides whether to seal the current open box and/or start a new one.
    */
   async onExtraction(event: ExtractionEvent): Promise<void> {
+    await this.enqueueOpenBoxMutation(async () => this.onExtractionUnlocked(event));
+  }
+
+  private async onExtractionUnlocked(event: ExtractionEvent): Promise<void> {
     if (!this.cfg.memoryBoxesEnabled) return;
 
     await this.loadOpenBox();
@@ -275,13 +293,13 @@ export class BoxBuilder {
           const toolSet = new Set([...(this.openBox.toolsUsed ?? []), ...event.toolsUsed]);
           this.openBox.toolsUsed = [...toolSet];
         }
-        await this.sealCurrent("max_memories");
+        await this.sealCurrentUnlocked("max_memories");
       } else if (topicShifted) {
-        await this.sealCurrent("topic_shift");
+        await this.sealCurrentUnlocked("topic_shift");
         this.openBox = this.newBox(event, now.toISOString());
         await this.saveOpenBox();
       } else if (timeExpired) {
-        await this.sealCurrent("time_gap");
+        await this.sealCurrentUnlocked("time_gap");
         this.openBox = this.newBox(event, now.toISOString());
         await this.saveOpenBox();
       } else {
@@ -303,7 +321,7 @@ export class BoxBuilder {
       this.openBox = this.newBox(event, now.toISOString());
       // If this initial batch already exceeds max, seal immediately
       if (this.openBox.memoryIds.length > this.cfg.boxMaxMemories) {
-        await this.sealCurrent("max_memories");
+        await this.sealCurrentUnlocked("max_memories");
       } else {
         await this.saveOpenBox();
       }
@@ -327,6 +345,10 @@ export class BoxBuilder {
    * Also runs trace weaving if enabled.
    */
   async sealCurrent(reason: SealReason): Promise<string | null> {
+    return this.enqueueOpenBoxMutation(async () => this.sealCurrentUnlocked(reason));
+  }
+
+  private async sealCurrentUnlocked(reason: SealReason): Promise<string | null> {
     await this.loadOpenBox();
     if (!this.openBox) return null;
 
@@ -378,6 +400,10 @@ export class BoxBuilder {
    * Returns the traceId to assign to this box.
    */
   private async resolveTrace(boxId: string, topics: string[]): Promise<string> {
+    return this.enqueueTraceMutation(async () => this.resolveTraceUnlocked(boxId, topics));
+  }
+
+  private async resolveTraceUnlocked(boxId: string, topics: string[]): Promise<string> {
     const idx = await this.loadTraceIndex();
 
     // Filter to traces active within the lookback window

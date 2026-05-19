@@ -133,6 +133,22 @@ function edgeFilePath(chainsDir: string, edge: CausalEdge): string {
 
 // ─── Chain Index CRUD ────────────────────────────────────────────────────────
 
+const chainMutationQueues = new Map<string, Promise<unknown>>();
+
+function enqueueChainMutation<T>(chainsDir: string, op: () => Promise<T>): Promise<T> {
+  const key = path.resolve(chainsDir);
+  const previous = chainMutationQueues.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(op);
+  const settled = run.catch(() => {});
+  chainMutationQueues.set(key, settled);
+  void settled.finally(() => {
+    if (chainMutationQueues.get(key) === settled) {
+      chainMutationQueues.delete(key);
+    }
+  });
+  return run;
+}
+
 export async function readChainIndex(chainsDir: string): Promise<CausalChainIndex> {
   try {
     const raw = JSON.parse(await readFile(chainIndexPath(chainsDir), "utf8"));
@@ -367,35 +383,37 @@ export async function stitchCausalChain(options: {
 
   if (scored.length === 0) return [];
 
-  const index = await readChainIndex(chainsDir);
-  const newEdges: CausalEdge[] = [];
+  return enqueueChainMutation(chainsDir, async () => {
+    const index = await readChainIndex(chainsDir);
+    const newEdges: CausalEdge[] = [];
 
-  for (const candidate of scored) {
-    const edgeId = makeEdgeId(candidate.trajectory.trajectoryId, newTrajectory.trajectoryId);
+    for (const candidate of scored) {
+      const edgeId = makeEdgeId(candidate.trajectory.trajectoryId, newTrajectory.trajectoryId);
 
-    // Skip if edge already exists
-    if (index.edges[edgeId]) continue;
+      // Skip if edge already exists
+      if (index.edges[edgeId]) continue;
 
-    const edge: CausalEdge = {
-      schemaVersion: 1,
-      edgeId,
-      fromTrajectoryId: candidate.trajectory.trajectoryId,
-      toTrajectoryId: newTrajectory.trajectoryId,
-      edgeType: candidate.edgeType,
-      confidence: Math.min(1, candidate.score / 10),
-      stitchMethod: candidate.stitchMethod,
-      createdAt: new Date().toISOString(),
-    };
+      const edge: CausalEdge = {
+        schemaVersion: 1,
+        edgeId,
+        fromTrajectoryId: candidate.trajectory.trajectoryId,
+        toTrajectoryId: newTrajectory.trajectoryId,
+        edgeType: candidate.edgeType,
+        confidence: Math.min(1, candidate.score / 10),
+        stitchMethod: candidate.stitchMethod,
+        createdAt: new Date().toISOString(),
+      };
 
-    addEdgeToIndex(index, edge);
-    await persistEdge(chainsDir, edge);
-    newEdges.push(edge);
-  }
+      addEdgeToIndex(index, edge);
+      await persistEdge(chainsDir, edge);
+      newEdges.push(edge);
+    }
 
-  if (newEdges.length > 0) {
-    await writeChainIndex(chainsDir, index);
-    log.debug(`[cmc] stitched ${newEdges.length} causal edge(s) for trajectory ${newTrajectory.trajectoryId}`);
-  }
+    if (newEdges.length > 0) {
+      await writeChainIndex(chainsDir, index);
+      log.debug(`[cmc] stitched ${newEdges.length} causal edge(s) for trajectory ${newTrajectory.trajectoryId}`);
+    }
 
-  return newEdges;
+    return newEdges;
+  });
 }
