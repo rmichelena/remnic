@@ -3236,6 +3236,28 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+function assertSafeNamespaceSegment(namespace: string): void {
+  if (
+    namespace.length === 0 ||
+    namespace === "." ||
+    namespace === ".." ||
+    namespace.includes("/") ||
+    namespace.includes("\\") ||
+    path.isAbsolute(namespace) ||
+    path.win32.isAbsolute(namespace)
+  ) {
+    throw new Error(`invalid namespace: ${namespace}`);
+  }
+}
+
+function assertPathInsideRoot(root: string, candidate: string, namespace: string): void {
+  const relative = path.relative(root, candidate);
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    return;
+  }
+  throw new Error(`invalid namespace path: ${namespace}`);
+}
+
 export async function resolveMemoryDirForNamespace(
   orchestrator: Orchestrator,
   namespace?: string,
@@ -3243,6 +3265,7 @@ export async function resolveMemoryDirForNamespace(
 ): Promise<string> {
   const ns = (namespace ?? "").trim();
   if (!ns) return orchestrator.config.memoryDir;
+  assertSafeNamespaceSegment(ns);
   if (!orchestrator.config.namespacesEnabled) {
     if (options?.rejectUnsupportedOverride && ns !== orchestrator.config.defaultNamespace) {
       throw new Error(`namespaces are disabled; cannot target namespace: ${ns}`);
@@ -3250,7 +3273,9 @@ export async function resolveMemoryDirForNamespace(
     return orchestrator.config.memoryDir;
   }
 
-  const candidate = path.join(orchestrator.config.memoryDir, "namespaces", ns);
+  const namespaceRoot = path.resolve(orchestrator.config.memoryDir, "namespaces");
+  const candidate = path.resolve(namespaceRoot, ns);
+  assertPathInsideRoot(namespaceRoot, candidate, ns);
   if (ns === orchestrator.config.defaultNamespace) {
     return (await exists(candidate)) ? candidate : orchestrator.config.memoryDir;
   }
