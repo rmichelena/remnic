@@ -21,8 +21,12 @@
       "@remnic/core": [
         "./packages/remnic-core/src/index.ts"
       ],
+      "@remnic/core/connectors": [
+        "./packages/remnic-core/src/connectors/index.ts"
+      ],
       "@remnic/core/*": [
-        "./packages/remnic-core/src/*.ts"
+        "./packages/remnic-core/src/*.ts",
+        "./packages/remnic-core/src/*/index.ts"
       ]
     }
   },
