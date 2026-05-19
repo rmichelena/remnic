@@ -401,7 +401,7 @@ function inferSourceFormat(input: unknown): MessagePartSourceFormat | undefined 
     if (
       Array.isArray(obj.content) &&
       obj.content.some(isOpenAiContentBlock) &&
-      obj.content.some(isPiContentBlock)
+      obj.content.some(isPiToolContentBlock)
     ) {
       return "openclaw";
     }
@@ -426,7 +426,7 @@ function isPiMessageObject(obj: Record<string, unknown>): boolean {
   const type = asNonEmptyString(obj.type ?? obj.kind);
   if (type === "toolCall" || type === "tool_call" || type === "toolResult" || type === "tool_result") return true;
   if (!Array.isArray(obj.content)) return false;
-  return obj.content.some(isPiContentBlock);
+  return obj.content.some(isPiToolContentBlock);
 }
 
 function parseOpenClawContentArray(
@@ -440,17 +440,27 @@ function parseOpenClawContentArray(
       ? parseOpenAiMessageParts([block], options)
       : isAnthropicContentBlock(block)
         ? parseAnthropicMessageParts({ content: [block] }, options)
-        : isPiContentBlock(block)
-          ? parsePiMessageParts(block, { ...options, allowRenderedFallback: false })
+        : isPiOpenClawContentBlock(block)
+          ? parsePiMessageParts({ content: [block] }, { ...options, allowRenderedFallback: false })
           : [];
     parts.push(...blockParts.map(({ ordinal: _ordinal, ...part }) => part));
   }
   return withRenderedFallback(withOrdinals(parts), { ...options, allowRenderedFallback: false });
 }
 
-function isPiContentBlock(value: unknown): boolean {
+function isPiOpenClawContentBlock(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const blockType = asNonEmptyString(value.type ?? value.kind);
+  return blockType === "text" || isPiToolBlockType(blockType);
+}
+
+function isPiToolContentBlock(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const blockType = asNonEmptyString(value.type ?? value.kind);
+  return isPiToolBlockType(blockType);
+}
+
+function isPiToolBlockType(blockType: string | null): boolean {
   return blockType === "toolCall" || blockType === "tool_call" || blockType === "toolResult" || blockType === "tool_result";
 }
 
