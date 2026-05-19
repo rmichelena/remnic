@@ -94,6 +94,7 @@ function usage(): string {
     "",
     "Browse options:",
     "  --namespace <name>",
+    "  --principal <principal>",
     "  --query <text>",
     "  --category <name>",
     "  --status <name>",
@@ -121,6 +122,7 @@ const COMMAND_SPECS: Record<CommandName, CommandSpec> = {
   browse: {
     valueOptions: new Set([
       "namespace",
+      "principal",
       "query",
       "category",
       "status",
@@ -331,8 +333,11 @@ async function runBrowse(args: ParsedArgs, preferredId?: string): Promise<void> 
     limit: parseIntegerOption(args, "limit", { min: 1 }),
     offset: parseIntegerOption(args, "offset", { min: 0 }),
   };
-  const { service } = buildRuntime(preferredId);
-  const result = await service.memoryBrowse(request);
+  const { config, service } = buildRuntime(preferredId);
+  const result = await service.memoryBrowse({
+    ...request,
+    authenticatedPrincipal: getLastOption(args, "principal") ?? config.agentAccessHttp.principal,
+  });
   console.log(JSON.stringify(result, null, 2));
 }
 

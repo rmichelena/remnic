@@ -428,6 +428,7 @@ export interface EngramAccessMemoryBrowseRequest {
   status?: string;
   category?: string;
   namespace?: string;
+  authenticatedPrincipal?: string;
   sort?: "updated_desc" | "updated_asc" | "created_desc" | "created_asc";
   limit?: number;
   offset?: number;
@@ -2643,8 +2644,11 @@ export class EngramAccessService {
   async memoryBrowse(
     request: EngramAccessMemoryBrowseRequest = {},
   ): Promise<EngramAccessMemoryBrowseResponse> {
-    const storage = await this.orchestrator.getStorage(request.namespace);
-    const resolvedNamespace = request.namespace?.trim() || this.orchestrator.config.defaultNamespace;
+    const resolvedNamespace = this.resolveReadableNamespace(
+      request.namespace,
+      request.authenticatedPrincipal,
+    );
+    const storage = await this.orchestrator.getStorage(resolvedNamespace);
     const { limit, offset } = normalizePagination(request.limit, request.offset);
     const sort = normalizeBrowseSort(request.sort);
     const query = request.query?.trim().toLowerCase() ?? "";

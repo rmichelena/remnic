@@ -35,7 +35,12 @@ function makeService(): {
   getStorageCalls: string[];
 } {
   const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
-  const storage = { marker: "team-storage" } as unknown as StorageManager;
+  const storage = {
+    marker: "team-storage",
+    async browseProjectedMemories() {
+      return { total: 0, memories: [] };
+    },
+  } as unknown as StorageManager;
   const getStorageCalls: string[] = [];
 
   (service as unknown as {
@@ -81,5 +86,38 @@ test("getWritableStorageForNamespace resolves namespace storage for write princi
 
   assert.equal(resolved.namespace, "team");
   assert.equal(resolved.storage, storage);
+  assert.deepEqual(getStorageCalls, ["team"]);
+});
+
+test("memoryBrowse denies missing principals before namespace storage lookup", async () => {
+  const { service, getStorageCalls } = makeService();
+
+  await assert.rejects(
+    () => service.memoryBrowse({ namespace: "team" }),
+    /authentication required/,
+  );
+  assert.deepEqual(getStorageCalls, []);
+});
+
+test("memoryBrowse denies principals without read access before namespace storage lookup", async () => {
+  const { service, getStorageCalls } = makeService();
+
+  await assert.rejects(
+    () => service.memoryBrowse({ namespace: "team", authenticatedPrincipal: "stranger" }),
+    /namespace is not readable: team/,
+  );
+  assert.deepEqual(getStorageCalls, []);
+});
+
+test("memoryBrowse resolves namespace storage for read principals", async () => {
+  const { service, getStorageCalls } = makeService();
+
+  const result = await service.memoryBrowse({
+    namespace: "team",
+    authenticatedPrincipal: "reader",
+  });
+
+  assert.equal(result.namespace, "team");
+  assert.equal(result.count, 0);
   assert.deepEqual(getStorageCalls, ["team"]);
 });

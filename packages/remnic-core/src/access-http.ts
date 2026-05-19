@@ -869,6 +869,7 @@ export class EngramAccessHttpServer {
         status: parsed.searchParams.get("status") ?? undefined,
         category: parsed.searchParams.get("category") ?? undefined,
         namespace: parsed.searchParams.get("namespace") ?? undefined,
+        authenticatedPrincipal: this.resolveRequestPrincipal(req),
         sort,
         limit: Number.isFinite(limitRaw) ? limitRaw : 50,
         offset: Number.isFinite(offsetRaw) ? offsetRaw : 0,

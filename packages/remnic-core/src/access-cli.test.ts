@@ -77,6 +77,7 @@ test("access-cli rejects unknown options before runtime initialization", async (
 
 test("access-cli rejects value options with missing values", async () => {
   await rejectsUsage(["browse", "--limit"]);
+  await rejectsUsage(["browse", "--principal"]);
   await rejectsUsage(["store", "--content", "hello", "--category"]);
 });
 
@@ -111,11 +112,13 @@ test("access-cli browse sort error lists accepted values", async () => {
 test("access-cli browse pagination bound errors list accepted ranges", async () => {
   const limitOutput = await captureRunCliFailure(["browse", "--limit", "0"]);
   const offsetOutput = await captureRunCliFailure(["browse", "--offset", "-1"]);
+  const principalOutput = await captureRunCliFailure(["browse", "--principal"]);
 
   assert.match(limitOutput, /invalid value for --limit/);
   assert.match(limitOutput, /Accepted: integer >= 1\./);
   assert.match(offsetOutput, /invalid value for --offset/);
   assert.match(offsetOutput, /Accepted: integer >= 0\./);
+  assert.match(principalOutput, /missing required option: --principal/);
 });
 
 test("access-cli rejects confidence outside the documented range", async () => {
