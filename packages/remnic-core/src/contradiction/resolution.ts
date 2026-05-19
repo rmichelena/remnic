@@ -53,6 +53,10 @@ export async function executeResolution(
   verb: ResolutionVerb,
   options: ExecuteResolutionOptions = {},
 ): Promise<ResolutionResult> {
+  if (typeof verb !== "string" || !isValidResolutionVerb(verb)) {
+    throw new Error(`Invalid contradiction resolution verb: ${String(verb)}`);
+  }
+
   const pair = readPair(memoryDir, pairId);
   if (!pair) {
     return { pairId, verb, affectedIds: [], message: `Pair ${pairId} not found` };

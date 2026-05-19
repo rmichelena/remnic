@@ -1311,6 +1311,46 @@ test("isValidResolutionVerb rejects invalid verbs", () => {
   assert.equal(isValidResolutionVerb("unknown"), false);
 });
 
+test("executeResolution rejects invalid runtime verbs without poisoning the pair", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const written = writePair(dir, makePair());
+    const storage = makeResolutionStorage();
+
+    await assert.rejects(
+      () => executeResolution(dir, storage, written.pairId, "delete" as never),
+      /Invalid contradiction resolution verb: delete/,
+    );
+
+    assert.deepEqual(storage.supersedeCalls, []);
+    assert.equal(readPair(dir, written.pairId)?.resolution, undefined);
+
+    const valid = await executeResolution(dir, storage, written.pairId, "keep-a");
+
+    assert.deepEqual(valid.affectedIds, ["mem-b-002"]);
+    assert.equal(readPair(dir, written.pairId)?.resolution, "keep-a");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("resolvePair rejects invalid runtime verbs without mutating the pair", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const written = writePair(dir, makePair());
+
+    assert.throws(
+      () => resolvePair(dir, written.pairId, "delete" as never),
+      /Invalid contradiction resolution verb: delete/,
+    );
+
+    assert.equal(readPair(dir, written.pairId)?.resolution, undefined);
+    assert.equal(resolvePair(dir, written.pairId, "both-valid")?.resolution, "both-valid");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("executeResolution merge requires a real merged memory", async () => {
   const { dir, cleanup } = await makeTempDir();
   try {

@@ -19,6 +19,14 @@ import type { ContradictionVerdict } from "./contradiction-judge.js";
 
 export type ResolutionVerb = "keep-a" | "keep-b" | "merge" | "both-valid" | "needs-more-context";
 
+const VALID_RESOLUTION_VERBS: readonly ResolutionVerb[] = [
+  "keep-a",
+  "keep-b",
+  "merge",
+  "both-valid",
+  "needs-more-context",
+];
+
 export interface ContradictionPair {
   /** Deterministic pair ID: sha256(sorted(memoryIdA, memoryIdB) plus namespace when scoped). */
   pairId: string;
@@ -456,6 +464,10 @@ export function resolvePair(
   pairId: string,
   verb: ResolutionVerb,
 ): ContradictionPair | null {
+  if (typeof verb !== "string" || !VALID_RESOLUTION_VERBS.includes(verb)) {
+    throw new Error(`Invalid contradiction resolution verb: ${String(verb)}`);
+  }
+
   if (verb === "needs-more-context") {
     return deferPair(memoryDir, pairId);
   }
