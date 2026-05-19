@@ -65,7 +65,7 @@ async function loadDataset(datasetDir: string, limit?: number): Promise<DomainDa
       .split("\n")
       .filter((l) => l.trim())
       .map((l) => JSON.parse(l) as ArenaTask);
-    if (limit) tasks = tasks.slice(0, limit);
+    if (limit !== undefined) tasks = tasks.slice(0, limit);
     domains.push({ domain, tasks });
     console.log(`  [memory-arena] ${domain}: ${tasks.length} tasks`);
   }
