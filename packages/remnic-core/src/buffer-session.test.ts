@@ -18,6 +18,28 @@ class FakeStorage {
   }
 }
 
+class DelayedBufferStorage {
+  public saved: BufferState | null = null;
+
+  async loadBuffer(): Promise<BufferState> {
+    await delay(10);
+    return structuredClone(this.saved ?? {
+      turns: [],
+      lastExtractionAt: null,
+      extractionCount: 0,
+    });
+  }
+
+  async saveBuffer(state: BufferState): Promise<void> {
+    await delay(10);
+    this.saved = structuredClone(state);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function makeTurn(sessionKey: string, content: string): BufferTurn {
   return {
     role: "user",
@@ -42,6 +64,23 @@ test("SmartBuffer keeps logical session buffers isolated", async () => {
   assert.equal(buffer.getTurns("thread-a")[0]?.content, "alpha memory");
   assert.equal(buffer.getTurns("thread-b").length, 1);
   assert.equal(buffer.getTurns("thread-b")[0]?.content, "beta memory");
+});
+
+test("SmartBuffer serializes concurrent addTurn mutations", async () => {
+  const storage = new DelayedBufferStorage();
+  const buffer = new SmartBuffer(parseConfig({}), storage as any);
+
+  await Promise.all([
+    buffer.addTurn("thread-a", makeTurn("thread-a", "alpha memory")),
+    buffer.addTurn("thread-a", makeTurn("thread-a", "beta memory")),
+  ]);
+
+  const turns = storage.saved?.entries?.["thread-a"]?.turns ?? [];
+  assert.equal(turns.length, 2);
+  assert.deepEqual(
+    turns.map((turn) => turn.content).sort(),
+    ["alpha memory", "beta memory"],
+  );
 });
 
 test("SmartBuffer clearAfterExtraction only clears the targeted logical session", async () => {

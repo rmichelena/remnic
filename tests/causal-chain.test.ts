@@ -305,6 +305,68 @@ test("stitchCausalChain creates edges for related cross-session trajectories", a
   assert.ok(index.incoming["traj-new"]?.length > 0);
 });
 
+test("stitchCausalChain serializes concurrent index updates", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-stitch-concurrent-"));
+
+  await recordCausalTrajectory({
+    memoryDir,
+    record: {
+      schemaVersion: 1,
+      trajectoryId: "traj-old",
+      recordedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      sessionKey: "session-1",
+      goal: "Fix authentication error handling in login flow",
+      actionSummary: "Added try-catch blocks to login handler",
+      observationSummary: "Errors now caught but not reported to user",
+      outcomeKind: "partial",
+      outcomeSummary: "Error handling works but needs user-facing messages",
+      followUpSummary: "Add user-facing error messages to authentication flow",
+      entityRefs: ["module:auth", "repo:main"],
+      tags: ["auth", "error-handling"],
+    },
+  });
+
+  const baseNewTrajectory: Omit<CausalTrajectoryRecord, "trajectoryId" | "sessionKey"> = {
+    schemaVersion: 1,
+    recordedAt: new Date().toISOString(),
+    goal: "Add user-facing error messages to authentication flow",
+    actionSummary: "Created error message components for login page",
+    observationSummary: "Error messages display correctly",
+    outcomeKind: "success",
+    outcomeSummary: "Authentication flow now shows proper error messages",
+    entityRefs: ["module:auth", "repo:main"],
+    tags: ["auth", "error-handling", "ux"],
+  };
+
+  await Promise.all([
+    stitchCausalChain({
+      memoryDir,
+      newTrajectory: {
+        ...baseNewTrajectory,
+        trajectoryId: "traj-new-a",
+        sessionKey: "session-2",
+      },
+      config: { lookbackDays: 7, minScore: 1.0, maxEdgesPerTrajectory: 3 },
+    }),
+    stitchCausalChain({
+      memoryDir,
+      newTrajectory: {
+        ...baseNewTrajectory,
+        trajectoryId: "traj-new-b",
+        sessionKey: "session-3",
+      },
+      config: { lookbackDays: 7, minScore: 1.0, maxEdgesPerTrajectory: 3 },
+    }),
+  ]);
+
+  const index = await readChainIndex(resolveChainsDir(memoryDir));
+  const destinations = new Set(
+    Object.values(index.edges).map((edge) => edge.toTrajectoryId),
+  );
+  assert.ok(destinations.has("traj-new-a"));
+  assert.ok(destinations.has("traj-new-b"));
+});
+
 test("stitchCausalChain skips same-session trajectories", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-stitch-same-"));
 
