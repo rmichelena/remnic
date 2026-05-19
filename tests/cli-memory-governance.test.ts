@@ -233,3 +233,30 @@ test("resolveMemoryDirForNamespace rejects unsupported namespace overrides when 
     "/tmp/engram",
   );
 });
+
+test("resolveMemoryDirForNamespace rejects traversal namespace segments", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-cli-namespace-"));
+  const orchestrator = {
+    config: {
+      memoryDir,
+      namespacesEnabled: true,
+      defaultNamespace: "global",
+    },
+  } as any;
+
+  try {
+    for (const namespace of ["../team", "../../outside", "team/../other", ".", "..", "/tmp/outside", "team\\other"]) {
+      await assert.rejects(
+        () => resolveMemoryDirForNamespace(orchestrator, namespace),
+        /invalid namespace/,
+      );
+    }
+
+    assert.equal(
+      await resolveMemoryDirForNamespace(orchestrator, "team-alpha"),
+      path.join(memoryDir, "namespaces", "team-alpha"),
+    );
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
