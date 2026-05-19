@@ -250,8 +250,8 @@ export function parseOpenClawMessageParts(
 
   const content = obj.content;
   if (Array.isArray(content)) {
-    const hasOpenAiBlocks = content.some(isOpenAiContentBlock);
-    if (hasOpenAiBlocks) return parseOpenAiMessageParts(content, options);
+    const mixedParts = parseOpenClawContentArray(content, options);
+    if (mixedParts.length > 0) return mixedParts;
     const hasAnthropicBlocks = content.some(isAnthropicContentBlock);
     if (hasAnthropicBlocks) return parseAnthropicMessageParts({ content }, options);
     const piParts = parsePiMessageParts(input, { ...options, allowRenderedFallback: false });
@@ -398,6 +398,13 @@ function inferSourceFormat(input: unknown): MessagePartSourceFormat | undefined 
     }
     if (Array.isArray(obj.output)) return "openai";
     if (isOpenAiResponseItem(obj)) return "openai";
+    if (
+      Array.isArray(obj.content) &&
+      obj.content.some(isOpenAiContentBlock) &&
+      obj.content.some(isPiContentBlock)
+    ) {
+      return "openclaw";
+    }
     if (Array.isArray(obj.content) && obj.content.some(isOpenAiContentBlock)) return "openai";
     if (isAnthropicMessageObject(obj)) return "anthropic";
     if (isPiMessageObject(obj)) return "pi";
@@ -419,11 +426,32 @@ function isPiMessageObject(obj: Record<string, unknown>): boolean {
   const type = asNonEmptyString(obj.type ?? obj.kind);
   if (type === "toolCall" || type === "tool_call" || type === "toolResult" || type === "tool_result") return true;
   if (!Array.isArray(obj.content)) return false;
-  return obj.content.some((block) => {
-    if (!isRecord(block)) return false;
-    const blockType = asNonEmptyString(block.type ?? block.kind);
-    return blockType === "toolCall" || blockType === "tool_call" || blockType === "toolResult" || blockType === "tool_result";
-  });
+  return obj.content.some(isPiContentBlock);
+}
+
+function parseOpenClawContentArray(
+  content: unknown[],
+  options: ParseMessagePartsOptions,
+): LcmMessagePartInput[] {
+  const parts: LcmMessagePartInput[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    const blockParts = isOpenAiContentBlock(block) || isOpenAiResponseItem(block)
+      ? parseOpenAiMessageParts([block], options)
+      : isAnthropicContentBlock(block)
+        ? parseAnthropicMessageParts({ content: [block] }, options)
+        : isPiContentBlock(block)
+          ? parsePiMessageParts(block, { ...options, allowRenderedFallback: false })
+          : [];
+    parts.push(...blockParts.map(({ ordinal: _ordinal, ...part }) => part));
+  }
+  return withRenderedFallback(withOrdinals(parts), { ...options, allowRenderedFallback: false });
+}
+
+function isPiContentBlock(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const blockType = asNonEmptyString(value.type ?? value.kind);
+  return blockType === "toolCall" || blockType === "tool_call" || blockType === "toolResult" || blockType === "tool_result";
 }
 
 function isAnthropicMessageObject(obj: Record<string, unknown>): boolean {
