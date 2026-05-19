@@ -4,6 +4,9 @@
   "description": "Deprecated compatibility shim for Engram installs. Re-exports @remnic/plugin-openclaw and forwards engram-access to @remnic/core.",
   "type": "module",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js"
@@ -37,8 +40,8 @@
       "pluginApi": ">=2026.5.16-beta.1"
     },
     "build": {
-      "openclawVersion": "2026.5.16-beta.3",
-      "pluginSdkVersion": "2026.5.16-beta.3"
+      "openclawVersion": "2026.5.19-beta.1",
+      "pluginSdkVersion": "2026.5.19-beta.1"
     },
     "install": {
       "clawhubSpec": "clawhub:@remnic/plugin-openclaw",
