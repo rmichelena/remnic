@@ -18,8 +18,45 @@ export interface BestEffortGatewayRestartResult {
   restarted: boolean;
 }
 
+interface AtomicFileOperationHooks {
+  copyTempFileSync?: (sourcePath: string, tempPath: string) => void;
+  renameTempFileSync?: (tempPath: string, targetPath: string) => void;
+  writeTempFileSync?: (tempPath: string) => void;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createSiblingTempFilePath(targetPath: string, label: string): string {
+  const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  return path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.${label}.${nonce}.tmp`);
+}
+
+function resolveAtomicWriteMode(targetPath: string, explicitMode: fs.Mode | undefined): fs.Mode {
+  if (explicitMode !== undefined) return explicitMode;
+  try {
+    return fs.statSync(targetPath).mode & 0o7777;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return 0o600;
+    }
+    throw error;
+  }
+}
+
+function resolveAtomicReplacementPath(targetPath: string): string {
+  try {
+    if (fs.lstatSync(targetPath).isSymbolicLink()) {
+      return fs.realpathSync(targetPath);
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return targetPath;
+    }
+    throw error;
+  }
+  return targetPath;
 }
 
 function createSiblingSwapPath(targetDir: string, label: string): string {
@@ -41,6 +78,54 @@ function cleanupDisplacedDirectoryBestEffort(
       `Warning: ${context}, but failed to remove the displaced plugin copy at ` +
       `${displacedDir}: ${describeError(error)}`
     );
+  }
+}
+
+export function atomicWriteFileSync(
+  targetPath: string,
+  data: string | NodeJS.ArrayBufferView,
+  options: { hooks?: AtomicFileOperationHooks; mode?: fs.Mode } = {},
+): void {
+  const resolvedTargetPath = resolveAtomicReplacementPath(targetPath);
+  fs.mkdirSync(path.dirname(resolvedTargetPath), { recursive: true });
+  const tempPath = createSiblingTempFilePath(resolvedTargetPath, "write");
+  const mode = resolveAtomicWriteMode(resolvedTargetPath, options.mode);
+
+  try {
+    if (options.hooks?.writeTempFileSync) {
+      options.hooks.writeTempFileSync(tempPath);
+    } else {
+      fs.writeFileSync(tempPath, data, { mode });
+    }
+    fs.chmodSync(tempPath, mode);
+    const renameTempFileSync = options.hooks?.renameTempFileSync ?? fs.renameSync;
+    renameTempFileSync(tempPath, resolvedTargetPath);
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
+}
+
+export function atomicCopyFileSync(
+  sourcePath: string,
+  targetPath: string,
+  options: { hooks?: AtomicFileOperationHooks } = {},
+): void {
+  if (!fs.existsSync(sourcePath)) return;
+  const resolvedTargetPath = resolveAtomicReplacementPath(targetPath);
+  fs.mkdirSync(path.dirname(resolvedTargetPath), { recursive: true });
+  const tempPath = createSiblingTempFilePath(resolvedTargetPath, "copy");
+  const mode = fs.statSync(sourcePath).mode & 0o7777;
+
+  try {
+    const copyTempFileSync = options.hooks?.copyTempFileSync ?? fs.copyFileSync;
+    copyTempFileSync(sourcePath, tempPath);
+    fs.chmodSync(tempPath, mode);
+    const renameTempFileSync = options.hooks?.renameTempFileSync ?? fs.renameSync;
+    renameTempFileSync(tempPath, resolvedTargetPath);
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true });
+    throw error;
   }
 }
 
@@ -196,9 +281,7 @@ function restoreDirectoryFromBackup(targetDir: string, backupDir: string): strin
 }
 
 function restoreFileFromBackup(targetPath: string, backupPath: string): void {
-  if (!fs.existsSync(backupPath)) return;
-  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-  fs.cpSync(backupPath, targetPath);
+  atomicCopyFileSync(backupPath, targetPath);
 }
 
 export function rollbackOpenclawUpgrade({
