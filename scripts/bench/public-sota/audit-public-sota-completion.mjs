@@ -364,6 +364,19 @@ function runPublicMatrixVerifier(row, item) {
   }
 }
 
+function rowCompletionIssues(row) {
+  const issues = [];
+  if (!row.evidenceDocExists) issues.push('missing evidence doc');
+  if (!row.verifierExists) issues.push('missing verifier');
+  if (!row.manifestExists) issues.push('missing manifest');
+  if (row.manifestExists && row.verifierExists && !row.artifactVerifier?.ok) issues.push('artifact verifier failed');
+  if (row.manifestExists && !row.publicMatrixVerifier?.ok) issues.push('public matrix verifier failed');
+  if (row.manifestExists && !row.targetFreshness?.ok) issues.push('comparison targets stale or invalid');
+  if (!row.pr) issues.push('missing publication PR');
+  if (row.pr && !row.prClean) issues.push('PR not clean');
+  return issues;
+}
+
 const rows = benchmarks.map((item) => {
   const manifest = findManifest(item.manifestGlob);
   const pr = latestPrFor(item);
@@ -391,18 +404,20 @@ const rows = benchmarks.map((item) => {
     publicMatrixVerifier: runPublicMatrixVerifier(row, item),
     targetFreshness: runTargetFreshnessCheck(row, item),
   };
+}).map((row) => {
+  const issues = rowCompletionIssues(row);
+  return {
+    ...row,
+    ok: issues.length === 0,
+    issues,
+  };
 });
 
 const failures = [];
 for (const row of rows) {
-  if (!row.evidenceDocExists) failures.push(`${row.benchmark}: missing evidence doc`);
-  if (!row.verifierExists) failures.push(`${row.benchmark}: missing verifier`);
-  if (!row.manifestExists) failures.push(`${row.benchmark}: missing manifest`);
-  if (row.manifestExists && row.verifierExists && !row.artifactVerifier?.ok) failures.push(`${row.benchmark}: artifact verifier failed`);
-  if (row.manifestExists && !row.publicMatrixVerifier?.ok) failures.push(`${row.benchmark}: public matrix verifier failed`);
-  if (row.manifestExists && !row.targetFreshness?.ok) failures.push(`${row.benchmark}: comparison targets stale or invalid`);
-  if (!row.pr) failures.push(`${row.benchmark}: missing publication PR`);
-  if (row.pr && !row.prClean) failures.push(`${row.benchmark}: PR not clean`);
+  for (const issue of row.issues) {
+    failures.push(`${row.benchmark}: ${issue}`);
+  }
 }
 
 const result = {
