@@ -153,3 +153,17 @@ test("resolveFallbackBenchResultPath only reads the dedicated run directory", as
   const resultPath = resolveFallbackBenchResultPath(runDir);
   assert.equal(resultPath, path.join(runDir, "ama-bench-v1.json"));
 });
+
+test("resolveFallbackBenchResultPath rejects fallback runs without JSON artifacts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-fallback-run-"));
+  const runDir = path.join(root, "fallback-runs", "locomo-1710000000456-789");
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, "locomo.log"), "completed without result\n");
+
+  assert.throws(
+    () => resolveFallbackBenchResultPath(runDir),
+    {
+      message: `Fallback benchmark runner did not write a JSON result artifact in ${runDir}`,
+    },
+  );
+});

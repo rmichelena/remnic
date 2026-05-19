@@ -93,7 +93,7 @@ export function resolveFallbackBenchResultPath(outputDir: string): string {
     .map((entry) => entry.name)
     .sort();
   if (entries.length === 0) {
-    return "";
+    throw new Error(`Fallback benchmark runner did not write a JSON result artifact in ${outputDir}`);
   }
   return path.join(outputDir, entries[0]);
 }
