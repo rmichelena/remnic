@@ -6,6 +6,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { EngramAccessService } from "./access-service.js";
 import { readEnvVar, resolveHomeDir } from "./runtime/env.js";
 import { resolveRemnicPluginEntry } from "./plugin-id.js";
+import { expandTildePath } from "./utils/path.js";
 
 type CommandName = "browse" | "store";
 
@@ -302,8 +303,8 @@ function parseFloatOption(
 
 function loadPluginConfig(preferredId?: string): Record<string, unknown> {
   const configPath =
-    readEnvVar("OPENCLAW_CONFIG_PATH") ||
-    readEnvVar("OPENCLAW_ENGRAM_CONFIG_PATH") ||
+    expandOptionalPath(readEnvVar("OPENCLAW_CONFIG_PATH")) ||
+    expandOptionalPath(readEnvVar("OPENCLAW_ENGRAM_CONFIG_PATH")) ||
     path.join(resolveHomeDir(), ".openclaw", "openclaw.json");
   const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
   // Delegate slot → preferredId → PLUGIN_ID → LEGACY_PLUGIN_ID resolution to
@@ -352,7 +353,9 @@ async function runBrowse(args: ParsedArgs, preferredId?: string): Promise<void> 
 async function runStore(args: ParsedArgs, preferredId?: string): Promise<void> {
   const contentFile = getLastOption(args, "content-file");
   const inlineContent = getLastOption(args, "content");
-  const content = contentFile ? fs.readFileSync(contentFile, "utf8") : inlineContent;
+  const content = contentFile
+    ? fs.readFileSync(expandTildePath(contentFile), "utf8")
+    : inlineContent;
   if (!content || content.trim().length === 0) {
     throw new UsageError("missing-content");
   }
@@ -386,6 +389,10 @@ async function runStore(args: ParsedArgs, preferredId?: string): Promise<void> {
     dryRun: storeArgs.dryRun,
   });
   console.log(JSON.stringify(result, null, 2));
+}
+
+function expandOptionalPath(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : expandTildePath(value);
 }
 
 export async function main(

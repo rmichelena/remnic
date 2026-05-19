@@ -281,6 +281,35 @@ test("access-cli browse uses OPENCLAW_CONFIG_PATH before legacy config path", as
   }
 });
 
+test("access-cli expands tilde in OPENCLAW_CONFIG_PATH", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-access-cli-"));
+  try {
+    const configPath = path.join(tempDir, "openclaw.json");
+    writeOpenClawConfig(configPath, {
+      memoryDir: path.join(tempDir, "memory"),
+      namespacesEnabled: true,
+      defaultNamespace: "default",
+      namespacePolicies: [
+        { name: "team", readPrincipals: ["reader"], writePrincipals: ["writer"] },
+      ],
+      agentAccessHttp: { principal: "reader" },
+    });
+
+    await withPatchedEnv(
+      {
+        HOME: tempDir,
+        OPENCLAW_CONFIG_PATH: "~/openclaw.json",
+        OPENCLAW_ENGRAM_CONFIG_PATH: undefined,
+      },
+      async () => {
+        await main(["browse", "--namespace", "team", "--limit", "1"]);
+      },
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("access-cli browse accepts an explicit principal for namespace reads", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-access-cli-"));
   try {
@@ -304,6 +333,50 @@ test("access-cli browse accepts an explicit principal for namespace reads", asyn
       },
     );
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("access-cli store expands tilde in content-file path", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-access-cli-"));
+  let output = "";
+  const originalStdoutWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    output += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    const configPath = path.join(tempDir, "openclaw.json");
+    const notePath = path.join(tempDir, "note.md");
+    writeOpenClawConfig(configPath, {
+      memoryDir: path.join(tempDir, "memory"),
+      defaultNamespace: "default",
+    });
+    fs.writeFileSync(notePath, "tilde content");
+
+    await withPatchedEnv(
+      {
+        HOME: tempDir,
+        OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_ENGRAM_CONFIG_PATH: undefined,
+      },
+      async () => {
+        await main([
+          "store",
+          "--content-file",
+          "~/note.md",
+          "--category",
+          "fact",
+          "--dry-run",
+        ]);
+      },
+    );
+
+    assert.match(output, /"operation": "memory_store"/);
+    assert.match(output, /"dryRun": true/);
+  } finally {
+    process.stdout.write = originalStdoutWrite;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
