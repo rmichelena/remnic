@@ -441,7 +441,7 @@ function parseOpenClawContentArray(
       : isAnthropicContentBlock(block)
         ? parseAnthropicMessageParts({ content: [block] }, options)
         : isPiContentBlock(block)
-          ? parsePiMessageParts(block, { ...options, allowRenderedFallback: false })
+          ? parsePiMessageParts({ content: [block] }, { ...options, allowRenderedFallback: false })
           : [];
     parts.push(...blockParts.map(({ ordinal: _ordinal, ...part }) => part));
   }
@@ -451,7 +451,7 @@ function parseOpenClawContentArray(
 function isPiContentBlock(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const blockType = asNonEmptyString(value.type ?? value.kind);
-  return blockType === "toolCall" || blockType === "tool_call" || blockType === "toolResult" || blockType === "tool_result";
+  return blockType === "text" || blockType === "toolCall" || blockType === "tool_call" || blockType === "toolResult" || blockType === "tool_result";
 }
 
 function isAnthropicMessageObject(obj: Record<string, unknown>): boolean {
