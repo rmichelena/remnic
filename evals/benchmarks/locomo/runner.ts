@@ -117,7 +117,7 @@ async function run(
   const overallStart = performance.now();
 
   // Limit applies to conversations (each has ~200 QA pairs)
-  const convsToRun = options.limit ? conversations.slice(0, options.limit) : conversations;
+  const convsToRun = options.limit !== undefined ? conversations.slice(0, options.limit) : conversations;
 
   for (let ci = 0; ci < convsToRun.length; ci++) {
     const conv = convsToRun[ci];

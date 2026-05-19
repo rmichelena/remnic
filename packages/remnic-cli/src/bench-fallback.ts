@@ -12,7 +12,12 @@ export function buildBenchRunnerArgs(
 ): string[] {
   const args = ["--benchmark", benchmarkId];
   if (parsed.quick) {
-    args.push("--lightweight", "--limit", "1");
+    args.push("--lightweight");
+  }
+  if (parsed.publishedLimit !== undefined) {
+    args.push("--limit", String(parsed.publishedLimit));
+  } else if (parsed.quick) {
+    args.push("--limit", "1");
   }
   if (parsed.datasetDir) {
     args.push("--dataset-dir", parsed.datasetDir);
@@ -60,6 +65,11 @@ export function findUnsupportedFallbackBenchOptions(parsed: ParsedBenchArgs): st
   add(parsed.requestTimeout !== undefined, "--request-timeout");
   add(parsed.drainTimeout !== undefined, "--drain-timeout");
   add(parsed.max429WaitMs !== undefined, "--max-429-wait");
+  add(parsed.publishedTrialLimit !== undefined, "--trial-limit");
+  add(parsed.publishedTrialConcurrency !== undefined, "--trial-concurrency");
+  add(parsed.publishedIngestConcurrency !== undefined, "--ingest-concurrency");
+  add(parsed.publishedTaskFilter !== undefined, "--task-filter");
+  add(parsed.publishedSeed !== undefined, "--seed");
 
   return unsupported;
 }

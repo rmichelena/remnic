@@ -66,7 +66,7 @@ async function loadDataset(datasetDir: string, limit?: number): Promise<AMABench
       .filter((l) => l.trim())
       .map((l) => JSON.parse(l) as AMABenchEpisode);
     console.log(`  Loaded ${episodes.length} episodes (${episodes.reduce((s, e) => s + e.qa_pairs.length, 0)} QA pairs)`);
-    return limit ? episodes.slice(0, limit) : episodes;
+    return limit !== undefined ? episodes.slice(0, limit) : episodes;
   } catch {
     throw new Error(
       `AMA-Bench dataset not found at ${filePath}. Download with:\n` +

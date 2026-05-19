@@ -57,7 +57,7 @@ async function loadDataset(datasetDir: string, limit?: number): Promise<LongMemE
       const raw = await readFile(path.join(datasetDir, filename), "utf-8");
       const data: LongMemEvalItem[] = JSON.parse(raw);
       console.log(`  Loaded ${data.length} questions from ${filename}`);
-      return limit ? data.slice(0, limit) : data;
+      return limit !== undefined ? data.slice(0, limit) : data;
     } catch {
       continue;
     }

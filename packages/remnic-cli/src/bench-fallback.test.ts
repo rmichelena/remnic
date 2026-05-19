@@ -10,7 +10,7 @@ import {
   findUnsupportedFallbackBenchOptions,
   resolveFallbackBenchResultPath,
 } from "./bench-fallback.js";
-import type { ParsedBenchArgs } from "./bench-args.js";
+import { parseBenchArgs, type ParsedBenchArgs } from "./bench-args.js";
 
 function createParsedBenchArgs(overrides: Partial<ParsedBenchArgs> = {}): ParsedBenchArgs {
   return {
@@ -49,6 +49,52 @@ test("buildBenchRunnerArgs forwards a run-scoped output directory", () => {
   ]);
 });
 
+test("buildBenchRunnerArgs forwards an explicit fallback run limit", () => {
+  const parsed = parseBenchArgs(["run", "locomo", "--limit", "5"]);
+
+  const args = buildBenchRunnerArgs(parsed, "locomo", "/tmp/remnic-bench/fallback-runs/locomo");
+
+  assert.deepEqual(args, [
+    "--benchmark",
+    "locomo",
+    "--limit",
+    "5",
+    "--output-dir",
+    "/tmp/remnic-bench/fallback-runs/locomo",
+  ]);
+});
+
+test("buildBenchRunnerArgs preserves an explicit zero fallback run limit", () => {
+  const parsed = parseBenchArgs(["run", "locomo", "--limit", "0"]);
+
+  const args = buildBenchRunnerArgs(parsed, "locomo", "/tmp/remnic-bench/fallback-runs/locomo");
+
+  assert.deepEqual(args, [
+    "--benchmark",
+    "locomo",
+    "--limit",
+    "0",
+    "--output-dir",
+    "/tmp/remnic-bench/fallback-runs/locomo",
+  ]);
+});
+
+test("buildBenchRunnerArgs lets explicit limits override quick-mode fallback limit", () => {
+  const parsed = parseBenchArgs(["run", "locomo", "--quick", "--limit", "5"]);
+
+  const args = buildBenchRunnerArgs(parsed, "locomo", "/tmp/remnic-bench/fallback-runs/locomo");
+
+  assert.deepEqual(args, [
+    "--benchmark",
+    "locomo",
+    "--lightweight",
+    "--limit",
+    "5",
+    "--output-dir",
+    "/tmp/remnic-bench/fallback-runs/locomo",
+  ]);
+});
+
 test("findUnsupportedFallbackBenchOptions rejects package-only timeout options", () => {
   const parsed = createParsedBenchArgs({
     drainTimeout: 1,
@@ -58,6 +104,24 @@ test("findUnsupportedFallbackBenchOptions rejects package-only timeout options",
   assert.deepEqual(findUnsupportedFallbackBenchOptions(parsed), [
     "--drain-timeout",
     "--max-429-wait",
+  ]);
+});
+
+test("findUnsupportedFallbackBenchOptions rejects package-only run scoping options", () => {
+  const parsed = createParsedBenchArgs({
+    publishedTrialLimit: 2,
+    publishedTrialConcurrency: 3,
+    publishedIngestConcurrency: 4,
+    publishedTaskFilter: "task-1",
+    publishedSeed: 5,
+  });
+
+  assert.deepEqual(findUnsupportedFallbackBenchOptions(parsed), [
+    "--trial-limit",
+    "--trial-concurrency",
+    "--ingest-concurrency",
+    "--task-filter",
+    "--seed",
   ]);
 });
 

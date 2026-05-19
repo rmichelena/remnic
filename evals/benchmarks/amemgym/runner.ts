@@ -81,7 +81,7 @@ async function loadDataset(datasetDir: string, limit?: number): Promise<AMemGymP
       const raw = await readFile(path.join(datasetDir, filename), "utf-8");
       const data: AMemGymProfile[] = JSON.parse(raw);
       console.log(`  Loaded ${data.length} user profiles (${data.reduce((s, p) => s + p.qas.length, 0)} QA pairs)`);
-      return limit ? data.slice(0, limit) : data;
+      return limit !== undefined ? data.slice(0, limit) : data;
     } catch {
       continue;
     }
