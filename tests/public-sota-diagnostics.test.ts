@@ -1846,6 +1846,14 @@ test("public SOTA status exposes active run and MemoryArena session states", asy
     "utf8",
   );
 
+  assert.match(source, /const legacyMemoryArenaRunId = 'public-matrix-codex-bf9b2643-20260515T052919Z'/);
+  assert.match(source, /function latestRunIdForBenchmark\(benchmark, activeRunId, activeRunStatus\)/);
+  assert.match(source, /activeRunStatus\?\.benchmark === benchmark && activeRunId/);
+  assert.match(source, /latestDirForBenchmark\(benchmark\) \?\? legacyMemoryArenaRunId/);
+  assert.match(source, /const memoryArenaRunId = latestRunIdForBenchmark\('memory-arena', activeRunId, activeRunStatus\)/);
+  assert.match(source, /execFileSync\('node', \[activeRunChecker, path\.join\(resultsRoot, memoryArenaRunId\)\]/);
+  assert.match(source, /const runId = latestRunIdForBenchmark\(benchmark, activeRunId, activeRunStatus\)/);
+  assert.doesNotMatch(source, /const runId = benchmark === 'memory-arena'[\s\S]*'public-matrix-codex-bf9b2643-20260515T052919Z'/);
   assert.match(source, /benchmarkSession: activeRunStatus\.benchmarkSession/);
   assert.match(source, /monitorSession: activeRunStatus\.monitorSession/);
   assert.match(source, /monitorSessionName: activeRunStatus\.monitorSessionName/);

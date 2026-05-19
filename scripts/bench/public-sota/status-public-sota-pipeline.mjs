@@ -19,6 +19,7 @@ const benchmarks = [
   'membench',
   'personamem',
 ];
+const legacyMemoryArenaRunId = 'public-matrix-codex-bf9b2643-20260515T052919Z';
 
 function exec(command, args, options = {}) {
   try {
@@ -56,6 +57,16 @@ function latestDirForBenchmark(benchmark) {
     return undefined;
   }
   return dirs.at(-1);
+}
+
+function latestRunIdForBenchmark(benchmark, activeRunId, activeRunStatus) {
+  if (activeRunStatus?.benchmark === benchmark && activeRunId) {
+    return activeRunId;
+  }
+  if (benchmark === 'memory-arena') {
+    return latestDirForBenchmark(benchmark) ?? legacyMemoryArenaRunId;
+  }
+  return latestDirForBenchmark(benchmark);
 }
 
 function resultFilesFor(runId, benchmark) {
@@ -99,10 +110,11 @@ if (activeRunId) {
   }
 }
 let memoryArenaStatus;
+const memoryArenaRunId = latestRunIdForBenchmark('memory-arena', activeRunId, activeRunStatus);
 try {
-  memoryArenaStatus = activeRunId === 'public-matrix-codex-bf9b2643-20260515T052919Z' && activeRunStatus
+  memoryArenaStatus = activeRunId === memoryArenaRunId && activeRunStatus
     ? activeRunStatus
-    : JSON.parse(execFileSync('node', [activeRunChecker], { encoding: 'utf8' }));
+    : JSON.parse(execFileSync('node', [activeRunChecker, path.join(resultsRoot, memoryArenaRunId)], { encoding: 'utf8' }));
 } catch {
   memoryArenaStatus = undefined;
 }
@@ -128,9 +140,7 @@ const benchmarkRows = benchmarks.map((benchmark) => {
     };
   }
 
-  const runId = benchmark === 'memory-arena'
-    ? 'public-matrix-codex-bf9b2643-20260515T052919Z'
-    : latestDirForBenchmark(benchmark);
+  const runId = latestRunIdForBenchmark(benchmark, activeRunId, activeRunStatus);
   const results = resultFilesFor(runId, benchmark);
   const statusRows = statusFileFor(runId);
 
