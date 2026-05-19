@@ -164,12 +164,15 @@ CI jobs that provision OpenClaw should use
 `npm run check:openclaw-sdk-surface:required` or pass
 `-- --require --package-root <path>` so a missing SDK fails instead of skipping.
 
-Last compatibility sweep: May 16, 2026. The SDK surface check passed against
+Last compatibility sweep: May 19, 2026. The SDK surface check passed against
 `openclaw@2026.5.3`, `openclaw@2026.5.3-1`, `openclaw@2026.5.4-beta.1`,
 `openclaw@2026.5.4-beta.2`, `openclaw@2026.5.4-beta.3`,
 `openclaw@2026.5.4`, `openclaw@2026.5.5`, `openclaw@2026.5.6`,
 `openclaw@2026.5.16-beta.2`, `openclaw@2026.5.16-beta.3`, and
-`openclaw@2026.5.16-beta.4`.
+`openclaw@2026.5.16-beta.4`. The May 19 sweep also checked the source SDK
+surface for `openclaw@2026.5.19-beta.1`, which covers the intervening
+`2026.5.16-beta.6`, `2026.5.16-beta.7`, and `2026.5.18-beta.1` release line
+for the Remnic adapter surfaces.
 Keep the peer range broad unless an upstream release removes a runtime surface
 Remnic actively uses.
 
@@ -199,6 +202,23 @@ metadata with globally unique ids. Remnic does not own the `openai` provider,
 so the canonical manifest keeps OpenAI API-key metadata on `providerAuthChoices`
 and the compatibility `providerAuthEnvVars.openai` surface instead of declaring
 `setup.providers`.
+
+OpenClaw 2026.5.16-beta.6 added `defineToolPlugin` and the authoring CLI for
+simple typed tool-only plugins. Remnic intentionally stays on `definePluginEntry`
+because the adapter owns mixed memory-slot hooks, lifecycle handlers, slash
+command metadata, public artifacts, and runtime tools rather than only static
+tools.
+
+OpenClaw 2026.5.16-beta.7 through 2026.5.19-beta.1 keep the Remnic-required
+plugin install, ClawHub fallback, manifest contract, hook, memory-slot, gateway
+LLM, and plugin security-scan surfaces compatible. Those newer OpenClaw hosts
+raise their runtime floor to Node.js `>=22.19.0`, but the Remnic adapter package
+keeps its broad host peer range so older advertised 2026.5.16 hosts do not
+select a package with an incompatible package-level engine gate. The manifest
+continues to avoid `setup.providers.openai`; OpenClaw still treats provider ids
+there as ownership metadata, while Remnic only advertises an optional
+plugin-mode OpenAI key through `providerAuthChoices` and the deprecated
+`providerAuthEnvVars.openai` compatibility probe.
 
 Native memory registrars are tracked separately in
 [`docs/plugins/openclaw-native-memory-registrars.md`](../../docs/plugins/openclaw-native-memory-registrars.md).

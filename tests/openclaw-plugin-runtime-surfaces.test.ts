@@ -50,7 +50,7 @@ const OPENCLAW_PACKAGE_EXPECTATIONS = [
   {
     packageJsonPath: "packages/plugin-openclaw/package.json",
     name: "@remnic/plugin-openclaw",
-    buildVersion: "2026.5.16-beta.4",
+    buildVersion: "2026.5.19-beta.1",
     install: {
       clawhubSpec: "clawhub:@remnic/plugin-openclaw",
       npmSpec: "@remnic/plugin-openclaw",
@@ -59,7 +59,7 @@ const OPENCLAW_PACKAGE_EXPECTATIONS = [
   {
     packageJsonPath: "packages/shim-openclaw-engram/package.json",
     name: "@joshuaswarren/openclaw-engram",
-    buildVersion: "2026.5.16-beta.3",
+    buildVersion: "2026.5.19-beta.1",
     install: {
       clawhubSpec: "clawhub:@remnic/plugin-openclaw",
       npmSpec: "@joshuaswarren/openclaw-engram",
