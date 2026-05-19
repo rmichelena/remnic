@@ -67,6 +67,15 @@ test("extractRankedPageIds ignores leading wrappers on known IDs", () => {
   );
 });
 
+test("extractRankedPageIds resolves known IDs case-insensitively", () => {
+  const pages = [page("Project.Alpha/Task-1")];
+
+  assert.deepEqual(
+    extractRankedPageIds("page_id: PROJECT.ALPHA/TASK-1", pages),
+    ["Project.Alpha/Task-1"],
+  );
+});
+
 test("extractRankedPageIds ignores page_id substrings inside larger keys", () => {
   const pages = [page("task-1"), page("task-2")];
 

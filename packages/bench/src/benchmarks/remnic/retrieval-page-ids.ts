@@ -17,7 +17,7 @@ function resolvePageId(
   markerId: string,
   pageIdByLowercase: Map<string, string>,
 ): string {
-  const normalizedMarkerId = stripLeadingFormattingDelimiters(markerId);
+  const normalizedMarkerId = stripLeadingFormattingDelimiters(markerId).toLowerCase();
   const exact = pageIdByLowercase.get(normalizedMarkerId);
   if (exact !== undefined) {
     return exact;
