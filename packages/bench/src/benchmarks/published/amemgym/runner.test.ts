@@ -126,3 +126,64 @@ test("AMemGym batches tiny session messages before storing profile context", asy
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("AMemGym fails fast when profile drain fails before scoring", async () => {
+  let completedTasks = 0;
+  let recallCalls = 0;
+
+  await assert.rejects(
+    () =>
+      runAMemGymBenchmark({
+        benchmark: amemGymDefinition,
+        mode: "quick",
+        onTaskComplete() {
+          completedTasks += 1;
+        },
+        system: {
+          async store() {},
+          async recall() {
+            recallCalls += 1;
+            return "Chicago";
+          },
+          async search() {
+            return [];
+          },
+          async reset() {},
+          async drain() {
+            throw new Error("drain timed out");
+          },
+          async destroy() {},
+          async getStats() {
+            return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+          },
+          responder: {
+            async respond() {
+              return {
+                text: "1",
+                tokens: { input: 1, output: 1 },
+                latencyMs: 1,
+                model: "amemgym-test-responder",
+              };
+            },
+          },
+          judge: {
+            async score() {
+              return 1;
+            },
+            async scoreWithMetrics() {
+              return {
+                score: 1,
+                tokens: { input: 0, output: 0 },
+                latencyMs: 0,
+                model: "amemgym-test-judge",
+              };
+            },
+          },
+        },
+      }),
+    /AMemGym drain failed for profile smoke-profile-1: drain timed out/,
+  );
+
+  assert.equal(recallCalls, 0);
+  assert.equal(completedTasks, 0);
+});

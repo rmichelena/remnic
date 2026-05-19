@@ -107,7 +107,9 @@ export async function runAMemGymBenchmark(
     try {
       await options.system.drain?.();
     } catch (drainErr) {
-      console.error(`  [WARN] amemgym drain failed for profile ${profile.id}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+      throw new Error(
+        `AMemGym drain failed for profile ${profile.id}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`,
+      );
     }
 
     for (
