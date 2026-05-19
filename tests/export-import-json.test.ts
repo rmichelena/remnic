@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { exportJsonBundle } from "../src/transfer/export-json.js";
 import { importJsonBundle } from "../src/transfer/import-json.js";
-import { writeFixtureMemoryDir } from "./transfer-fixtures.js";
+import { writeFixtureMemoryDir, writeSensitiveTransferFixtureEntries } from "./transfer-fixtures.js";
 
 async function assertPathMissing(filePath: string): Promise<void> {
   await assert.rejects(access(filePath), { code: "ENOENT" });
@@ -65,6 +65,37 @@ test("v2.3 json export/import round-trips (without transcripts by default)", asy
 
   const fact = await readFile(path.join(targetDir, "facts", "2026-02-11", "fact-1.md"), "utf-8");
   assert.match(fact, /The user likes pianos/);
+});
+
+test("json export excludes secure store, capsules, VCS, and dependencies", async () => {
+  const memDir = await mkdtemp(path.join(os.tmpdir(), "engram-mem-"));
+  await writeFixtureMemoryDir(memDir);
+  await writeSensitiveTransferFixtureEntries(memDir);
+
+  const outDir = await mkdtemp(path.join(os.tmpdir(), "engram-export-"));
+  await exportJsonBundle({ memoryDir: memDir, outDir, pluginVersion: "2.2.3" });
+
+  const bundle = JSON.parse(await readFile(path.join(outDir, "bundle.json"), "utf-8")) as {
+    records: Array<{ path: string; content: string }>;
+    manifest: { files: Array<{ path: string }> };
+  };
+  const paths = bundle.records.map((record) => record.path);
+  assert.equal(paths.some((entry) => entry.startsWith(".secure-store/")), false);
+  assert.equal(paths.some((entry) => entry.startsWith(".capsules/")), false);
+  assert.equal(paths.some((entry) => entry.startsWith(".git/")), false);
+  assert.equal(paths.some((entry) => entry.startsWith("node_modules/")), false);
+  assert.ok(paths.includes("facts/2026-02-11/fact-1.md"));
+  assert.deepEqual(bundle.manifest.files.map((file) => file.path), paths);
+});
+
+test("json export rejects output directory equal to memory directory", async () => {
+  const memDir = await mkdtemp(path.join(os.tmpdir(), "engram-mem-"));
+  await writeFixtureMemoryDir(memDir);
+
+  await assert.rejects(
+    exportJsonBundle({ memoryDir: memDir, outDir: memDir, pluginVersion: "2.2.3" }),
+    /output path must not equal the memory directory/,
+  );
 });
 
 test("json import rejects invalid conflict policy without overwriting existing files", async () => {

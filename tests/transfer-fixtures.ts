@@ -34,3 +34,14 @@ export async function writeFixtureMemoryDir(memoryDir: string): Promise<void> {
   );
 }
 
+export async function writeSensitiveTransferFixtureEntries(memoryDir: string): Promise<void> {
+  await mkdir(path.join(memoryDir, ".secure-store"), { recursive: true });
+  await mkdir(path.join(memoryDir, ".capsules"), { recursive: true });
+  await mkdir(path.join(memoryDir, ".git"), { recursive: true });
+  await mkdir(path.join(memoryDir, "node_modules", "pkg"), { recursive: true });
+
+  await writeFile(path.join(memoryDir, ".secure-store", "header.json"), "{\"verifier\":\"secret\"}\n", "utf-8");
+  await writeFile(path.join(memoryDir, ".capsules", "old.capsule.json.gz"), "old capsule\n", "utf-8");
+  await writeFile(path.join(memoryDir, ".git", "config"), "repo config\n", "utf-8");
+  await writeFile(path.join(memoryDir, "node_modules", "pkg", "index.js"), "module\n", "utf-8");
+}

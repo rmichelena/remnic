@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { EXPORT_FORMAT, EXPORT_SCHEMA_VERSION } from "./constants.js";
 import { listFilesRecursive, sha256File, toPosixRelPath, writeJsonFile } from "./fs-utils.js";
 import type { ExportManifestV1 } from "./types.js";
+import { computeTransferOutputRel, isTransferPathExcluded } from "./exclusions.js";
 
 export interface ExportMdOptions {
   memoryDir: string;
@@ -11,25 +12,20 @@ export interface ExportMdOptions {
   pluginVersion: string;
 }
 
-function shouldExclude(relPosix: string, includeTranscripts: boolean): boolean {
-  const parts = relPosix.split("/");
-  if (!includeTranscripts && parts[0] === "transcripts") return true;
-  return false;
-}
-
 export async function exportMarkdownBundle(opts: ExportMdOptions): Promise<void> {
   const includeTranscripts = opts.includeTranscripts === true;
   const outDirAbs = path.resolve(opts.outDir);
   await mkdir(outDirAbs, { recursive: true });
 
   const memDirAbs = path.resolve(opts.memoryDir);
+  const outputRelPosix = computeTransferOutputRel(memDirAbs, outDirAbs);
   const filesAbs = await listFilesRecursive(memDirAbs);
 
   const manifestFiles: ExportManifestV1["files"] = [];
 
   for (const abs of filesAbs) {
     const relPosix = toPosixRelPath(abs, memDirAbs);
-    if (shouldExclude(relPosix, includeTranscripts)) continue;
+    if (isTransferPathExcluded(relPosix, { includeTranscripts, outputRelPosix })) continue;
 
     const dstAbs = path.join(outDirAbs, ...relPosix.split("/"));
     await mkdir(path.dirname(dstAbs), { recursive: true });
@@ -61,4 +57,3 @@ export async function looksLikeEngramMdExport(fromDir: string): Promise<boolean>
     return false;
   }
 }
-

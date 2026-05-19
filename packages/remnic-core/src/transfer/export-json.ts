@@ -3,6 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { EXPORT_FORMAT, EXPORT_SCHEMA_VERSION } from "./constants.js";
 import { listFilesRecursive, sha256File, sha256String, toPosixRelPath, writeJsonFile } from "./fs-utils.js";
 import type { ExportBundleV1, ExportManifestV1, ExportMemoryRecordV1 } from "./types.js";
+import { computeTransferOutputRel, isTransferPathExcluded } from "./exclusions.js";
 
 export interface ExportCommonOptions {
   memoryDir: string;
@@ -13,24 +14,13 @@ export interface ExportCommonOptions {
   pluginVersion: string;
 }
 
-const DEFAULT_EXCLUDES = new Set([
-  "node_modules",
-  ".git",
-]);
-
-function shouldExclude(relPosix: string, includeTranscripts: boolean): boolean {
-  const parts = relPosix.split("/");
-  if (parts.some((p) => DEFAULT_EXCLUDES.has(p))) return true;
-  if (!includeTranscripts && parts[0] === "transcripts") return true;
-  return false;
-}
-
 export async function exportJsonBundle(opts: ExportCommonOptions): Promise<void> {
   const includeTranscripts = opts.includeTranscripts === true;
   const outDirAbs = path.resolve(opts.outDir);
   await mkdir(outDirAbs, { recursive: true });
 
   const memoryDirAbs = path.resolve(opts.memoryDir);
+  const outputRelPosix = computeTransferOutputRel(memoryDirAbs, outDirAbs);
   const filesAbs = await listFilesRecursive(memoryDirAbs);
 
   const records: ExportMemoryRecordV1[] = [];
@@ -38,7 +28,7 @@ export async function exportJsonBundle(opts: ExportCommonOptions): Promise<void>
 
   for (const abs of filesAbs) {
     const relPosix = toPosixRelPath(abs, memoryDirAbs);
-    if (shouldExclude(relPosix, includeTranscripts)) continue;
+    if (isTransferPathExcluded(relPosix, { includeTranscripts, outputRelPosix })) continue;
 
     const content = await readFile(abs, "utf-8");
     records.push({ path: relPosix, content });

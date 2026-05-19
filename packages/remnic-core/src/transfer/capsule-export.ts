@@ -19,25 +19,15 @@ import {
   type ExportMemoryRecordV1,
 } from "./types.js";
 import { encryptCapsuleFile } from "./capsule-crypto.js";
+import { computeTransferOutputRel, DEFAULT_TRANSFER_EXCLUDE_DIRS } from "./exclusions.js";
 
 /**
  * Default subdirectory excludes applied to every capsule export. These match
- * the existing `export-json` / `export-md` exclusions plus the `transcripts`
+ * the shared plaintext transfer exclusions plus the `transcripts`
  * directory, which is excluded by default and only included when the caller
  * explicitly passes `transcripts` in {@link ExportCapsuleOptions.includeKinds}.
  */
-const DEFAULT_EXCLUDE_DIRS: ReadonlySet<string> = new Set([
-  "node_modules",
-  ".git",
-  // Never export the secure-store directory: it contains the encryption
-  // header (KDF params + verifier) which is security-sensitive and
-  // machine-specific. The passphrase is not stored here, but including
-  // the header in a capsule would let an attacker brute-force the
-  // passphrase offline if the capsule is intercepted.
-  ".secure-store",
-  // Exclude .capsules to avoid recursive self-inclusion.
-  ".capsules",
-]);
+const DEFAULT_EXCLUDE_DIRS = DEFAULT_TRANSFER_EXCLUDE_DIRS;
 
 const TRANSCRIPTS_DIR = "transcripts" as const;
 
@@ -191,7 +181,7 @@ export async function exportCapsule(
   // re-import previous capsule archives on subsequent runs. Compute the
   // posix-relative path of the outDir under rootAbs (or `null` when it sits
   // outside) so {@link shouldInclude} can skip the entire subtree.
-  const outDirRelPosix = computeOutDirRel(rootAbs, outDirAbs);
+  const outDirRelPosix = computeTransferOutputRel(rootAbs, outDirAbs);
 
   const filesAbs = await listFilesRecursive(rootAbs);
 
@@ -424,32 +414,6 @@ function normalizePeerIds(
     set.add(raw);
   }
   return set;
-}
-
-/**
- * Return the posix-relative path of {@link outDirAbs} under {@link rootAbs},
- * or `null` if the output directory sits outside the export root. Used to
- * exclude the output directory's subtree from the input scan so re-running
- * the export does not package prior archives back into the new bundle.
- *
- * Both inputs are expected to be absolute paths already (post-`path.resolve`).
- */
-function computeOutDirRel(rootAbs: string, outDirAbs: string): string | null {
-  const rel = path.relative(rootAbs, outDirAbs);
-  // outDir == root: degenerate. {@link exportCapsule} rejects this case
-  // before calling us; this branch is defensive only. Returning `"."` would
-  // make `shouldInclude` drop every file, masking the misuse — return `null`
-  // instead so any direct caller that bypasses the check still produces a
-  // populated manifest rather than a silent empty export.
-  if (rel === "") return null;
-  // outDir outside root: nothing to exclude. Match real parent-traversal
-  // segments only — `rel.startsWith("..")` would also match valid in-tree
-  // names like `..capsules` and would skip excluding that subtree. The
-  // boundary check (`rel === ".."` or `rel` starts with `".." + sep`) is
-  // platform-aware via `path.sep` so Windows backslashes are respected.
-  if (rel === ".." || rel.startsWith(`..${path.sep}`)) return null;
-  if (path.isAbsolute(rel)) return null;
-  return rel.split(path.sep).join("/");
 }
 
 async function assertIsDirectory(absPath: string): Promise<void> {

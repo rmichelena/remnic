@@ -3,6 +3,7 @@ import { mkdir, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { exportMarkdownBundle } from "./export-md.js";
 import { encryptCapsuleFile } from "./capsule-crypto.js";
+import { isTransferPathExcluded } from "./exclusions.js";
 
 export interface BackupOptions {
   memoryDir: string;
@@ -48,12 +49,7 @@ export async function backupMemoryDir(opts: BackupOptions): Promise<string> {
     const records: Array<{ path: string; content: string }> = [];
     for (const abs of filesAbs) {
       const relPosix = toPosixRelPath(abs, memoryDirAbs);
-      const parts = relPosix.split("/");
-      // Skip VCS dirs, the secure-store dir (contains KDF params + verifier —
-      // sensitive and machine-specific, must not leave the local machine), and
-      // the .capsules dir (self-recursive inclusion). (Cursor / #690 PR 4/4)
-      if (parts.some((p) => p === "node_modules" || p === ".git" || p === ".secure-store" || p === ".capsules")) continue;
-      if (!includeTranscripts && parts[0] === "transcripts") continue;
+      if (isTransferPathExcluded(relPosix, { includeTranscripts })) continue;
       const content = await readFile(abs, "utf-8");
       records.push({ path: relPosix, content });
     }

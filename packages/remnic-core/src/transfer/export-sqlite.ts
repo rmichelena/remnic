@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { SQLITE_SCHEMA_VERSION, SQLITE_TABLES_SQL } from "./sqlite-schema.js";
 import { listFilesRecursive, sha256File, toPosixRelPath } from "./fs-utils.js";
 import { openBetterSqlite3 } from "../runtime/better-sqlite.js";
+import { computeTransferOutputRel, isTransferPathExcluded } from "./exclusions.js";
 
 export interface ExportSqliteOptions {
   memoryDir: string;
@@ -11,16 +12,11 @@ export interface ExportSqliteOptions {
   pluginVersion: string;
 }
 
-function shouldExclude(relPosix: string, includeTranscripts: boolean): boolean {
-  const parts = relPosix.split("/");
-  if (!includeTranscripts && parts[0] === "transcripts") return true;
-  return false;
-}
-
 export async function exportSqlite(opts: ExportSqliteOptions): Promise<void> {
   const includeTranscripts = opts.includeTranscripts === true;
   const memDirAbs = path.resolve(opts.memoryDir);
   const outAbs = path.resolve(opts.outFile);
+  const outputRelPosix = computeTransferOutputRel(memDirAbs, outAbs);
 
   const filesAbs = await listFilesRecursive(memDirAbs);
   const db = openBetterSqlite3(outAbs);
@@ -45,7 +41,7 @@ export async function exportSqlite(opts: ExportSqliteOptions): Promise<void> {
     const rows: Array<{ rel: string; bytes: number; sha256: string; content: string }> = [];
     for (const abs of filesAbs) {
       const relPosix = toPosixRelPath(abs, memDirAbs);
-      if (shouldExclude(relPosix, includeTranscripts)) continue;
+      if (isTransferPathExcluded(relPosix, { includeTranscripts, outputRelPosix })) continue;
       const content = await readFile(abs, "utf-8");
       const { sha256, bytes } = await sha256File(abs);
       rows.push({ rel: relPosix, bytes, sha256, content });

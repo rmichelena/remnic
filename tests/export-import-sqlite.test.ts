@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { writeFixtureMemoryDir } from "./transfer-fixtures.js";
+import { writeFixtureMemoryDir, writeSensitiveTransferFixtureEntries } from "./transfer-fixtures.js";
 import { exportSqlite } from "../src/transfer/export-sqlite.js";
 import { importSqlite } from "../src/transfer/import-sqlite.js";
 import { openBetterSqlite3 } from "../src/runtime/better-sqlite.js";
@@ -55,6 +55,38 @@ test("v2.3 sqlite export/import round-trips basic files", async () => {
 
   const importedProfile = await readFile(path.join(targetDir, "profile.md"), "utf-8");
   assert.match(importedProfile, /Profile/);
+});
+
+test("sqlite export excludes secure store, capsules, VCS, and dependencies", async () => {
+  const memDir = await mkdtemp(path.join(os.tmpdir(), "engram-mem-"));
+  await writeFixtureMemoryDir(memDir);
+  await writeSensitiveTransferFixtureEntries(memDir);
+
+  const outDir = await mkdtemp(path.join(os.tmpdir(), "engram-sqlite-"));
+  const sqliteFile = path.join(outDir, "export.sqlite");
+  await exportSqlite({ memoryDir: memDir, outFile: sqliteFile, pluginVersion: "2.2.3" });
+
+  const db = openBetterSqlite3(sqliteFile);
+  try {
+    const paths = db.prepare("SELECT path_rel FROM files ORDER BY path_rel").all() as Array<{ path_rel: string }>;
+    assert.equal(paths.some((row) => row.path_rel.startsWith(".secure-store/")), false);
+    assert.equal(paths.some((row) => row.path_rel.startsWith(".capsules/")), false);
+    assert.equal(paths.some((row) => row.path_rel.startsWith(".git/")), false);
+    assert.equal(paths.some((row) => row.path_rel.startsWith("node_modules/")), false);
+    assert.ok(paths.some((row) => row.path_rel === "facts/2026-02-11/fact-1.md"));
+  } finally {
+    db.close();
+  }
+});
+
+test("sqlite export rejects output file equal to memory directory", async () => {
+  const memDir = await mkdtemp(path.join(os.tmpdir(), "engram-mem-"));
+  await writeFixtureMemoryDir(memDir);
+
+  await assert.rejects(
+    exportSqlite({ memoryDir: memDir, outFile: memDir, pluginVersion: "2.2.3" }),
+    /output path must not equal the memory directory/,
+  );
 });
 
 test("sqlite import rejects invalid conflict policy without overwriting existing files", async () => {
