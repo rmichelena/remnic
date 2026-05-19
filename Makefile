@@ -28,4 +28,4 @@ preflight-quick:
 	pnpm preflight:quick
 
 clean:
-	rm -rf dist/ packages/*/dist
+	node scripts/clean-dist.mjs
