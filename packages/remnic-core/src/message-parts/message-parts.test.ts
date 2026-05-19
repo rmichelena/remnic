@@ -167,6 +167,37 @@ describe("message-parts parsers", () => {
     assert.equal(parts[0]!.filePath, "src/openclaw.ts");
   });
 
+  it("preserves mixed OpenClaw OpenAI text and tool-call content blocks", () => {
+    const parts = parseOpenClawMessageParts({
+      content: [
+        { type: "output_text", text: "Updated src/openclaw.ts." },
+        { type: "toolCall", name: "edit", arguments: { path: "src/openclaw.ts" } },
+      ],
+    });
+
+    assert.equal(parts.length, 2);
+    assert.equal(parts[0]!.kind, "text");
+    assert.equal(parts[0]!.filePath, "src/openclaw.ts");
+    assert.equal(parts[1]!.kind, "file_write");
+    assert.equal(parts[1]!.toolName, "edit");
+    assert.equal(parts[1]!.filePath, "src/openclaw.ts");
+  });
+
+  it("infers mixed OpenClaw content without dropping tool-call blocks", () => {
+    const parts = parseMessageParts({
+      content: [
+        { type: "output_text", text: "Updated src/openclaw.ts." },
+        { type: "toolCall", name: "edit", arguments: { path: "src/openclaw.ts" } },
+      ],
+    });
+
+    assert.equal(parts.length, 2);
+    assert.equal(parts[0]!.kind, "text");
+    assert.equal(parts[1]!.kind, "file_write");
+    assert.equal(parts[1]!.toolName, "edit");
+    assert.equal(parts[1]!.filePath, "src/openclaw.ts");
+  });
+
   it("extracts Pi tool-call content blocks as structured file writes", () => {
     const parts = parsePiMessageParts({
       role: "assistant",
