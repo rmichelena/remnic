@@ -46,6 +46,8 @@ export interface ContradictionPair {
   resolution?: ResolutionVerb;
   /** ISO timestamp until which a non-terminal deferral remains hidden from review. */
   deferredUntil?: string;
+  /** Content hashes captured for each referenced memory when this pair was judged. */
+  memoryContentHashes?: Record<string, string>;
   /** Namespace scope. */
   namespace?: string;
 }
@@ -216,6 +218,25 @@ function writePairFile(filePath: string, pair: ContradictionPair): void {
   }
 }
 
+export function computeMemoryContentHash(content: string, category?: string): string {
+  const normalized = JSON.stringify({
+    content: content.trim(),
+    category: (category ?? "").trim(),
+  });
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+function suppliedMemoryHashesChanged(
+  existing: ContradictionPair,
+  pair: Omit<ContradictionPair, "pairId"> & { memoryIds: [string, string] },
+): boolean {
+  if (!existing.memoryContentHashes || !pair.memoryContentHashes) return false;
+  return pair.memoryIds.some((memoryId) => {
+    const current = pair.memoryContentHashes?.[memoryId];
+    return typeof current === "string" && existing.memoryContentHashes?.[memoryId] !== current;
+  });
+}
+
 // ── Write ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -257,6 +278,11 @@ export function writePair(
     && options.cooldownDays !== undefined
     && isCoolingDown(existing, options.cooldownDays),
   );
+  const dormantContentChanged = Boolean(
+    existing
+    && existingDormantCooldownActive
+    && suppliedMemoryHashesChanged(existing, pair),
+  );
   const existingDormantExpired = Boolean(
     existing
     && isDormantReviewedPair(existing)
@@ -266,7 +292,10 @@ export function writePair(
   if (
     existing
     && !existingDeferralExpired
-    && (existingDormantCooldownActive || (!existingDormantExpired && existing.confidence >= pair.confidence))
+    && (
+      (existingDormantCooldownActive && !dormantContentChanged)
+      || (!existingDormantExpired && !dormantContentChanged && existing.confidence >= pair.confidence)
+    )
   ) {
     return existing;
   }
@@ -274,11 +303,11 @@ export function writePair(
   const full: ContradictionPair = {
     ...pair,
     pairId,
-    lastReviewedAt: (existingDeferralExpired || existingDormantExpired)
+    lastReviewedAt: (existingDeferralExpired || existingDormantExpired || dormantContentChanged)
       ? pair.lastReviewedAt
       : (existing?.lastReviewedAt ?? pair.lastReviewedAt),
     resolution: undefined,
-    deferredUntil: (existingDeferralExpired || existingDormantExpired)
+    deferredUntil: (existingDeferralExpired || existingDormantExpired || dormantContentChanged)
       ? undefined
       : existing?.deferredUntil,
   };
@@ -520,10 +549,18 @@ export function deferPair(
  */
 export function memoryHashesChanged(
   _memoryDir: string,
-  _pair: ContradictionPair,
-  _getCurrentHash: (memoryId: string) => string | null,
+  pair: ContradictionPair,
+  getCurrentHash: (memoryId: string) => string | null,
 ): boolean {
-  // Intentionally a stub for now — the full implementation would compare
-  // content hashes stored at detection time with current hashes.
+  if (!pair.memoryContentHashes) return false;
+
+  for (const memoryId of pair.memoryIds) {
+    const previousHash = pair.memoryContentHashes[memoryId];
+    if (typeof previousHash !== "string") continue;
+
+    const currentHash = getCurrentHash(memoryId);
+    if (currentHash !== null && currentHash !== previousHash) return true;
+  }
+
   return false;
 }

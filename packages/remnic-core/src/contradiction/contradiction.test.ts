@@ -12,6 +12,8 @@ import {
   readPair,
   listPairs,
   isCoolingDown,
+  memoryHashesChanged,
+  computeMemoryContentHash,
   resolvePair,
   deferPair,
   migrateUnscopedPairsToNamespace,
@@ -370,6 +372,76 @@ test("writePair preserves dormant independent verdicts during cooldown", async (
   } finally {
     await cleanup();
   }
+});
+
+test("writePair refreshes dormant independent verdicts during cooldown when memory content changed", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const now = new Date().toISOString();
+    const staleAHash = computeMemoryContentHash("old content for mem-a-001", "fact");
+    const currentAHash = computeMemoryContentHash("new content for mem-a-001", "fact");
+    const bHash = computeMemoryContentHash("content for mem-b-002", "fact");
+    const dormant = writePair(dir, makePair({
+      verdict: "independent",
+      confidence: 0.95,
+      lastReviewedAt: now,
+      memoryContentHashes: {
+        "mem-a-001": staleAHash,
+        "mem-b-002": bHash,
+      },
+    }));
+
+    const refreshed = writePair(dir, makePair({
+      verdict: "contradicts",
+      confidence: 0.5,
+      rationale: "Changed source memories now conflict",
+      memoryContentHashes: {
+        "mem-a-001": currentAHash,
+        "mem-b-002": bHash,
+      },
+    }), { cooldownDays: 14 });
+
+    assert.equal(refreshed.pairId, dormant.pairId);
+    assert.equal(refreshed.verdict, "contradicts");
+    assert.equal(refreshed.confidence, 0.5);
+    assert.equal(refreshed.resolution, undefined);
+    assert.equal(refreshed.lastReviewedAt, undefined);
+    assert.deepEqual(refreshed.memoryContentHashes, {
+      "mem-a-001": currentAHash,
+      "mem-b-002": bHash,
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("memoryHashesChanged compares stored pair hashes with current memory hashes", async () => {
+  const previousHash = computeMemoryContentHash("old content", "fact");
+  const unchangedHash = computeMemoryContentHash("same content", "fact");
+  const currentHash = computeMemoryContentHash("new content", "fact");
+  const pair = makePair({
+    memoryContentHashes: {
+      "mem-a-001": previousHash,
+      "mem-b-002": unchangedHash,
+    },
+  });
+
+  assert.equal(
+    memoryHashesChanged("", { ...pair, pairId: computePairId("mem-a-001", "mem-b-002") }, (memoryId) => {
+      if (memoryId === "mem-a-001") return currentHash;
+      if (memoryId === "mem-b-002") return unchangedHash;
+      return null;
+    }),
+    true,
+  );
+  assert.equal(
+    memoryHashesChanged("", { ...pair, pairId: computePairId("mem-a-001", "mem-b-002") }, (memoryId) => {
+      if (memoryId === "mem-a-001") return previousHash;
+      if (memoryId === "mem-b-002") return unchangedHash;
+      return null;
+    }),
+    false,
+  );
 });
 
 test("writePair refreshes expired independent verdicts with actionable lower-confidence results", async () => {
@@ -1047,6 +1119,75 @@ test("runContradictionScan migrates legacy unscoped cooldown pairs for explicit 
     const queued = listPairs(dir, { filter: "all", namespace: "configured-default" }).pairs;
     assert.equal(queued.length, 1);
     assert.equal(queued[0]!.namespace, "configured-default");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("runContradictionScan rejudges cooling pairs when referenced memory content changed", async () => {
+  const { dir, cleanup } = await makeTempDir();
+  try {
+    const defaultA = makeMemory("default-a");
+    defaultA.frontmatter.entityRef = "entity:shared";
+    defaultA.content = "Joshua uses pnpm for Remnic";
+    const defaultB = makeMemory("default-b");
+    defaultB.frontmatter.entityRef = "entity:shared";
+    defaultB.content = "Joshua uses npm for Remnic";
+    const currentAHash = computeMemoryContentHash(defaultA.content, "fact");
+    const currentBHash = computeMemoryContentHash(defaultB.content, "fact");
+
+    writePair(dir, makePair({
+      memoryIds: ["default-a", "default-b"],
+      verdict: "independent",
+      lastReviewedAt: new Date().toISOString(),
+      memoryContentHashes: {
+        "default-a": computeMemoryContentHash("Joshua uses yarn for Remnic", "fact"),
+        "default-b": currentBHash,
+      },
+    }));
+
+    const storage = makeScanStorage([defaultA, defaultB]);
+    const config = parseConfig({
+      memoryDir: dir,
+      contradictionScan: {
+        enabled: true,
+        cooldownDays: 14,
+        maxPairsPerRun: 10,
+        topicOverlapFloor: 0,
+        similarityFloor: 0,
+      },
+    });
+
+    const result = await runContradictionScan({
+      storage,
+      config,
+      memoryDir: dir,
+      localLlm: null,
+      fallbackLlm: {
+        async complete() {
+          return {
+            content: JSON.stringify([{
+              pairKey: "default-a:default-b",
+              verdict: "independent",
+              rationale: "Still no contradiction after changed content",
+              confidence: 0.4,
+            }]),
+          };
+        },
+      } as any,
+    });
+
+    assert.equal(result.cooledDown, 0);
+    assert.equal(result.candidates, 1);
+    assert.equal(result.judged, 1);
+    assert.equal(result.queued, 1);
+
+    const queued = listPairs(dir, { filter: "all" }).pairs;
+    assert.equal(queued.length, 1);
+    assert.deepEqual(queued[0]!.memoryContentHashes, {
+      "default-a": currentAHash,
+      "default-b": currentBHash,
+    });
   } finally {
     await cleanup();
   }

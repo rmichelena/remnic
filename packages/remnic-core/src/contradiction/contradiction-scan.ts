@@ -23,6 +23,8 @@ import {
   writePairs,
   listPairs,
   isCoolingDown,
+  memoryHashesChanged,
+  computeMemoryContentHash,
   computePairId,
   migrateUnscopedPairsToNamespace,
   type ContradictionPair,
@@ -167,6 +169,7 @@ export async function runContradictionScan(deps: ScanDependencies): Promise<Scan
 
   // 7. Write to review queue
   const queueEntries: Array<Omit<ContradictionPair, "pairId"> & { memoryIds: [string, string] }> = [];
+  const currentMemoryHashes = memoryContentHashMap(memories);
   for (const [key, result] of judgeResult.results) {
     queueEntries.push({
       memoryIds: [result.memoryIdA, result.memoryIdB],
@@ -176,6 +179,7 @@ export async function runContradictionScan(deps: ScanDependencies): Promise<Scan
       detectedAt: new Date().toISOString(),
       // Set lastReviewedAt for non-actionable verdicts so cooldown prevents re-judging
       lastReviewedAt: result.verdict === "independent" ? new Date().toISOString() : undefined,
+      memoryContentHashes: pairMemoryContentHashes(result.memoryIdA, result.memoryIdB, currentMemoryHashes),
       namespace,
     });
   }
@@ -224,12 +228,17 @@ async function generatePairs(
   if (maxPairs === 0) return { pairs, skipped };
 
   const orderedMemories = [...memories].sort(compareMemoryId);
+  const currentMemoryHashes = memoryContentHashMap(orderedMemories);
 
   const pushCandidate = (pair: CandidatePair): void => {
     if (pairs.length < maxPairs) pairs.push(pair);
   };
 
   const hasCapacity = (): boolean => pairs.length < maxPairs;
+  const isSkippedByCooldown = (existing: ContradictionPair | undefined): boolean => {
+    if (!existing || !isCoolingDown(existing, scanConfig.cooldownDays)) return false;
+    return !memoryHashesChanged("", existing, (memoryId) => currentMemoryHashes.get(memoryId) ?? null);
+  };
 
   // Build index by entityRef for fast lookup
   const byEntity = new Map<string, MemoryFile[]>();
@@ -259,7 +268,7 @@ async function generatePairs(
 
         // Check cooldown
         const existing = existingPairs.get(pairId);
-        if (existing && isCoolingDown(existing, scanConfig.cooldownDays)) {
+        if (isSkippedByCooldown(existing)) {
           skipped++;
           continue;
         }
@@ -296,7 +305,7 @@ async function generatePairs(
       seen.add(pairId);
 
       const existing = existingPairs.get(pairId);
-      if (existing && isCoolingDown(existing, scanConfig.cooldownDays)) {
+      if (isSkippedByCooldown(existing)) {
         skipped++;
         continue;
       }
@@ -335,7 +344,7 @@ async function generatePairs(
           seen.add(pairId);
 
           const existing = existingPairs.get(pairId);
-          if (existing && isCoolingDown(existing, scanConfig.cooldownDays)) {
+          if (isSkippedByCooldown(existing)) {
             skipped++;
             continue;
           }
@@ -468,4 +477,28 @@ function jaccardOverlap(a: string[], b: string[]): number {
 
 function compareMemoryId(a: MemoryFile, b: MemoryFile): number {
   return (a.frontmatter.id ?? "").localeCompare(b.frontmatter.id ?? "");
+}
+
+function memoryContentHashMap(memories: MemoryFile[]): Map<string, string> {
+  const hashes = new Map<string, string>();
+  for (const memory of memories) {
+    const id = memory.frontmatter.id;
+    if (!id) continue;
+    hashes.set(id, computeMemoryContentHash(memory.content, memory.frontmatter.category as string | undefined));
+  }
+  return hashes;
+}
+
+function pairMemoryContentHashes(
+  memoryIdA: string,
+  memoryIdB: string,
+  currentMemoryHashes: Map<string, string>,
+): Record<string, string> | undefined {
+  const hashA = currentMemoryHashes.get(memoryIdA);
+  const hashB = currentMemoryHashes.get(memoryIdB);
+  if (!hashA || !hashB) return undefined;
+  return {
+    [memoryIdA]: hashA,
+    [memoryIdB]: hashB,
+  };
 }
