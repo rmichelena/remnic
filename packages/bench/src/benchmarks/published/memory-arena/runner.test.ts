@@ -167,6 +167,93 @@ test("MemoryArena quick fixture seeds prerequisite subtasks before scoring follo
   assert.match(storedMessages.join("\n"), /Environment result: trail mix/);
 });
 
+test("MemoryArena reports prerequisite drain failures before scoring follow-ups", async () => {
+  const storedMessages: string[] = [];
+  const completedCounts: number[] = [];
+  let drainCalls = 0;
+  let recallCalls = 0;
+  let responderCalls = 0;
+  let judgeCalls = 0;
+
+  const result = await runMemoryArenaBenchmark({
+    benchmark: memoryArenaDefinition,
+    mode: "quick",
+    system: {
+      async store(_sessionId, messages) {
+        storedMessages.push(...messages.map((message) => message.content));
+      },
+      async recall() {
+        recallCalls += 1;
+        return storedMessages.join("\n\n");
+      },
+      async search() {
+        return [];
+      },
+      async reset() {
+        storedMessages.length = 0;
+      },
+      async drain() {
+        drainCalls += 1;
+        if (drainCalls === 2) {
+          throw new Error("drain timed out");
+        }
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: storedMessages.length, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond() {
+          responderCalls += 1;
+          return {
+            text: "trail mix",
+            tokens: { input: 1, output: 1 },
+            latencyMs: 1,
+            model: "memory-arena-test-responder",
+          };
+        },
+      },
+      judge: {
+        async score() {
+          judgeCalls += 1;
+          return 1;
+        },
+        async scoreWithMetrics() {
+          judgeCalls += 1;
+          return {
+            score: 1,
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "judge-smoke",
+          };
+        },
+      },
+    },
+    onTaskComplete(_task, completed) {
+      completedCounts.push(completed);
+    },
+  });
+
+  assert.equal(recallCalls, 0);
+  assert.equal(responderCalls, 0);
+  assert.equal(judgeCalls, 0);
+  assert.deepEqual(completedCounts, [1]);
+  assert.equal(result.results.tasks.length, 1);
+
+  const task = result.results.tasks[0]!;
+  assert.equal(task.taskId, "bundled_shopping-t1-q1");
+  assert.match(
+    task.actual,
+    /MemoryArena prerequisite failed before bundled_shopping-t1-q1/,
+  );
+  assert.match(task.actual, /MemoryArena drain failed after completed subtask 1/);
+  assert.equal(task.scores.f1, -1);
+  assert.equal(task.scores.contains_answer, -1);
+  assert.equal(task.scores.llm_judge, -1);
+  assert.equal(task.scores.process_score, 0);
+  assert.equal(task.details?.error, "MemoryArena prerequisite failed before bundled_shopping-t1-q1: MemoryArena drain failed after completed subtask 1: drain timed out");
+});
+
 test("MemoryArena accepts optional string-array backgrounds from dataset files", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-memory-arena-"));
   const datasetPath = path.join(tempDir, "shopping.jsonl");

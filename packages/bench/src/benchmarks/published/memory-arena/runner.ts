@@ -79,6 +79,7 @@ export async function runMemoryArenaBenchmark(
 
       const sessionId = `arena-${domain}-${task.id}`;
       let initialSeedError: string | undefined;
+      let pendingPrerequisiteError: string | undefined;
       if (isGroupTravelPlannerCategory(task.category)) {
         try {
           await storeInitialTaskState(options, sessionId, task);
@@ -109,6 +110,12 @@ export async function runMemoryArenaBenchmark(
         const isScored = shouldScoreSubtask(task, questionIndex);
 
         try {
+          if (isScored && pendingPrerequisiteError !== undefined) {
+            throw new Error(
+              `MemoryArena prerequisite failed before ${taskResultId}: ${pendingPrerequisiteError}`,
+            );
+          }
+
           const background = backgroundForSubtask(task, questionIndex);
           if (background) {
             await options.system.store(sessionId, [
@@ -119,11 +126,7 @@ export async function runMemoryArenaBenchmark(
             ]);
           }
 
-          try {
-            await options.system.drain?.();
-          } catch (drainErr) {
-            console.error(`  [WARN] memory-arena drain failed for ${taskResultId}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
-          }
+          await drainMemoryArena(options, taskResultId);
 
           if (!isScored) {
             await storeCompletedSubtask(
@@ -135,6 +138,7 @@ export async function runMemoryArenaBenchmark(
               expectedAnswer,
               webshopCatalog,
             );
+            pendingPrerequisiteError = undefined;
             continue;
           }
 
@@ -236,18 +240,21 @@ export async function runMemoryArenaBenchmark(
               webshopCatalog,
             );
           } catch (storeErr) {
-            console.error(`  [WARN] memory-arena store failed for ${taskResultId}: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`);
+            pendingPrerequisiteError = formatUnknownError(storeErr);
+            console.error(`  [WARN] memory-arena store failed for ${taskResultId}: ${pendingPrerequisiteError}`);
           }
 
           try {
-            await options.system.drain?.();
+            await drainMemoryArena(options, taskResultId);
           } catch (drainErr) {
-            console.error(`  [WARN] memory-arena drain failed for ${taskResultId}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+            pendingPrerequisiteError = formatUnknownError(drainErr);
+            console.error(`  [WARN] memory-arena drain failed for ${taskResultId}: ${pendingPrerequisiteError}`);
           }
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = formatUnknownError(err);
           console.error(`  [WARN] memory-arena task ${taskResultId} failed: ${message}`);
           if (!isScored) {
+            pendingPrerequisiteError = message;
             continue;
           }
           tasks.push({
@@ -2628,6 +2635,19 @@ function tokenizePlanText(value: string): string[] {
     .filter((token) => token.length > 0);
 }
 
+async function drainMemoryArena(
+  options: ResolvedRunBenchmarkOptions,
+  taskResultId: string,
+): Promise<void> {
+  try {
+    await options.system.drain?.();
+  } catch (drainErr) {
+    throw new Error(
+      `MemoryArena drain failed for ${taskResultId}: ${formatUnknownError(drainErr)}`,
+    );
+  }
+}
+
 async function storeCompletedSubtask(
   options: ResolvedRunBenchmarkOptions,
   sessionId: string,
@@ -2667,8 +2687,14 @@ async function storeCompletedSubtask(
   try {
     await options.system.drain?.();
   } catch (drainErr) {
-    console.error(`  [WARN] memory-arena drain failed after completed subtask ${questionIndex + 1}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+    throw new Error(
+      `MemoryArena drain failed after completed subtask ${questionIndex + 1}: ${formatUnknownError(drainErr)}`,
+    );
   }
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function summarizeMemoryArenaSubtaskQuestion(question: string): string {
