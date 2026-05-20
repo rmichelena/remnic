@@ -1875,6 +1875,21 @@ function scoreItemSelectionAnswer(
     ? []
     : extractMemoryArenaVisibleOptions(question);
   const hits = expectations.filter((expectation) => {
+    if (
+      shouldUseVisibleOptionDisambiguation(
+        expectation,
+        asinContext,
+        visibleOptions,
+      )
+    ) {
+      if (predictionIncludesExpectedTargetAsin(predictedNormalized, expectation)) {
+        return true;
+      }
+      return expectationAttributesSelectUniqueVisibleOption(
+        expectation,
+        visibleOptions,
+      ) && visibleOptionSelectionMatches(predicted, expectation, visibleOptions);
+    }
     if (itemSelectionExpectationMatches(
       predictedNormalized,
       expectation,
@@ -1890,6 +1905,36 @@ function scoreItemSelectionAnswer(
   return {
     item_selection_match: hits / expectations.length,
   };
+}
+
+function shouldUseVisibleOptionDisambiguation(
+  expectation: ItemSelectionExpectation,
+  asinContext: ItemSelectionAsinContext,
+  visibleOptions: VisibleItemOption[],
+): boolean {
+  return expectation.targetAsin !== undefined
+    && asinContext.predictedExplicitAsins.length === 0
+    && visibleOptions.length > 0;
+}
+
+function predictionIncludesExpectedTargetAsin(
+  predictedNormalized: string,
+  expectation: ItemSelectionExpectation,
+): boolean {
+  if (expectation.targetAsin === undefined) {
+    return false;
+  }
+  return predictedNormalized.includes(
+    normalizeItemSelectionText(expectation.targetAsin),
+  );
+}
+
+function expectationAttributesSelectUniqueVisibleOption(
+  expectation: ItemSelectionExpectation,
+  visibleOptions: VisibleItemOption[],
+): boolean {
+  return selectVisibleOptionsForExpectation(visibleOptions, expectation)
+    .length === 1;
 }
 
 interface ItemSelectionExpectation {
