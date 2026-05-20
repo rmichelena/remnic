@@ -9,12 +9,7 @@ import { fileURLToPath } from "node:url";
 const srcDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(srcDir, "../../..");
 const cliPath = path.join(srcDir, "index.ts");
-const tsxCli = path.join(
-  repoRoot,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "tsx.cmd" : "tsx",
-);
+const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 
 interface SpawnTextResult {
   status: number | null;
