@@ -185,18 +185,311 @@ function hasCliRegistration(source: string): boolean {
   return /registerCli\s*\([^)]*\borchestrator\b[^)]*\)/m.test(source);
 }
 
-function parseNodeMinVersion(raw: string | undefined): [number, number, number] | null {
-  if (!raw) return null;
-  const match = raw.match(/(\d+)\.(\d+)\.(\d+)/);
-  if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
 function parseCurrentNodeVersion(raw: string): [number, number, number] | null {
   const normalized = raw.startsWith("v") ? raw.slice(1) : raw;
   const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+type NodeEngineEvaluation =
+  | { status: "satisfied" }
+  | { status: "unsatisfied" }
+  | { status: "unsupported"; reason: string };
+
+type ComparatorOperator = ">" | ">=" | "<" | "<=" | "=";
+
+interface ParsedRangeVersion {
+  version: [number, number, number];
+  specifiedParts: number;
+}
+
+function parseRangeVersion(raw: string): ParsedRangeVersion | null {
+  const match = raw.trim().match(/^v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?$/i);
+  if (!match) return null;
+
+  const minor = match[2];
+  const patch = match[3];
+  if (minor && /^(x|\*)$/i.test(minor)) {
+    return { version: [Number(match[1]), 0, 0], specifiedParts: 1 };
+  }
+  if (patch && /^(x|\*)$/i.test(patch)) {
+    return {
+      version: [Number(match[1]), Number(minor ?? 0), 0],
+      specifiedParts: 2,
+    };
+  }
+
+  return {
+    version: [Number(match[1]), Number(minor ?? 0), Number(patch ?? 0)],
+    specifiedParts: patch ? 3 : minor ? 2 : 1,
+  };
+}
+
+function upperBoundForPartial(
+  parsed: ParsedRangeVersion,
+): [number, number, number] | null {
+  if (parsed.specifiedParts === 1) {
+    return [parsed.version[0] + 1, 0, 0];
+  }
+  if (parsed.specifiedParts === 2) {
+    return [parsed.version[0], parsed.version[1] + 1, 0];
+  }
+  return null;
+}
+
+function upperBoundForCaret(
+  parsed: ParsedRangeVersion,
+): [number, number, number] {
+  const [major, minor, patch] = parsed.version;
+  if (parsed.specifiedParts === 1) {
+    return [major + 1, 0, 0];
+  }
+  if (major > 0) return [major + 1, 0, 0];
+  if (parsed.specifiedParts === 2) {
+    return [0, minor + 1, 0];
+  }
+  if (minor > 0) return [0, minor + 1, 0];
+  return [0, 0, patch + 1];
+}
+
+function upperBoundForTilde(
+  parsed: ParsedRangeVersion,
+): [number, number, number] {
+  const [major, minor] = parsed.version;
+  if (parsed.specifiedParts === 1) {
+    return [major + 1, 0, 0];
+  }
+  return [major, minor + 1, 0];
+}
+
+function compareWithOperator(
+  current: [number, number, number],
+  operator: ComparatorOperator,
+  target: [number, number, number],
+): boolean {
+  const comparison = compareVersions(current, target);
+  switch (operator) {
+    case ">":
+      return comparison > 0;
+    case ">=":
+      return comparison >= 0;
+    case "<":
+      return comparison < 0;
+    case "<=":
+      return comparison <= 0;
+    case "=":
+      return comparison === 0;
+  }
+}
+
+function evaluateComparatorToken(
+  token: string,
+  current: [number, number, number],
+): NodeEngineEvaluation {
+  const trimmed = token.trim();
+  if (!trimmed || trimmed === "*" || /^x$/i.test(trimmed)) {
+    return { status: "satisfied" };
+  }
+
+  const shorthand = trimmed.match(/^([~^])\s*(.+)$/);
+  if (shorthand) {
+    const parsed = parseRangeVersion(shorthand[2]);
+    if (!parsed) {
+      return {
+        status: "unsupported",
+        reason: `unsupported node engine comparator "${trimmed}"`,
+      };
+    }
+    const upper = shorthand[1] === "^"
+      ? upperBoundForCaret(parsed)
+      : upperBoundForTilde(parsed);
+    return compareWithOperator(current, ">=", parsed.version)
+      && compareWithOperator(current, "<", upper)
+      ? { status: "satisfied" }
+      : { status: "unsatisfied" };
+  }
+
+  const comparator = trimmed.match(/^(>=|<=|>|<|=)?\s*(.+)$/);
+  if (!comparator) {
+    return {
+      status: "unsupported",
+      reason: `unsupported node engine comparator "${trimmed}"`,
+    };
+  }
+  const operator = (comparator[1] ?? "=") as ComparatorOperator;
+  const parsed = parseRangeVersion(comparator[2]);
+  if (!parsed) {
+    return {
+      status: "unsupported",
+      reason: `unsupported node engine comparator "${trimmed}"`,
+    };
+  }
+
+  if (!comparator[1]) {
+    const upper = upperBoundForPartial(parsed);
+    if (upper) {
+      return compareWithOperator(current, ">=", parsed.version)
+        && compareWithOperator(current, "<", upper)
+        ? { status: "satisfied" }
+        : { status: "unsatisfied" };
+    }
+  }
+
+  const partialUpper = upperBoundForPartial(parsed);
+  if (partialUpper) {
+    switch (operator) {
+      case "=":
+        return compareWithOperator(current, ">=", parsed.version)
+          && compareWithOperator(current, "<", partialUpper)
+          ? { status: "satisfied" }
+          : { status: "unsatisfied" };
+      case ">=":
+        return compareWithOperator(current, ">=", parsed.version)
+          ? { status: "satisfied" }
+          : { status: "unsatisfied" };
+      case ">":
+        return compareWithOperator(current, ">=", partialUpper)
+          ? { status: "satisfied" }
+          : { status: "unsatisfied" };
+      case "<=":
+        return compareWithOperator(current, "<", partialUpper)
+          ? { status: "satisfied" }
+          : { status: "unsatisfied" };
+      case "<":
+        return compareWithOperator(current, "<", parsed.version)
+          ? { status: "satisfied" }
+          : { status: "unsatisfied" };
+    }
+  }
+
+  return compareWithOperator(current, operator, parsed.version)
+    ? { status: "satisfied" }
+    : { status: "unsatisfied" };
+}
+
+function tokenizeRangeAlternative(alternative: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+
+  while (i < alternative.length) {
+    while (i < alternative.length && /\s/.test(alternative[i])) i += 1;
+    if (i >= alternative.length) break;
+
+    let operator = "";
+    const ch = alternative[i];
+    if (ch === ">" || ch === "<") {
+      operator = ch;
+      i += 1;
+      if (alternative[i] === "=") {
+        operator += "=";
+        i += 1;
+      }
+    } else if (ch === "=" || ch === "^" || ch === "~") {
+      operator = ch;
+      i += 1;
+    }
+
+    while (i < alternative.length && /\s/.test(alternative[i])) i += 1;
+    const versionStart = i;
+    while (i < alternative.length && !/\s/.test(alternative[i])) i += 1;
+    const version = alternative.slice(versionStart, i);
+    tokens.push(`${operator}${version}`);
+  }
+
+  return tokens;
+}
+
+function evaluateHyphenRange(
+  alternative: string,
+  current: [number, number, number],
+): NodeEngineEvaluation | null {
+  const match = alternative.match(/^(.+?)\s+-\s+(.+)$/);
+  if (!match) return null;
+
+  const lower = parseRangeVersion(match[1]);
+  const upper = parseRangeVersion(match[2]);
+  if (!lower || !upper) {
+    return {
+      status: "unsupported",
+      reason: `unsupported node engine hyphen range "${alternative}"`,
+    };
+  }
+
+  const lowerSatisfied = compareWithOperator(current, ">=", lower.version);
+  const upperBound = upperBoundForPartial(upper);
+  const upperSatisfied = upperBound
+    ? compareWithOperator(current, "<", upperBound)
+    : compareWithOperator(current, "<=", upper.version);
+  return lowerSatisfied && upperSatisfied
+    ? { status: "satisfied" }
+    : { status: "unsatisfied" };
+}
+
+function evaluateNodeEngineRange(
+  rawRange: string | undefined,
+  currentVersion: [number, number, number],
+): NodeEngineEvaluation {
+  if (!rawRange || rawRange.trim().length === 0) {
+    return { status: "unsupported", reason: "missing node engine range" };
+  }
+
+  const alternatives = rawRange.split("||").map((part) => part.trim()).filter(Boolean);
+  if (alternatives.length === 0) {
+    return { status: "unsupported", reason: "missing node engine range" };
+  }
+
+  let firstUnsupported: string | undefined;
+  let hasUnsatisfiedAlternative = false;
+  for (const alternative of alternatives) {
+    const hyphenResult = evaluateHyphenRange(alternative, currentVersion);
+    if (hyphenResult) {
+      if (hyphenResult.status === "satisfied") {
+        return { status: "satisfied" };
+      }
+      if (hyphenResult.status === "unsupported") {
+        firstUnsupported ??= hyphenResult.reason;
+      } else {
+        hasUnsatisfiedAlternative = true;
+      }
+      continue;
+    }
+
+    const tokens = tokenizeRangeAlternative(alternative).filter(Boolean);
+    if (tokens.length === 0) continue;
+    let alternativeSatisfied = true;
+    for (const token of tokens) {
+      const result = evaluateComparatorToken(token, currentVersion);
+      if (result.status === "unsupported") {
+        firstUnsupported ??= result.reason;
+        alternativeSatisfied = false;
+        break;
+      }
+      if (result.status === "unsatisfied") {
+        hasUnsatisfiedAlternative = true;
+        alternativeSatisfied = false;
+        break;
+      }
+    }
+    if (alternativeSatisfied) {
+      return { status: "satisfied" };
+    }
+  }
+
+  if (hasUnsatisfiedAlternative) {
+    return { status: "unsatisfied" };
+  }
+  if (firstUnsupported) {
+    return { status: "unsupported", reason: firstUnsupported };
+  }
+  return { status: "unsatisfied" };
+}
+
+function hasMemoryPromptSectionRegistration(source: string): boolean {
+  const apiReceiver = String.raw`(?:\bapi|\(\s*api\s*\)|\(\s*api\s+as\s+[^)]+\)|\(\s*<[^>]+>\s*api\s*\))`;
+  return new RegExp(
+    `${apiReceiver}\\s*\\??\\.\\s*registerMemoryPromptSection\\s*(?:\\?\\.)?\\s*\\(`,
+  ).test(source);
 }
 
 export async function runCompatChecks(options: CompatCheckOptions): Promise<CompatReport> {
@@ -299,30 +592,33 @@ export async function runCompatChecks(options: CompatCheckOptions): Promise<Comp
         });
       }
 
-      const minVersion = parseNodeMinVersion(pkg.engines?.node);
-      const currentVersion = parseCurrentNodeVersion(process.version);
-      if (!minVersion || !currentVersion) {
+      const currentNode = options.currentNodeVersion ?? process.version;
+      const currentVersion = parseCurrentNodeVersion(currentNode);
+      const engineEvaluation: NodeEngineEvaluation = currentVersion
+        ? evaluateNodeEngineRange(pkg.engines?.node, currentVersion)
+        : { status: "unsupported", reason: "unable to parse current Node version" };
+      if (engineEvaluation.status === "unsupported") {
         checks.push({
           id: "node-version-compat",
           title: "Node runtime compatibility",
           level: "warn",
-          message: "Unable to parse node engine/current version.",
+          message: `Unable to evaluate node engine/current version: ${engineEvaluation.reason}.`,
           remediation: "Confirm Node version meets package.json engines.node requirement.",
-          metadata: { enginesNode: pkg.engines?.node, currentNode: process.version },
+          metadata: { enginesNode: pkg.engines?.node, currentNode },
         });
-      } else if (compareVersions(currentVersion, minVersion) >= 0) {
+      } else if (engineEvaluation.status === "satisfied") {
         checks.push({
           id: "node-version-compat",
           title: "Node runtime compatibility",
           level: "ok",
-          message: `Current Node ${process.version} satisfies engines requirement ${pkg.engines?.node}.`,
+          message: `Current Node ${currentNode} satisfies engines requirement ${pkg.engines?.node}.`,
         });
       } else {
         checks.push({
           id: "node-version-compat",
           title: "Node runtime compatibility",
           level: "error",
-          message: `Current Node ${process.version} is below required ${pkg.engines?.node}.`,
+          message: `Current Node ${currentNode} does not satisfy engines requirement ${pkg.engines?.node}.`,
           remediation: "Upgrade Node runtime to meet package.json engines.node minimum.",
         });
       }
@@ -344,11 +640,9 @@ export async function runCompatChecks(options: CompatCheckOptions): Promise<Comp
     const hooks = parseHookRegistrations(indexRaw);
     const missingLegacy = REQUIRED_HOOKS_LEGACY.filter((hook) => !hooks.has(hook));
     const missingNew = REQUIRED_HOOKS_NEW.filter((hook) => !hooks.has(hook));
-    // registerMemoryPromptSection is a valid alternative to the recall hook.
-    // Use the comment/string-stripped source and look for an actual call pattern
-    // (`.registerMemoryPromptSection(`) rather than just the identifier name, to
-    // avoid false positives from typeof checks or other non-registration usage.
-    const hasMemoryPromptSection = structuralSource.includes(".registerMemoryPromptSection(");
+    // registerMemoryPromptSection is a valid alternative to the recall hook only
+    // when it is registered on the OpenClaw plugin API object.
+    const hasMemoryPromptSection = hasMemoryPromptSectionRegistration(structuralSource);
     const missingLegacyAdj = hasMemoryPromptSection
       ? missingLegacy.filter((h) => h !== "before_agent_start")
       : missingLegacy;

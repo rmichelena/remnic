@@ -29,4 +29,5 @@ export interface CompatCheckOptions {
   repoRoot: string;
   runner?: CompatRunner;
   now?: Date;
+  currentNodeVersion?: string;
 }
