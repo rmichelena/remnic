@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type {
   BenchMemoryAdapter,
+  BenchPhaseControl,
   Message,
   SearchResult,
 } from "../../../adapters/types.ts";
@@ -28,6 +29,7 @@ class FakeAdapter implements BenchMemoryAdapter {
   recalledText = "";
   drainCalls = 0;
   storeCalls = 0;
+  controls: BenchPhaseControl[] = [];
   responder = {
     async respond() {
       return {
@@ -39,25 +41,62 @@ class FakeAdapter implements BenchMemoryAdapter {
     },
   };
 
-  async store(): Promise<void> {
+  async store(
+    _sessionId: string,
+    _messages: Message[],
+    control?: BenchPhaseControl,
+  ): Promise<void> {
     this.storeCalls += 1;
+    if (control) {
+      this.controls.push(control);
+    }
   }
 
-  async recall(): Promise<string> {
+  async recall(
+    _sessionId: string,
+    _query: string,
+    _budgetChars?: number,
+    _options?: unknown,
+    control?: BenchPhaseControl,
+  ): Promise<string> {
+    if (control) {
+      this.controls.push(control);
+    }
     return this.recalledText;
   }
 
-  async search(): Promise<SearchResult[]> {
+  async search(
+    _query: string,
+    _limit: number,
+    _sessionId?: string,
+    control?: BenchPhaseControl,
+  ): Promise<SearchResult[]> {
+    if (control) {
+      this.controls.push(control);
+    }
     return [];
   }
 
-  async reset(): Promise<void> {}
+  async reset(
+    _sessionId?: string,
+    control?: BenchPhaseControl,
+  ): Promise<void> {
+    if (control) {
+      this.controls.push(control);
+    }
+  }
 
-  async getStats(): Promise<{
+  async getStats(
+    _sessionId?: string,
+    control?: BenchPhaseControl,
+  ): Promise<{
     totalMessages: number;
     totalSummaryNodes: number;
     maxDepth: number;
   }> {
+    if (control) {
+      this.controls.push(control);
+    }
     return {
       totalMessages: 0,
       totalSummaryNodes: 0,
@@ -67,8 +106,11 @@ class FakeAdapter implements BenchMemoryAdapter {
 
   async destroy(): Promise<void> {}
 
-  async drain(): Promise<void> {
+  async drain(control?: BenchPhaseControl): Promise<void> {
     this.drainCalls += 1;
+    if (control) {
+      this.controls.push(control);
+    }
   }
 }
 
@@ -151,6 +193,23 @@ test("diagnostic adapter supports explicit-evidence-only recall and strong respo
   assert.match(recalled, /\[Action 1\]: Open settings/);
   assert.doesNotMatch(recalled, /Search evidence/);
   assert.doesNotMatch(recalled, /Unrelated search context/);
+});
+
+test("diagnostic adapter forwards phase control to delegated adapter calls", async () => {
+  const base = new FakeAdapter();
+  const adapter = createAmaBenchDiagnosticAdapter(base, explicitOnlyVariant);
+  const controller = new AbortController();
+  const control: BenchPhaseControl = { signal: controller.signal };
+
+  await adapter.store("ama-ep-1", [], control);
+  await adapter.recall("ama-ep-1", "What happened?", undefined, undefined, control);
+  await adapter.search("settings", 3, "ama-ep-1", control);
+  await adapter.reset("ama-ep-1", control);
+  await adapter.getStats("ama-ep-1", control);
+  await adapter.drain?.(control);
+
+  assert.equal(base.controls.length, 6);
+  assert.ok(base.controls.every((seenControl) => seenControl === control));
 });
 
 test("oracle trajectory recall uses stored visible messages and clears on reset", async () => {

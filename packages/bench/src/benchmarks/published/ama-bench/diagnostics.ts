@@ -1,4 +1,5 @@
 import type {
+  BenchPhaseControl,
   BenchMemoryAdapter,
   BenchRecallOptions,
   BenchResponder,
@@ -131,11 +132,11 @@ export function createAmaBenchDiagnosticAdapter(
   };
 
   const diagnostic: BenchMemoryAdapter = {
-    async store(sessionId, messages) {
+    async store(sessionId, messages, control?: BenchPhaseControl) {
       const existing = sessions.get(sessionId) ?? [];
       sessions.set(sessionId, [...existing, ...messages]);
       if (variant.recallMode !== "oracle-trajectory") {
-        await base.store(sessionId, messages);
+        await base.store(sessionId, messages, control);
       }
     },
     async recall(
@@ -143,6 +144,7 @@ export function createAmaBenchDiagnosticAdapter(
       query,
       budgetChars,
       recallOptions?: BenchRecallOptions,
+      control?: BenchPhaseControl,
     ) {
       if (variant.recallMode === "oracle-trajectory") {
         return buildOracleTrajectoryRecall(
@@ -151,7 +153,13 @@ export function createAmaBenchDiagnosticAdapter(
         );
       }
 
-      const recalled = await base.recall(sessionId, query, budgetChars, recallOptions);
+      const recalled = await base.recall(
+        sessionId,
+        query,
+        budgetChars,
+        recallOptions,
+        control,
+      );
       if (variant.recallMode === "explicit-evidence-only") {
         return extractMarkdownSectionsByTitle(recalled, [
           "Explicit Cue Evidence",
@@ -160,19 +168,19 @@ export function createAmaBenchDiagnosticAdapter(
 
       return recalled;
     },
-    async search(query, limit, sessionId) {
-      return base.search(query, limit, sessionId);
+    async search(query, limit, sessionId, control?: BenchPhaseControl) {
+      return base.search(query, limit, sessionId, control);
     },
-    async reset(sessionId) {
+    async reset(sessionId, control?: BenchPhaseControl) {
       clearCapturedSession(sessionId);
-      await base.reset(sessionId);
+      await base.reset(sessionId, control);
     },
-    async getStats(sessionId) {
-      return base.getStats(sessionId);
+    async getStats(sessionId, control?: BenchPhaseControl) {
+      return base.getStats(sessionId, control);
     },
-    async drain() {
+    async drain(control?: BenchPhaseControl) {
       if (variant.recallMode !== "oracle-trajectory") {
-        await base.drain?.();
+        await base.drain?.(control);
       }
     },
     async destroy() {

@@ -1,6 +1,7 @@
 import type {
   BenchJudge,
   BenchMemoryAdapter,
+  BenchPhaseControl,
   BenchRecallOptions,
   BenchResponder,
   MemoryStats,
@@ -88,54 +89,91 @@ export function createTimeoutGuardedAdapter(
   };
 
   const wrapped: BenchMemoryAdapter = {
-    store(sessionId: string, messages: Message[]): Promise<void> {
+    store(
+      sessionId: string,
+      messages: Message[],
+      control?: BenchPhaseControl,
+    ): Promise<void> {
       if (phaseTimeoutMs === undefined) {
-        return adapter.store(sessionId, messages);
+        return adapter.store(sessionId, messages, control);
       }
-      return run(`store session=${sessionId} messages=${messages.length}`, () =>
-        adapter.store(sessionId, messages),
-      );
+      return run(`store session=${sessionId} messages=${messages.length}`, async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await adapter.store(sessionId, messages, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
     recall(
       sessionId: string,
       query: string,
       budgetChars?: number,
       recallOptions?: BenchRecallOptions,
+      control?: BenchPhaseControl,
     ): Promise<string> {
       if (phaseTimeoutMs === undefined) {
-        return adapter.recall(sessionId, query, budgetChars, recallOptions);
+        return adapter.recall(sessionId, query, budgetChars, recallOptions, control);
       }
-      return run(`recall session=${sessionId}`, () =>
-        adapter.recall(sessionId, query, budgetChars, recallOptions),
-      );
+      return run(`recall session=${sessionId}`, async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await adapter.recall(
+            sessionId,
+            query,
+            budgetChars,
+            recallOptions,
+            merged.control,
+          );
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
     search(
       query: string,
       limit: number,
       sessionId?: string,
+      control?: BenchPhaseControl,
     ): Promise<SearchResult[]> {
       if (phaseTimeoutMs === undefined) {
-        return adapter.search(query, limit, sessionId);
+        return adapter.search(query, limit, sessionId, control);
       }
-      return run(`search session=${sessionId ?? "all"} limit=${limit}`, () =>
-        adapter.search(query, limit, sessionId),
-      );
+      return run(`search session=${sessionId ?? "all"} limit=${limit}`, async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await adapter.search(query, limit, sessionId, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
-    reset(sessionId?: string): Promise<void> {
+    reset(sessionId?: string, control?: BenchPhaseControl): Promise<void> {
       if (phaseTimeoutMs === undefined) {
-        return adapter.reset(sessionId);
+        return adapter.reset(sessionId, control);
       }
-      return run(`reset session=${sessionId ?? "all"}`, () =>
-        adapter.reset(sessionId),
-      );
+      return run(`reset session=${sessionId ?? "all"}`, async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await adapter.reset(sessionId, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
-    getStats(sessionId?: string): Promise<MemoryStats> {
+    getStats(sessionId?: string, control?: BenchPhaseControl): Promise<MemoryStats> {
       if (phaseTimeoutMs === undefined) {
-        return adapter.getStats(sessionId);
+        return adapter.getStats(sessionId, control);
       }
-      return run(`stats session=${sessionId ?? "all"}`, () =>
-        adapter.getStats(sessionId),
-      );
+      return run(`stats session=${sessionId ?? "all"}`, async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await adapter.getStats(sessionId, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
     destroy(): Promise<void> {
       return adapter.destroy();
@@ -143,10 +181,21 @@ export function createTimeoutGuardedAdapter(
   };
 
   if (adapter.drain) {
-    wrapped.drain = (): Promise<void> =>
+    wrapped.drain = (control?: BenchPhaseControl): Promise<void> =>
       drainTimeoutMs === undefined
-        ? adapter.drain!()
-        : run("drain", () => adapter.drain!(), drainTimeoutMs);
+        ? adapter.drain!(control)
+        : run(
+          "drain",
+          async (signal) => {
+            const merged = mergeBenchPhaseControl(signal, control);
+            try {
+              return await adapter.drain!(merged.control);
+            } finally {
+              merged.cleanup();
+            }
+          },
+          drainTimeoutMs,
+        );
   }
   if (adapter.responder) {
     wrapped.responder =
@@ -160,6 +209,44 @@ export function createTimeoutGuardedAdapter(
   }
 
   return wrapped;
+}
+
+function mergeBenchPhaseControl(
+  timeoutSignal: AbortSignal,
+  callerControl: BenchPhaseControl | undefined,
+): { control: BenchPhaseControl; cleanup: () => void } {
+  const merged = mergeAbortSignals(timeoutSignal, callerControl?.signal);
+  return {
+    control: merged.signal === undefined ? {} : { signal: merged.signal },
+    cleanup: merged.cleanup,
+  };
+}
+
+function mergeAbortSignals(
+  timeoutSignal: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+): { signal: AbortSignal | undefined; cleanup: () => void } {
+  const noop = () => {};
+  if (!callerSignal) return { signal: timeoutSignal, cleanup: noop };
+  if (timeoutSignal.aborted) return { signal: timeoutSignal, cleanup: noop };
+  if (callerSignal.aborted) {
+    return { signal: AbortSignal.abort(callerSignal.reason), cleanup: noop };
+  }
+
+  const controller = new AbortController();
+  const abortFromTimeout = () => controller.abort(timeoutSignal.reason);
+  const abortFromCaller = () => controller.abort(callerSignal.reason);
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    timeoutSignal.removeEventListener("abort", abortFromTimeout);
+    callerSignal.removeEventListener("abort", abortFromCaller);
+  };
+  timeoutSignal.addEventListener("abort", abortFromTimeout, { once: true });
+  callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  controller.signal.addEventListener("abort", cleanup, { once: true });
+  return { signal: controller.signal, cleanup };
 }
 
 export function createTimeoutGuardedIngestionAdapter(
@@ -233,10 +320,15 @@ function wrapResponder(
   run: <T>(phase: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>,
 ): BenchResponder {
   return {
-    respond(question, recalledText) {
-      return run("respond", (signal) =>
-        responder.respond(question, recalledText, { signal }),
-      );
+    respond(question, recalledText, control) {
+      return run("respond", async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await responder.respond(question, recalledText, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
   };
 }
@@ -246,25 +338,45 @@ function wrapJudge(
   run: <T>(phase: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>,
 ): BenchJudge {
   const wrapped: BenchJudge = {
-    score(question, predicted, expected) {
-      return run("judge.score", (signal) =>
-        judge.score(question, predicted, expected, { signal }),
-      );
+    score(question, predicted, expected, control) {
+      return run("judge.score", async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await judge.score(question, predicted, expected, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
     },
   };
 
   if (judge.scoreWithMetrics) {
-    wrapped.scoreWithMetrics = (question, predicted, expected) =>
-      run("judge.scoreWithMetrics", (signal) =>
-        judge.scoreWithMetrics!(question, predicted, expected, { signal }),
-      );
+    wrapped.scoreWithMetrics = (question, predicted, expected, control) =>
+      run("judge.scoreWithMetrics", async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await judge.scoreWithMetrics!(
+            question,
+            predicted,
+            expected,
+            merged.control,
+          );
+        } finally {
+          merged.cleanup();
+        }
+      });
   }
 
   if (judge.scoreBinaryPrompt) {
-    wrapped.scoreBinaryPrompt = (prompt) =>
-      run("judge.scoreBinaryPrompt", (signal) =>
-        judge.scoreBinaryPrompt!(prompt, { signal }),
-      );
+    wrapped.scoreBinaryPrompt = (prompt, control) =>
+      run("judge.scoreBinaryPrompt", async (signal) => {
+        const merged = mergeBenchPhaseControl(signal, control);
+        try {
+          return await judge.scoreBinaryPrompt!(prompt, merged.control);
+        } finally {
+          merged.cleanup();
+        }
+      });
   }
 
   return wrapped;

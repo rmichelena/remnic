@@ -45,6 +45,141 @@ test("timeout guard rejects a stuck adapter phase", async () => {
   assert.equal(timedOutPhase, "timeout-test:recall session=s");
 });
 
+test("timeout guard aborts adapter phase work on timeout", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  let delayedSideEffect = false;
+  let sideEffectTimer: ReturnType<typeof setTimeout> | undefined;
+  adapter.store = (_sessionId, _messages, control) =>
+    new Promise<never>((_, reject) => {
+      sideEffectTimer = setTimeout(() => {
+        delayedSideEffect = true;
+      }, 25);
+      const signal = control?.signal;
+      const onAbort = () => {
+        sawAbort = true;
+        if (sideEffectTimer) {
+          clearTimeout(sideEffectTimer);
+        }
+        reject(signal?.reason);
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 5,
+  });
+
+  await assert.rejects(
+    () => guarded.store("s", [{ role: "user", content: "hello" }]),
+    /benchmark phase timed out after 5ms: timeout-test:store session=s messages=1/,
+  );
+  assert.equal(sawAbort, true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(delayedSideEffect, false);
+});
+
+test("timeout guard preserves caller abort signal without phase timeout", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.store = (_sessionId, _messages, control) =>
+    new Promise<never>((_, reject) => {
+      const signal = control?.signal;
+      const onAbort = () => {
+        sawAbort = true;
+        reject(signal?.reason);
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+  });
+  const controller = new AbortController();
+  const storePromise = guarded.store(
+    "s",
+    [{ role: "user", content: "hello" }],
+    { signal: controller.signal },
+  );
+
+  controller.abort(new Error("caller aborted"));
+
+  await assert.rejects(() => storePromise, /caller aborted/);
+  assert.equal(sawAbort, true);
+});
+
+test("timeout guard merges caller abort signal with phase timeout signal", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.search = (_query, _limit, _sessionId, control) =>
+    new Promise<never>((_, reject) => {
+      const signal = control?.signal;
+      const onAbort = () => {
+        sawAbort = true;
+        reject(signal?.reason);
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 1000,
+  });
+  const controller = new AbortController();
+  const searchPromise = guarded.search("q", 5, "s", {
+    signal: controller.signal,
+  });
+
+  controller.abort(new Error("caller aborted search"));
+
+  await assert.rejects(() => searchPromise, /caller aborted search/);
+  assert.equal(sawAbort, true);
+});
+
+test("timeout guard removes merged caller abort listeners after successful phases", async () => {
+  const adapter = makeAdapter();
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 100,
+  });
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  let activeAbortListeners = 0;
+  const trackedAdd: AbortSignal["addEventListener"] = (
+    ...args: Parameters<AbortSignal["addEventListener"]>
+  ) => {
+    const [type] = args;
+    if (type === "abort") activeAbortListeners += 1;
+    return originalAdd(...args);
+  };
+  const trackedRemove: AbortSignal["removeEventListener"] = (
+    ...args: Parameters<AbortSignal["removeEventListener"]>
+  ) => {
+    const [type] = args;
+    if (type === "abort") activeAbortListeners -= 1;
+    return originalRemove(...args);
+  };
+  signal.addEventListener = trackedAdd;
+  signal.removeEventListener = trackedRemove;
+
+  await guarded.getStats("s", { signal });
+  await guarded.getStats("s", { signal });
+
+  assert.equal(activeAbortListeners, 0);
+});
+
 test("timeout guard forwards recall options", async () => {
   const adapter = makeAdapter();
   let forwardedAsOf = "";
@@ -92,6 +227,74 @@ test("timeout guard wraps responder and judge calls", async () => {
     "answer",
   );
   assert.equal(await guarded.judge?.score("q", "p", "e"), 1);
+});
+
+test("timeout guard merges caller abort signal for responder calls", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.responder = {
+    respond(_question, _recalledText, control) {
+      return new Promise<never>((_, reject) => {
+        const signal = control?.signal;
+        const onAbort = () => {
+          sawAbort = true;
+          reject(signal?.reason);
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 1000,
+  });
+  const controller = new AbortController();
+  const responsePromise = guarded.responder!.respond("q", "r", {
+    signal: controller.signal,
+  });
+
+  controller.abort(new Error("caller aborted responder"));
+
+  await assert.rejects(() => responsePromise, /caller aborted responder/);
+  assert.equal(sawAbort, true);
+});
+
+test("timeout guard merges caller abort signal for judge calls", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  adapter.judge = {
+    score(_question, _predicted, _expected, control) {
+      return new Promise<never>((_, reject) => {
+        const signal = control?.signal;
+        const onAbort = () => {
+          sawAbort = true;
+          reject(signal?.reason);
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 1000,
+  });
+  const controller = new AbortController();
+  const scorePromise = guarded.judge!.score("q", "p", "e", {
+    signal: controller.signal,
+  });
+
+  controller.abort(new Error("caller aborted judge"));
+
+  await assert.rejects(() => scorePromise, /caller aborted judge/);
+  assert.equal(sawAbort, true);
 });
 
 test("timeout guard aborts responder phase work on timeout", async () => {
