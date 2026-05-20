@@ -109,6 +109,7 @@ export interface RecallOptions {
   topK?: number;
   mode?: "auto" | "no_recall" | "minimal" | "full" | "graph_mode";
   includeDebug?: boolean;
+  idempotencyKey?: string;
 }
 
 export interface ObserveOptions {
@@ -225,7 +226,10 @@ export class HermesClient {
     if (options?.topK !== undefined) body.topK = options.topK;
     if (options?.mode) body.mode = options.mode;
     if (options?.includeDebug !== undefined) body.includeDebug = options.includeDebug;
-    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body, { noRetry: true });
+    if (options?.idempotencyKey) body.idempotencyKey = options.idempotencyKey;
+    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body, {
+      noRetry: !options?.idempotencyKey,
+    });
   }
 
   async observe(
