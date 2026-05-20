@@ -7,6 +7,8 @@ import {
   formatMetricValue,
   formatTimestamp,
   humanizeIdentifier,
+  isLowerIsBetterMetric,
+  isRawCountMetric,
 } from "../bench-data";
 import { CostSummary } from "../components/CostSummary";
 import { TaskBreakdown } from "../components/TaskBreakdown";
@@ -22,7 +24,19 @@ export function buildBenchmarkDetailTaskRows(selected: BenchResultSummary): Task
   }));
 }
 
-export function selectLowestScoringTasks(taskRows: TaskDeltaRow[], limit = 5): TaskDeltaRow[] {
+export function selectLowestScoringTasks(
+  taskRows: TaskDeltaRow[],
+  metricName?: string,
+  limit = 5,
+): TaskDeltaRow[] {
+  if (isLowerIsBetterMetric(metricName)) {
+    return taskRows
+      .filter((task) => (task.candidate ?? 0) > 0)
+      .slice()
+      .sort((left, right) => (right.candidate ?? 0) - (left.candidate ?? 0))
+      .slice(0, limit);
+  }
+
   return taskRows
     .filter((task) => (task.candidate ?? 1) < 0.6)
     .slice()
@@ -69,9 +83,14 @@ export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayloa
     );
   }
 
-  const histogram = buildHistogram(selected);
+  const primaryMetric = selected.primaryMetric ?? undefined;
+  const showNormalizedHistogram = !isRawCountMetric(primaryMetric);
+  const histogram = showNormalizedHistogram ? buildHistogram(selected) : [];
   const taskRows = buildBenchmarkDetailTaskRows(selected);
-  const lowScoring = selectLowestScoringTasks(taskRows);
+  const lowScoring = selectLowestScoringTasks(taskRows, primaryMetric);
+  const failureTitle = isLowerIsBetterMetric(primaryMetric)
+    ? "Highest-friction tasks"
+    : "Lowest-scoring tasks";
 
   return (
     <section className="page">
@@ -101,7 +120,7 @@ export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayloa
       <div className="detail-hero">
         <article className="stat-card">
           <span>Primary score</span>
-          <strong>{formatMetricValue(selected.primaryScore)}</strong>
+          <strong>{formatMetricValue(selected.primaryScore, primaryMetric)}</strong>
           <p>{selected.primaryMetric ?? "No primary metric"}</p>
         </article>
         <article className="stat-card">
@@ -113,37 +132,39 @@ export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayloa
 
       <CostSummary summary={selected} />
 
-      <section className="panel">
-        <div className="section-title">
-          <span className="section-kicker">Distribution</span>
-          <h4>Task score histogram</h4>
-        </div>
-        <div className="histogram">
-          {histogram.map((bucket) => (
-            <div className="histogram__bucket" key={bucket.label}>
-              <div className="histogram__bar-wrap">
-                <div className="histogram__bar" style={{ height: `${Math.max(bucket.count * 18, 12)}px` }} />
+      {showNormalizedHistogram ? (
+        <section className="panel">
+          <div className="section-title">
+            <span className="section-kicker">Distribution</span>
+            <h4>Task score histogram</h4>
+          </div>
+          <div className="histogram">
+            {histogram.map((bucket) => (
+              <div className="histogram__bucket" key={bucket.label}>
+                <div className="histogram__bar-wrap">
+                  <div className="histogram__bar" style={{ height: `${Math.max(bucket.count * 18, 12)}px` }} />
+                </div>
+                <strong>{bucket.count}</strong>
+                <span>{bucket.label}</span>
               </div>
-              <strong>{bucket.count}</strong>
-              <span>{bucket.label}</span>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
-      <TaskBreakdown rows={taskRows} title="Task-level score breakdown" />
+      <TaskBreakdown rows={taskRows} title="Task-level score breakdown" metricName={primaryMetric} />
 
       <section className="panel">
         <div className="section-title">
           <span className="section-kicker">Failure analysis</span>
-          <h4>Lowest-scoring tasks</h4>
+          <h4>{failureTitle}</h4>
         </div>
         {lowScoring.length > 0 ? (
           <ul className="failure-list">
             {lowScoring.map((task) => (
               <li key={task.taskId}>
                 <strong>{task.taskId}</strong>
-                <span>{formatMetricValue(task.candidate)}</span>
+                <span>{formatMetricValue(task.candidate, primaryMetric)}</span>
                 <p>{task.question}</p>
               </li>
             ))}

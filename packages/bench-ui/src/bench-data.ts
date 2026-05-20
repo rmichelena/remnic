@@ -209,8 +209,19 @@ const rawCountMetrics = new Set([
   "errors_count",
 ]);
 
-function isRawCountMetric(metricName?: string): boolean {
+const lowerIsBetterRawCountMetrics = new Set([
+  "setup_friction",
+  "commands_count",
+  "prompts_count",
+  "errors_count",
+]);
+
+export function isRawCountMetric(metricName?: string): boolean {
   return typeof metricName === "string" && rawCountMetrics.has(metricName);
+}
+
+export function isLowerIsBetterMetric(metricName?: string): boolean {
+  return typeof metricName === "string" && lowerIsBetterRawCountMetrics.has(metricName);
 }
 
 export function formatMetricValue(value: number | null, metricName?: string): string {
