@@ -5,7 +5,14 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { clearVerdictCache, judgeFactDurability, parseConfig, type JudgeCandidate, type JudgeVerdict } from "@remnic/core";
+import {
+  clearVerdictCache,
+  judgeFactDurability,
+  parseConfig,
+  type JudgeCandidate,
+  type JudgeVerdict,
+  type PluginConfig,
+} from "@remnic/core";
 import type { BenchmarkDefinition, BenchmarkResult, MetricAggregate, ResolvedRunBenchmarkOptions, TaskResult } from "../../../types.js";
 import { aggregateTaskScores, exactMatch } from "../../../scorer.js";
 import { getGitSha, getRemnicVersion } from "../../../reporter.js";
@@ -42,6 +49,7 @@ export async function runExtractionJudgeCalibrationBenchmark(
       extractionJudgeBatchSize: 4,
       extractionJudgeShadow: false,
     });
+    const effectiveRemnicConfig = buildReportedRemnicConfig(config);
 
     clearVerdictCache();
 
@@ -131,10 +139,7 @@ export async function runExtractionJudgeCalibrationBenchmark(
         systemProvider: options.systemProvider ?? null,
         judgeProvider: options.judgeProvider ?? null,
         adapterMode: options.adapterMode ?? "direct",
-        remnicConfig: {
-          ...(options.remnicConfig ?? {}),
-          extractionJudgeBatchSize: config.extractionJudgeBatchSize,
-        },
+        remnicConfig: effectiveRemnicConfig,
       },
       cost: {
         totalTokens: 0,
@@ -154,6 +159,18 @@ export async function runExtractionJudgeCalibrationBenchmark(
         hardware: process.arch,
       },
     };
+}
+
+function buildReportedRemnicConfig(
+  config: PluginConfig,
+): Record<string, unknown> {
+  return {
+    extractionJudgeEnabled: config.extractionJudgeEnabled,
+    extractionJudgeBatchSize: config.extractionJudgeBatchSize,
+    extractionJudgeShadow: config.extractionJudgeShadow,
+    extractionJudgeMaxDeferrals: config.extractionJudgeMaxDeferrals,
+    extractionJudgeModel: config.extractionJudgeModel,
+  };
 }
 
 function loadCases(

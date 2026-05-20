@@ -31,3 +31,40 @@ test("Extraction judge calibration treats absent negative class as neutral", asy
   assert.equal(result.results.aggregates.specificity.mean, 1);
   assert.equal(result.results.aggregates.sensitivity.mean, 1);
 });
+
+test("Extraction judge calibration reports the effective forced judge config", async () => {
+  const result = await runExtractionJudgeCalibrationBenchmark({
+    benchmark: extractionJudgeCalibrationDefinition,
+    mode: "quick",
+    limit: 1,
+    system: {
+      async reset() {},
+      async store() {},
+      async recall() {
+        return "";
+      },
+      async search() {
+        return [];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+    },
+    remnicConfig: {
+      extractionJudgeEnabled: false,
+      extractionJudgeBatchSize: 99,
+      extractionJudgeShadow: true,
+      extractionJudgeMaxDeferrals: 0,
+      modelSource: "gateway",
+    },
+  });
+
+  assert.deepEqual(result.config.remnicConfig, {
+    extractionJudgeEnabled: true,
+    extractionJudgeBatchSize: 4,
+    extractionJudgeShadow: false,
+    extractionJudgeMaxDeferrals: 2,
+    extractionJudgeModel: "",
+  });
+});
