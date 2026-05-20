@@ -22,10 +22,11 @@
  * That means its results are stable across machines and seeds, but it
  * CANNOT stand in for a production semantic embedder. Sparse hash
  * embeddings over short English turns can over-fire on mundane follow-up
- * questions, so this benchmark only lets explicit topic-pivot turns cross
- * the calibrated flush threshold. The semantic score remains in the
- * probe as a deterministic regression signal, capped below the flush
- * threshold so it cannot swamp the discourse-boundary cue.
+ * questions, so this benchmark only lets explicit topic-pivot turns and
+ * very strong semantic novelty cross the calibrated flush threshold. The
+ * semantic score remains capped for ordinary turns so it cannot swamp the
+ * discourse-boundary cue, while one cue-free fixture verifies that the
+ * semantic path can independently trigger.
  *
  * Per #563's PR 4 scope, the production default stays `false` in this
  * PR. Flipping it requires a real-embedder benchmark run, which is
@@ -320,9 +321,10 @@ async function runSingleCase(
     bufferSurpriseTriggerEnabled: options.surpriseEnabled,
     // Benchmark threshold is tuned higher than the package default
     // (0.35). The deterministic probe reserves scores above this line
-    // for explicit topic-pivot turns; raw hash-semantic novelty is capped
-    // below it because sparse vocabulary overlap in short English turns
-    // otherwise over-fires on ordinary follow-ups.
+    // for explicit topic-pivot turns and very strong semantic novelty;
+    // weaker hash-semantic novelty is capped below it because sparse
+    // vocabulary overlap in short English turns otherwise over-fires on
+    // ordinary follow-ups.
     bufferSurpriseThreshold: 0.85,
     bufferSurpriseK: 3,
     bufferSurpriseRecentMemoryCount: 20,
@@ -351,6 +353,9 @@ async function runSingleCase(
         })),
         { embedFn: embed, k: 3 },
       );
+      if (recentTurns.length >= 4 && semanticSurprise >= 0.92) {
+        return semanticSurprise;
+      }
       return Math.min(semanticSurprise, 0.8);
     },
   };

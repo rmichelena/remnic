@@ -147,6 +147,30 @@ test("candidate flushes exactly at annotated topic shifts on the full fixture", 
   }
 });
 
+test("candidate flushes on a cue-free semantic topic shift", async () => {
+  const options: ResolvedRunBenchmarkOptions = {
+    mode: "full",
+    benchmark: bufferSurpriseTriggerDefinition,
+    system: noopAdapter(),
+  };
+  const result = await runBufferSurpriseTriggerBenchmark(options);
+  const task = result.results.tasks.find(
+    (item) => item.taskId === "cue-free-cooking-to-astronomy",
+  );
+  assert.ok(task, "expected cue-free semantic shift task");
+
+  const details = task.details as {
+    candidateFlushTurnIndices?: number[];
+    controlFlushTurnIndices?: number[];
+    topicShiftTurnIndices?: number[];
+  };
+  assert.deepEqual(details.topicShiftTurnIndices, [4]);
+  assert.deepEqual(details.candidateFlushTurnIndices, [4]);
+  assert.deepEqual(details.controlFlushTurnIndices, []);
+  assert.equal(task.scores.candidate_topic_shift_f1, 1);
+  assert.equal(task.scores.control_topic_shift_f1, 0);
+});
+
 // ---------------------------------------------------------------------------
 // topicShiftF1 unit tests
 // ---------------------------------------------------------------------------

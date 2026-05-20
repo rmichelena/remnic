@@ -69,6 +69,21 @@ export const BUFFER_SURPRISE_TRIGGER_FIXTURE: BufferSurpriseTriggerCase[] = [
     topicShiftTurnIndices: [6],
   },
   {
+    id: "cue-free-cooking-to-astronomy",
+    turns: [
+      "I'm refining a mushroom risotto recipe with arborio rice and vegetable stock.",
+      "The pan absorbs liquid slowly when I add one ladle at a time.",
+      "Toasted rice grains help the final texture stay creamy without turning mushy.",
+      "Finishing with parmesan and butter gives the sauce a glossy texture.",
+      // Topic shift: cooking -> astronomy, intentionally without a lexical pivot cue.
+      "Jupiter's magnetosphere traps charged particles across a vast radiation belt.",
+      "Rapid planetary rotation and metallic hydrogen can power a strong dynamo.",
+      "The polar auroras brighten when solar wind particles interact with the field.",
+      "Spacecraft have measured intense radiation around the inner moons.",
+    ],
+    topicShiftTurnIndices: [4],
+  },
+  {
     id: "music-to-gardening-to-finance",
     turns: [
       "I've been learning the blues scale on guitar this week.",
