@@ -214,6 +214,7 @@ export interface EngramAccessRecallRequest {
   sessionKey?: string;
   namespace?: string;
   authenticatedPrincipal?: string;
+  idempotencyKey?: string;
   topK?: number;
   mode?: RecallPlanMode | "auto";
   includeDebug?: boolean;
@@ -1323,6 +1324,36 @@ export class EngramAccessService {
     });
   }
 
+  private async handleIdempotentRead<T>(options: {
+    operation: string;
+    idempotencyKey?: string;
+    requestFingerprint: unknown;
+    execute: () => Promise<T>;
+  }): Promise<T> {
+    const key = options.idempotencyKey?.trim();
+    if (!key) {
+      return options.execute();
+    }
+    return this.withIdempotencyLock(key, async () => {
+      return this.idempotency.withKeyLock(key, async () => {
+        const requestHash = hashAccessIdempotencyPayload({
+          operation: options.operation,
+          request: options.requestFingerprint,
+        });
+        const existing = await this.idempotency.get(key, requestHash);
+        if (existing.conflict) {
+          throw new EngramAccessInputError(`idempotencyKey reuse conflict: ${key}`);
+        }
+        if (existing.response) {
+          return existing.response as T;
+        }
+        const response = await options.execute();
+        await this.idempotency.put(key, requestHash, response);
+        return response;
+      });
+    });
+  }
+
   private async peekIdempotentWrite(options: {
     operation: EngramAccessWriteResponse["operation"];
     idempotencyKey?: string;
@@ -1614,6 +1645,19 @@ export class EngramAccessService {
     if (query.length === 0) {
       throw new EngramAccessInputError("query is required");
     }
+    const normalizedRequest = { ...request, query };
+    return this.handleIdempotentRead({
+      operation: "recall",
+      idempotencyKey: request.idempotencyKey,
+      requestFingerprint: normalizedRequest,
+      execute: () => this.executeRecall(normalizedRequest),
+    });
+  }
+
+  private async executeRecall(
+    request: EngramAccessRecallRequest,
+  ): Promise<EngramAccessRecallResponse> {
+    const query = request.query;
     // Disclosure depth (issue #677).  Default to `"chunk"` when omitted so
     // pre-#677 callers see unchanged behavior.  Reject explicitly invalid
     // string values per CLAUDE.md rule 51 (do not silently fall back).
@@ -1677,6 +1721,7 @@ export class EngramAccessService {
       ? [namespaceOverride]
       : recallNamespacesForPrincipal(principal, this.orchestrator.config);
     let budgetDecision: BudgetDecision;
+    let recordBudgetAfterSuccess = false;
     if (modeSkipsBudget) {
       budgetDecision = {
         allowed: true as const,
@@ -1692,9 +1737,13 @@ export class EngramAccessService {
       // Peek at every effective namespace to determine whether ANY would be
       // cross-namespace WITHOUT recording side effects (Cursor review:
       // multi-count bug).  Record a single budget event only when at least
-      // one effective namespace differs from the principal's self namespace.
+      // one effective namespace differs from the principal's self namespace,
+      // and only after recall succeeds so retried transient failures do not
+      // consume budget multiple times before a successful response can be
+      // cached behind the request idempotency key.
       let anyCrossNamespace = false;
       let denied: BudgetDecision | null = null;
+      let crossNamespaceDecision: BudgetDecision | null = null;
       for (const ns of effectiveNamespaces) {
         const peek = this.budget.peek({
           principal,
@@ -1703,6 +1752,7 @@ export class EngramAccessService {
         });
         if (peek.reason !== "allowed-same-namespace") {
           anyCrossNamespace = true;
+          crossNamespaceDecision ??= peek;
         }
         if (!peek.allowed) {
           denied = peek;
@@ -1714,7 +1764,17 @@ export class EngramAccessService {
         // bucket is not inflated by rejected attempts.
         budgetDecision = denied;
       } else if (anyCrossNamespace) {
-        budgetDecision = this.budget.record(principal);
+        budgetDecision = crossNamespaceDecision ?? {
+          allowed: true as const,
+          reason: "allowed-under-soft" as const,
+          count: 0,
+          limit: {
+            softLimit: this.orchestrator.config.recallCrossNamespaceBudgetSoftLimit ?? 10,
+            hardLimit: this.orchestrator.config.recallCrossNamespaceBudgetHardLimit ?? 30,
+            windowMs: this.orchestrator.config.recallCrossNamespaceBudgetWindowMs ?? 60_000,
+          },
+        };
+        recordBudgetAfterSuccess = true;
       } else {
         budgetDecision = {
           allowed: true as const,
@@ -1767,6 +1827,12 @@ export class EngramAccessService {
     };
     const startedAt = Date.now();
     const context = await this.orchestrator.recall(query, request.sessionKey, recallOptions);
+    if (recordBudgetAfterSuccess) {
+      const recordedBudgetDecision = this.budget.record(principal);
+      if (recordedBudgetDecision.allowed) {
+        budgetDecision = recordedBudgetDecision;
+      }
+    }
     const snapshot = request.sessionKey
       ? this.orchestrator.lastRecall.get(request.sessionKey)
       : null;

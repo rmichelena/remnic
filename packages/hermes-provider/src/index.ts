@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 /**
  * @remnic/hermes-provider
  *
@@ -109,6 +111,7 @@ export interface RecallOptions {
   topK?: number;
   mode?: "auto" | "no_recall" | "minimal" | "full" | "graph_mode";
   includeDebug?: boolean;
+  idempotencyKey?: string;
 }
 
 export interface ObserveOptions {
@@ -225,6 +228,7 @@ export class HermesClient {
     if (options?.topK !== undefined) body.topK = options.topK;
     if (options?.mode) body.mode = options.mode;
     if (options?.includeDebug !== undefined) body.includeDebug = options.includeDebug;
+    body.idempotencyKey = options?.idempotencyKey ?? randomUUID();
     return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body);
   }
 

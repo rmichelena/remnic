@@ -86,6 +86,7 @@ export const recallRequestSchema = z.object({
   topK: z.number().int().min(0).max(200).optional(),
   mode: z.enum(["auto", "no_recall", "minimal", "full", "graph_mode"]).optional(),
   includeDebug: z.boolean().optional(),
+  idempotencyKey: idempotencyKeySchema,
   disclosure: recallDisclosureSchema.optional(),
   codingContext: codingContextSchema.optional(),
   /** Working directory for auto git-context resolution (issue #569). */

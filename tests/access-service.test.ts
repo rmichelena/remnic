@@ -3870,3 +3870,75 @@ test("access service liveConnectorsRun enforces write ACL before ingestion", asy
   await service.liveConnectorsRun({}, "writer");
   assert.equal(runCount, 1);
 });
+
+test("access service idempotent recall retries do not double count cross-namespace budget", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-access-recall-idempotent-"));
+  let recallCalls = 0;
+  const service = new EngramAccessService({
+    config: {
+      memoryDir,
+      namespacesEnabled: true,
+      defaultNamespace: "global",
+      sharedNamespace: "shared",
+      principalFromSessionKeyMode: "prefix",
+      principalFromSessionKeyRules: [],
+      namespacePolicies: [
+        {
+          name: "shared",
+          readPrincipals: ["project-x"],
+          writePrincipals: [],
+        },
+      ],
+      defaultRecallNamespaces: ["self"],
+      searchBackend: "qmd",
+      qmdEnabled: true,
+      nativeKnowledge: undefined,
+      recallCrossNamespaceBudgetEnabled: true,
+      recallCrossNamespaceBudgetWindowMs: 60_000,
+      recallCrossNamespaceBudgetSoftLimit: 0,
+      recallCrossNamespaceBudgetHardLimit: 1,
+      dreamsPhases: dreamsPhasesConfig(),
+    },
+    recall: async () => {
+      recallCalls += 1;
+      if (recallCalls === 1) {
+        throw new Error("transient recall failure");
+      }
+      return "ctx";
+    },
+    lastRecall: {
+      get: () => null,
+      getMostRecent: () => null,
+    },
+    getStorage: async () => ({
+      dir: memoryDir,
+      getMemoryById: async () => null,
+      getMemoryTimeline: async () => [],
+    }),
+  } as any);
+
+  const request = {
+    query: "hello",
+    sessionKey: "agent:project-x:chat",
+    namespace: "shared",
+    idempotencyKey: "recall-retry-key",
+  };
+
+  try {
+    await assert.rejects(
+      () => service.recall(request),
+      /transient recall failure/,
+    );
+
+    const response = await service.recall(request);
+    assert.equal(response.context, "ctx");
+    assert.equal(recallCalls, 2);
+    assert.equal(response.budgetWarning?.reason, "warn-over-soft");
+
+    const replay = await service.recall(request);
+    assert.equal(replay.context, "ctx");
+    assert.equal(recallCalls, 2);
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});

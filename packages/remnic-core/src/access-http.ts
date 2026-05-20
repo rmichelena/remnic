@@ -514,6 +514,7 @@ export class EngramAccessHttpServer {
         query: body.query ?? "",
         sessionKey: body.sessionKey,
         authenticatedPrincipal: this.resolveRequestPrincipal(req),
+        idempotencyKey: body.idempotencyKey,
         namespace: this.resolveNamespace(req, body.namespace),
         topK: body.topK,
         mode: body.mode as RecallPlanMode | "auto" | undefined,
