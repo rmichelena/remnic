@@ -242,6 +242,10 @@ function parseTokenEntries(raw: unknown): TokenEntry[] {
     }));
 }
 
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function rewriteTokensIfPresent(filePath: string): Promise<number> {
   if (!existsSync(filePath)) return 0;
   await secureTokenFilePermissions(filePath);
@@ -375,12 +379,13 @@ async function rewriteJsonFile(
   if (!existsSync(targetPath)) return false;
 
   const original = await readFile(targetPath, "utf8");
-  let parsed: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(original) as Record<string, unknown>;
+    parsed = JSON.parse(original) as unknown;
   } catch {
     return false;
   }
+  if (!isPlainJsonObject(parsed)) return false;
 
   let changed = false;
   if (
@@ -465,8 +470,8 @@ async function copyLegacyConfig(homeDir: string, copied: string[]): Promise<void
   const original = await readFile(source, "utf8");
   let next = rewriteRemnicText(original);
   try {
-    const parsed = JSON.parse(next) as Record<string, unknown>;
-    if (parsed.engram && !parsed.remnic) {
+    const parsed = JSON.parse(next) as unknown;
+    if (isPlainJsonObject(parsed) && parsed.engram && !parsed.remnic) {
       parsed.remnic = parsed.engram;
       delete parsed.engram;
       next = JSON.stringify(parsed, null, 2);

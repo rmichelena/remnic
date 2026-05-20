@@ -190,6 +190,47 @@ test("migrateFromEngram copies legacy state, rewrites tokens, updates connector 
   );
 });
 
+test("migrateFromEngram skips connector configs with valid non-object JSON", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-non-object-config-");
+  const cwd = path.join(homeDir, "repo");
+  const legacyConfig = path.join(homeDir, ".config", "engram", "config.json");
+  const nullConfig = path.join(cwd, "null.mcp.json");
+  const arrayConfig = path.join(cwd, "array.mcp.json");
+  const stringConfig = path.join(cwd, "string.mcp.json");
+  const invalidConfig = path.join(cwd, "invalid.mcp.json");
+
+  await mkdir(path.dirname(legacyConfig), { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await writeFile(legacyConfig, "null\n", "utf8");
+  await writeFile(nullConfig, "null\n", "utf8");
+  await writeFile(arrayConfig, "[]\n", "utf8");
+  await writeFile(stringConfig, '"engram"\n', "utf8");
+  await writeFile(invalidConfig, '{"mcpServers":{"engram":', "utf8");
+
+  const result = await migrateFromEngram({
+    homeDir,
+    cwd,
+    quiet: true,
+    connectorConfigPaths: [nullConfig, arrayConfig, stringConfig, invalidConfig],
+  });
+
+  assert.equal(result.status, "migrated");
+  assert.equal(await readFile(nullConfig, "utf8"), "null\n");
+  assert.equal(await readFile(arrayConfig, "utf8"), "[]\n");
+  assert.equal(await readFile(stringConfig, "utf8"), '"engram"\n');
+  assert.equal(await readFile(invalidConfig, "utf8"), '{"mcpServers":{"engram":');
+  assert.equal(await readFile(path.join(homeDir, ".config", "remnic", "config.json"), "utf8"), "null\n");
+
+  const manifest = JSON.parse(await readFile(path.join(homeDir, ".remnic", ".rollback.json"), "utf8")) as {
+    entries: Array<{ targetPath: string }>;
+  };
+  const backedUpTargets = manifest.entries.map((entry) => entry.targetPath);
+  assert.equal(backedUpTargets.includes(nullConfig), false);
+  assert.equal(backedUpTargets.includes(arrayConfig), false);
+  assert.equal(backedUpTargets.includes(stringConfig), false);
+  assert.equal(backedUpTargets.includes(invalidConfig), false);
+});
+
 test("migrateFromEngram skips legacy file symlinks without copying external target content", {
   skip: process.platform === "win32",
 }, async () => {
