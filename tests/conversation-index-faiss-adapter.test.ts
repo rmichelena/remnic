@@ -591,3 +591,59 @@ test("fail-open wrappers return safe defaults on adapter errors", async () => {
   const unavailable = await upsertConversationChunksFailOpen(undefined, sampleChunks());
   assert.equal(unavailable.reason, "adapter-unavailable");
 });
+
+test("FAISS sidecar lock cleanup and release only unlink matching owner tokens", {
+  skip: resolvePythonBin() === undefined,
+}, () => {
+  const pythonBin = resolvePythonBin();
+  assert.ok(pythonBin);
+  const modulePath = path.resolve("scripts/faiss_index.py");
+  const script = [
+    "import importlib.util, json, os, shutil, tempfile, time",
+    "from pathlib import Path",
+    `spec = importlib.util.spec_from_file_location("faiss_index", ${JSON.stringify(modulePath)})`,
+    "module = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(module)",
+    "tmp = Path(tempfile.mkdtemp())",
+    "try:",
+    "    stale = tmp / '.writer.lock'",
+    "    stale_token = '999999:stale-token'",
+    "    fresh_token = f'{os.getpid()}:fresh-token'",
+    "    stale.write_text(stale_token, encoding='utf-8')",
+    "    old_time = time.time() - module.LOCK_STALE_SECONDS - 5",
+    "    os.utime(stale, (old_time, old_time))",
+    "    observed_stat = stale.stat()",
+    "    stale.write_text(fresh_token, encoding='utf-8')",
+    "    stale_cleanup_preserved = (",
+    "        not module.unlink_lock_if_unchanged(stale, stale_token, observed_stat)",
+    "        and stale.read_text(encoding='utf-8') == fresh_token",
+    "    )",
+    "    owned = module.acquire_lock(tmp, '.owned.lock')",
+    "    owned.write_text(f'{os.getpid()}:other-owner', encoding='utf-8')",
+    "    module.release_lock(owned)",
+    "    release_preserved_changed_owner = owned.exists()",
+    "    owned.unlink()",
+    "    live = module.acquire_lock(tmp, '.live.lock')",
+    "    live_pid = module.read_lock_owner_pid(live)",
+    "    module.release_lock(live)",
+    "    released_owned_lock = not live.exists()",
+    "    print(json.dumps({",
+    "        'stale_cleanup_preserved': stale_cleanup_preserved,",
+    "        'release_preserved_changed_owner': release_preserved_changed_owner,",
+    "        'live_pid': live_pid,",
+    "        'released_owned_lock': released_owned_lock,",
+    "    }, separators=(',', ':')))",
+    "finally:",
+    "    shutil.rmtree(tmp, ignore_errors=True)",
+  ].join("\n");
+
+  const result = spawnSync(pythonBin, ["-c", script], { encoding: "utf-8" });
+  assert.equal(result.status, 0, result.stderr);
+
+  assert.deepEqual(JSON.parse(result.stdout), {
+    stale_cleanup_preserved: true,
+    release_preserved_changed_owner: true,
+    live_pid: result.pid,
+    released_owned_lock: true,
+  });
+});

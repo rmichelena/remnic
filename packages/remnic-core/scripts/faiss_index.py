@@ -13,10 +13,12 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 MODEL_CACHE: dict[str, Any] = {}
+LOCK_OWNERS: dict[str, str] = {}
 HASH_EMBED_DIM = 128
 LOCK_TIMEOUT_SECONDS = 10.0
 LOCK_STALE_SECONDS = 120.0
@@ -372,18 +374,65 @@ def merge_rows(existing: list[dict[str, Any]], updates: list[dict[str, Any]]) ->
     return [by_key[row_key] for row_key in order]
 
 
-def read_lock_owner_pid(lock_path: Path) -> int | None:
+def lock_owner_key(lock_path: Path) -> str:
+    return str(lock_path.resolve())
+
+
+def make_lock_owner_token() -> str:
+    return f"{os.getpid()}:{uuid.uuid4().hex}"
+
+
+def read_lock_contents(lock_path: Path) -> str | None:
     try:
         raw = lock_path.read_text(encoding="utf-8").strip()
     except Exception:
         return None
     if not raw:
         return None
+    return raw
+
+
+def read_lock_owner_pid(lock_path: Path) -> int | None:
+    raw = read_lock_contents(lock_path)
+    if raw is None:
+        return None
+    pid_raw = raw.split(":", 1)[0].strip()
     try:
-        pid = int(raw)
+        pid = int(pid_raw)
     except ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def lock_stat_matches(current_stat: os.stat_result, observed_stat: os.stat_result) -> bool:
+    if current_stat.st_size != observed_stat.st_size:
+        return False
+    if current_stat.st_mtime_ns != observed_stat.st_mtime_ns:
+        return False
+    if getattr(current_stat, "st_ino", 0) and getattr(observed_stat, "st_ino", 0):
+        return current_stat.st_ino == observed_stat.st_ino
+    return True
+
+
+def unlink_lock_if_unchanged(
+    lock_path: Path,
+    observed_owner_token: str | None,
+    observed_stat: os.stat_result,
+) -> bool:
+    try:
+        current_stat = lock_path.stat()
+    except FileNotFoundError:
+        return False
+    current_owner_token = read_lock_contents(lock_path)
+    if current_owner_token != observed_owner_token:
+        return False
+    if not lock_stat_matches(current_stat, observed_stat):
+        return False
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def is_process_alive(pid: int) -> bool:
@@ -420,6 +469,7 @@ def is_process_alive(pid: int) -> bool:
 
 def acquire_lock(index_dir: Path, lock_name: str) -> Path:
     lock_path = index_dir / lock_name
+    lock_owner_token = make_lock_owner_token()
     lock_label = lock_name.strip(".")
     if lock_label.endswith(".lock"):
         lock_label = lock_label[: -len(".lock")]
@@ -430,19 +480,22 @@ def acquire_lock(index_dir: Path, lock_name: str) -> Path:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(str(os.getpid()))
+                handle.write(lock_owner_token)
+            LOCK_OWNERS[lock_owner_key(lock_path)] = lock_owner_token
             return lock_path
         except FileExistsError:
             try:
-                age = time.time() - lock_path.stat().st_mtime
+                observed_stat = lock_path.stat()
             except FileNotFoundError:
                 continue
 
+            age = time.time() - observed_stat.st_mtime
+            observed_owner_token = read_lock_contents(lock_path)
             owner_pid = read_lock_owner_pid(lock_path)
             owner_alive = is_process_alive(owner_pid) if owner_pid is not None else False
 
             if age > LOCK_STALE_SECONDS and not owner_alive:
-                lock_path.unlink(missing_ok=True)
+                unlink_lock_if_unchanged(lock_path, observed_owner_token, observed_stat)
                 continue
 
             if time.monotonic() >= deadline:
@@ -459,7 +512,14 @@ def acquire_writer_lock(index_dir: Path) -> Path:
 
 
 def release_lock(lock_path: Path) -> None:
-    lock_path.unlink(missing_ok=True)
+    lock_owner_token = LOCK_OWNERS.pop(lock_owner_key(lock_path), None)
+    if lock_owner_token is None:
+        return
+    try:
+        observed_stat = lock_path.stat()
+    except FileNotFoundError:
+        return
+    unlink_lock_if_unchanged(lock_path, lock_owner_token, observed_stat)
 
 
 def release_index_lock(lock_path: Path) -> None:
