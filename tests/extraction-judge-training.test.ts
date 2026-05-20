@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile, mkdir, readdir } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+  mkdir,
+  readdir,
+} from "node:fs/promises";
 import path from "node:path";
 import { homedir, tmpdir } from "node:os";
 import {
@@ -66,6 +75,50 @@ test("PR 4: recordJudgeTrainingPair appends one row per day file", async () => {
     const day2 = await readFile(path.join(dir, "2026-04-11.jsonl"), "utf-8");
     assert.equal(day1.trim().split("\n").length, 2);
     assert.equal(day2.trim().split("\n").length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PR 4: recordJudgeTrainingPair creates private training files", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX mode bits are not portable on Windows");
+    return;
+  }
+
+  const dir = await mkdirTmp();
+  try {
+    await recordJudgeTrainingPair(basePair(), {
+      enabled: true,
+      directory: dir,
+    });
+
+    const fileStat = await stat(path.join(dir, "2026-04-10.jsonl"));
+    assert.equal(fileStat.mode & 0o077, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PR 4: recordJudgeTrainingPair tightens existing permissive training files", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX mode bits are not portable on Windows");
+    return;
+  }
+
+  const dir = await mkdirTmp();
+  try {
+    const filePath = path.join(dir, "2026-04-10.jsonl");
+    await writeFile(filePath, "", { encoding: "utf-8", mode: 0o666 });
+    await chmod(filePath, 0o666);
+
+    await recordJudgeTrainingPair(basePair(), {
+      enabled: true,
+      directory: dir,
+    });
+
+    const fileStat = await stat(filePath);
+    assert.equal(fileStat.mode & 0o077, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
