@@ -236,8 +236,14 @@ export function detectBridgeMode(): BridgeConfig {
   const daemonHost = readCompatEnv("REMNIC_HOST", "ENGRAM_HOST") ?? DEFAULT_HOST;
   const daemonPort = readDaemonPort();
 
-  // Auto-detect: if daemon is running or reachable locally, delegate; otherwise embedded.
-  if (isDaemonRunning() || (shouldProbeDaemonHealth(daemonHost) && checkDaemonHealthSync(daemonHost, daemonPort))) {
+  const hasDaemonPidHint = isDaemonRunning();
+
+  // Auto-detect: PID files are only hints, because PIDs can be stale or reused.
+  // Delegate only after the configured Remnic endpoint proves it is healthy.
+  if (
+    (hasDaemonPidHint || shouldProbeDaemonHealth(daemonHost)) &&
+    checkDaemonHealthSync(daemonHost, daemonPort)
+  ) {
     return {
       mode: "delegate",
       daemonHost,

@@ -160,8 +160,8 @@ test("detectBridgeMode reads legacy config port when remnic config is malformed"
   }
 });
 
-test("detectBridgeMode delegates when a Remnic daemon pid file is live", async () => {
-  const previousHome = process.env.HOME;
+test("detectBridgeMode does not delegate solely because a Remnic daemon pid file is live", async () => {
+  const previousHome = process.env.HOME, previousPort = process.env.REMNIC_PORT;
   const previousMode = process.env.REMNIC_BRIDGE_MODE;
   const previousLegacyMode = process.env.ENGRAM_BRIDGE_MODE;
   const homeDir = await mkdtemp(path.join(os.tmpdir(), "bridge-live-pid-"));
@@ -171,16 +171,16 @@ test("detectBridgeMode delegates when a Remnic daemon pid file is live", async (
   await writeFile(path.join(remnicDir, "server.pid"), `${process.pid}\n`, "utf8");
 
   try {
-    process.env.HOME = homeDir;
+    process.env.HOME = homeDir; process.env.REMNIC_PORT = "49999";
     delete process.env.REMNIC_BRIDGE_MODE;
     delete process.env.ENGRAM_BRIDGE_MODE;
 
     const { detectBridgeMode } = await import(path.join(ROOT, "packages/plugin-openclaw/src/bridge.ts"));
     const config = detectBridgeMode();
-    assert.equal(config.mode, "delegate");
+    assert.equal(config.mode, "embedded");
   } finally {
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    if (previousPort === undefined) delete process.env.REMNIC_PORT; else process.env.REMNIC_PORT = previousPort;
     if (previousMode === undefined) delete process.env.REMNIC_BRIDGE_MODE;
     else process.env.REMNIC_BRIDGE_MODE = previousMode;
     if (previousLegacyMode === undefined) delete process.env.ENGRAM_BRIDGE_MODE;
