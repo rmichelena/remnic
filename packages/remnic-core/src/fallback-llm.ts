@@ -18,6 +18,8 @@ export interface FallbackLlmOptions {
   maxTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Explicit "provider/model" override to try before the configured chain. */
+  model?: string;
   /** Override which agent persona's model chain to use (by ID from agents.list[]). */
   agentId?: string;
 }
@@ -104,7 +106,7 @@ export class FallbackLlmClient {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     options: FallbackLlmOptions = {},
   ): Promise<FallbackLlmResponse | null> {
-    const models = this.getModelChain(options.agentId);
+    const models = this.getModelChain(options.agentId, options.model);
     if (models.length === 0) {
       log.warn("fallback LLM: no models configured in gateway");
       return null;
@@ -236,7 +238,7 @@ export class FallbackLlmClient {
    * and uses that persona's model chain. Falls back to agents.defaults.model
    * if agentId is not found or not provided.
    */
-  private getModelChain(agentId?: string): ModelRef[] {
+  private getModelChain(agentId?: string, modelOverride?: string): ModelRef[] {
     const chain: ModelRef[] = [];
     const providers = this.gatewayConfig?.models?.providers ?? {};
 
@@ -264,8 +266,14 @@ export class FallbackLlmClient {
     // Build list of model strings: primary + fallbacks
     const modelStrings: string[] = [];
 
+    if (typeof modelOverride === "string" && modelOverride.trim().length > 0) {
+      modelStrings.push(modelOverride.trim());
+    }
+
     if (modelConfig?.primary) {
-      modelStrings.push(modelConfig.primary);
+      if (!modelStrings.includes(modelConfig.primary)) {
+        modelStrings.push(modelConfig.primary);
+      }
     }
 
     if (Array.isArray(modelConfig?.fallbacks)) {

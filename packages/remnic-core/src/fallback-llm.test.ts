@@ -73,6 +73,63 @@ test("fallback llm prefers the active gateway provider config over models.json",
   }
 });
 
+test("fallback llm tries an explicit model override before the configured chain", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+          fallbacks: ["openai/fallback-model"],
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  let capturedBody = "";
+  globalThis.fetch = (async (_url, init) => {
+    capturedBody = String(init?.body ?? "");
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "judge ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Judge this" }],
+      { temperature: 0, maxTokens: 16, model: "openai/judge-model" },
+    );
+
+    assert.equal(response?.content, "judge ok");
+    assert.equal(response?.modelUsed, "openai/judge-model");
+    const parsedBody = JSON.parse(capturedBody) as { model?: string };
+    assert.equal(parsedBody.model, "judge-model");
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
 test("fallback llm passes the OpenClaw workspace to runtime auth", { concurrency: false }, async () => {
   clearModelsJsonCache();
   clearSecretCache();
