@@ -258,6 +258,40 @@ jobs:
             git commit -m "chore(release): v${NEXT_VERSION} [skip ci]"
           fi
 
+      - name: Bump changed workspace package versions
+        if: steps.version.outputs.tag_exists != 'true'
+        env:
+          BASE_TAG: ${{ steps.version.outputs.base_tag }}
+          BUMP_TYPE: ${{ steps.version.outputs.bump_type }}
+          SOURCE_MAIN_SHA: ${{ steps.version.outputs.source_main_sha }}
+        run: |
+          if [ -z "${BASE_TAG}" ]; then
+            BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${SOURCE_MAIN_SHA}^" 2>/dev/null || true)"
+          fi
+          if [ -z "${BASE_TAG}" ]; then
+            echo "::notice title=Package version bump skipped::No prior release tag found for ${SOURCE_MAIN_SHA}."
+            exit 0
+          fi
+          PACKAGE_BUMP="${BUMP_TYPE:-patch}"
+          case "${PACKAGE_BUMP}" in
+            major|minor|patch) ;;
+            *) PACKAGE_BUMP="patch" ;;
+          esac
+
+          node scripts/bump-changed-packages.mjs \
+            --base "${BASE_TAG}" \
+            --head "${SOURCE_MAIN_SHA}" \
+            --bump "${PACKAGE_BUMP}"
+
+          if git diff --quiet -- packages/*/package.json packages/*/openclaw.plugin.json openclaw.plugin.json; then
+            echo "::notice title=Package version bump skipped::No public workspace package versions changed."
+            exit 0
+          fi
+
+          pnpm install --lockfile-only
+          git add packages/*/package.json packages/*/openclaw.plugin.json openclaw.plugin.json pnpm-lock.yaml
+          git commit -m "chore(release): bump changed workspace packages [skip ci]"
+
       - name: Promote CHANGELOG.md for release
         if: steps.version.outputs.tag_exists != 'true'
         env:

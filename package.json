@@ -106,6 +106,7 @@
     "check:openclaw-plugin-sync": "node scripts/check-openclaw-plugin-sync.mjs",
     "check:openclaw-sdk-surface": "node scripts/check-openclaw-sdk-surface.mjs",
     "check:openclaw-sdk-surface:required": "node scripts/check-openclaw-sdk-surface.mjs --require",
+    "release:bump-changed-packages": "node scripts/bump-changed-packages.mjs",
     "build": "pnpm --filter @remnic/core build && pnpm run check:openclaw-plugin-sync && tsup && node scripts/copy-admin-console.mjs",
     "dev": "tsup --watch",
     "check-types": "pnpm --filter @remnic/core build && tsc --noEmit && pnpm --recursive --if-present --filter=\"./packages/*\" run check-types && node scripts/check-test-types.mjs",
