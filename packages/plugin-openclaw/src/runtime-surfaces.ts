@@ -358,18 +358,14 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildDelimitedBoundaryClass(value: string): string {
-  const parts = ["a-z0-9"];
-  if (value.includes("-")) {
-    parts.push("-");
-  }
-  return parts.join("");
+function buildDelimitedBoundaryClass(): string {
+  return "a-z0-9-";
 }
 
 function compileDelimitedPhrasePattern(value: string): RegExp | null {
   const normalized = value.trim().toLowerCase();
   if (normalized.length === 0) return null;
-  const boundaryClass = buildDelimitedBoundaryClass(normalized);
+  const boundaryClass = buildDelimitedBoundaryClass();
   return new RegExp(
     `(^|[^${boundaryClass}])${escapeRegExp(normalized)}([^${boundaryClass}]|$)`,
   );

@@ -911,6 +911,38 @@ test("syncHeartbeatOutcomeLinks does not false-match heartbeat titles inside lar
   );
 });
 
+test("syncHeartbeatOutcomeLinks does not false-match heartbeat titles inside hyphenated tokens", async () => {
+  const storage = makeStorage([
+    makeMemory({
+      id: "fact-1",
+      content: "The pre-test-run note belongs to a different workflow.",
+      tags: ["ops"],
+    }),
+  ]);
+
+  const result = await syncHeartbeatOutcomeLinks({
+    storage,
+    entries: [
+      {
+        id: "heartbeat-a",
+        slug: "heartbeat-test",
+        title: "test",
+        body: "Run the focused test checklist.",
+        schedule: "hourly",
+        tags: ["ci"],
+        sourceOffset: 0,
+      },
+    ],
+  });
+
+  assert.deepEqual(result, { created: 0, updated: 0, linked: 0 });
+  assert.equal(
+    storage.memories[0]?.frontmatter.structuredAttributes?.relatedHeartbeatSlug,
+    undefined,
+  );
+  assert.deepEqual(storage.memories[0]?.frontmatter.tags, ["ops"]);
+});
+
 test("syncHeartbeatOutcomeLinks does not false-match hyphenated slugs inside larger hyphenated tokens", async () => {
   const storage = makeStorage([
     makeMemory({
