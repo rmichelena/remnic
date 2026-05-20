@@ -1,5 +1,6 @@
 import { log } from "./logger.js";
 import { readEnvVar } from "./runtime/env.js";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
@@ -242,6 +243,48 @@ function resolveFromNamedEnvVar(marker: string): string | undefined {
   return value && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function stableSerializeForCache(value: unknown, seen = new WeakSet<object>()): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+  if (typeof value === "number") return `number:${String(value)}`;
+  if (typeof value === "boolean") return `boolean:${String(value)}`;
+  if (typeof value === "bigint") return `bigint:${String(value)}`;
+  if (typeof value === "symbol" || typeof value === "function") return typeof value;
+  if (value instanceof Date) return `date:${Number.isNaN(value.getTime()) ? "invalid" : value.toISOString()}`;
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerializeForCache(item, seen)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerializeForCache((value as Record<string, unknown>)[key], seen)}`);
+    seen.delete(value);
+    return `{${entries.join(",")}}`;
+  }
+  return String(value);
+}
+
+function cacheFingerprint(value: unknown): string {
+  return createHash("sha256").update(stableSerializeForCache(value)).digest("hex");
+}
+
+function providerSecretCacheKey(
+  providerId: string,
+  resolvedAgentDir: string,
+  apiKeyValue: unknown,
+  gatewayConfig: unknown,
+): string {
+  return [
+    `provider:${providerId}`,
+    `agentDir:${resolvedAgentDir}`,
+    `apiKey:${cacheFingerprint(apiKeyValue)}`,
+    `cfg:${cacheFingerprint(gatewayConfig)}`,
+  ].join(":");
+}
+
 /**
  * Resolve a provider API key from various OpenClaw formats.
  *
@@ -261,12 +304,6 @@ export async function resolveProviderApiKey(
     agentDir ?? path.join(os.homedir(), ".openclaw", "agents", "main", "agent"),
   );
 
-  // Check cache first
-  const cacheKey = `provider:${providerId}:agentDir:${resolvedAgentDir}`;
-  if (resolvedCache.has(cacheKey)) {
-    return resolvedCache.get(cacheKey);
-  }
-
   let resolved: string | undefined;
 
   // Fast path: plain-text string that looks like an actual API key
@@ -277,16 +314,17 @@ export async function resolveProviderApiKey(
     if (isNonLiteralAuthMarker(trimmedApiKeyValue)) {
       const markerEnvValue = resolveFromNamedEnvVar(trimmedApiKeyValue);
       if (markerEnvValue) {
-        resolved = markerEnvValue;
-        resolvedCache.set(cacheKey, resolved);
-        return resolved;
+        return markerEnvValue;
       }
       // Fall through to gateway resolver / env var fallback
     } else {
-      resolved = trimmedApiKeyValue;
-      resolvedCache.set(cacheKey, resolved);
-      return resolved;
+      return trimmedApiKeyValue;
     }
+  }
+
+  const cacheKey = providerSecretCacheKey(providerId, resolvedAgentDir, apiKeyValue, gatewayConfig);
+  if (resolvedCache.has(cacheKey)) {
+    return resolvedCache.get(cacheKey);
   }
 
   // The API key is either a SecretRef object, "secretref-managed", or empty.
