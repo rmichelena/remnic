@@ -72,23 +72,73 @@ export async function ensureCronJob(
   jobsPath: string,
   jobId: string,
   buildJob: () => Record<string, unknown>,
-): Promise<{ created: boolean; jobId: string }> {
+  options: { updateExisting?: boolean; updateFields?: string[] } = {},
+): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const releaseLock = await acquireCronJobsLock(jobsPath);
   try {
     const raw = await readFile(jobsPath, "utf-8");
     const { parsed, jobs } = parseCronJobsShape(raw);
 
-    if (jobs.some((job) => job.id === jobId)) {
-      return { created: false, jobId };
+    const existingIndex = jobs.findIndex((job) => job.id === jobId);
+    if (existingIndex >= 0) {
+      if (!options.updateExisting) {
+        return { created: false, updated: false, jobId };
+      }
+
+      const desired = buildJob();
+      const existing = jobs[existingIndex];
+      const next = mergeCronJobUpdate(existing, desired, options.updateFields);
+      if (stableJson(existing) === stableJson(next)) {
+        return { created: false, updated: false, jobId };
+      }
+
+      jobs[existingIndex] = next;
+      const output = Array.isArray(parsed) ? jobs : { ...parsed, jobs };
+      await writeCronJobsAtomic(jobsPath, output);
+      return { created: false, updated: true, jobId };
     }
 
     jobs.push(buildJob());
     const output = Array.isArray(parsed) ? jobs : { ...parsed, jobs };
     await writeCronJobsAtomic(jobsPath, output);
-    return { created: true, jobId };
+    return { created: true, updated: false, jobId };
   } finally {
     await releaseLock();
   }
+}
+
+function mergeCronJobUpdate(
+  existing: Record<string, unknown>,
+  desired: Record<string, unknown>,
+  updateFields?: string[],
+): Record<string, unknown> {
+  if (!updateFields) {
+    return desired;
+  }
+
+  const next = { ...existing };
+  for (const field of updateFields) {
+    if (Object.prototype.hasOwnProperty.call(desired, field)) {
+      next[field] = desired[field];
+    } else {
+      delete next[field];
+    }
+  }
+  return next;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export async function ensureDaySummaryCron(

@@ -363,12 +363,12 @@ async function maybeRegisterLiveConnectorCron(orchestrator: Orchestrator): Promi
       log.debug("live connectors cron: jobs.json not found, skipping auto-register");
       return;
     }
-    const created = await ensureLiveConnectorCron(jobsPath, {
+    const result = await ensureLiveConnectorCron(jobsPath, {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       connectors: orchestrator.config.connectors,
     });
-    if (created.created) {
-      log.info(`live connectors cron auto-registered (${created.jobId})`);
+    if (result.created || result.updated) {
+      log.info(`live connectors cron ${result.created ? "auto-registered" : "reconciled"} (${result.jobId})`);
     } else {
       log.debug("live connectors cron already exists, skipping auto-register");
     }

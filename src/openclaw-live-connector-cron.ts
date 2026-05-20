@@ -13,7 +13,7 @@ export async function ensureLiveConnectorCron(
     connectors?: LiveConnectorsConfig;
     scheduleExpr?: string;
   },
-): Promise<{ created: boolean; jobId: string }> {
+): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const scheduleExpr =
     typeof options.scheduleExpr === "string" && options.scheduleExpr.trim().length > 0
       ? options.scheduleExpr.trim()
@@ -23,28 +23,33 @@ export async function ensureLiveConnectorCron(
       ? options.agentId.trim()
       : "main";
 
-  return ensureCronJob(jobsPath, LIVE_CONNECTOR_CRON_ID, () => ({
-    id: LIVE_CONNECTOR_CRON_ID,
-    agentId,
-    name: "Remnic Live Connectors (poll due sources)",
-    enabled: true,
-    schedule: {
-      kind: "cron",
-      expr: scheduleExpr,
-      tz: options.timezone,
-    },
-    sessionTarget: "isolated",
-    wakeMode: "now",
-    payload: {
-      kind: "agentTurn",
-      timeoutSeconds: 900,
-      thinking: "off",
-      message:
-        "You are OpenClaw automation. Call tool `engram.live_connectors_run` with empty params. " +
-        "If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
-    },
-    delivery: { mode: "none" },
-  }));
+  return ensureCronJob(
+    jobsPath,
+    LIVE_CONNECTOR_CRON_ID,
+    () => ({
+      id: LIVE_CONNECTOR_CRON_ID,
+      agentId,
+      name: "Remnic Live Connectors (poll due sources)",
+      enabled: true,
+      schedule: {
+        kind: "cron",
+        expr: scheduleExpr,
+        tz: options.timezone,
+      },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: {
+        kind: "agentTurn",
+        timeoutSeconds: 900,
+        thinking: "off",
+        message:
+          "You are OpenClaw automation. Call tool `engram.live_connectors_run` with empty params. " +
+          "If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
+      },
+      delivery: { mode: "none" },
+    }),
+    { updateExisting: true, updateFields: ["agentId", "schedule", "payload"] },
+  );
 }
 
 export function liveConnectorCronExprForConfig(
