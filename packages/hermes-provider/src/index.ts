@@ -225,7 +225,7 @@ export class HermesClient {
     if (options?.topK !== undefined) body.topK = options.topK;
     if (options?.mode) body.mode = options.mode;
     if (options?.includeDebug !== undefined) body.includeDebug = options.includeDebug;
-    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body, { noRetry: true });
+    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body);
   }
 
   async observe(
