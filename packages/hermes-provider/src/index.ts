@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 /**
  * @remnic/hermes-provider
  *
@@ -228,8 +226,10 @@ export class HermesClient {
     if (options?.topK !== undefined) body.topK = options.topK;
     if (options?.mode) body.mode = options.mode;
     if (options?.includeDebug !== undefined) body.includeDebug = options.includeDebug;
-    body.idempotencyKey = options?.idempotencyKey ?? randomUUID();
-    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body);
+    if (options?.idempotencyKey) body.idempotencyKey = options.idempotencyKey;
+    return this.request<EngramAccessRecallResponse>("POST", "/engram/v1/recall", body, {
+      noRetry: !options?.idempotencyKey,
+    });
   }
 
   async observe(
