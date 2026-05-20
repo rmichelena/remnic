@@ -82,6 +82,11 @@ export function listReviewItems(options: ReviewOptions): ReviewListResult {
   } = options;
 
   const items: ReviewItem[] = [];
+  const addItem = (item: ReviewItem): void => {
+    if (items.length >= limit) return;
+    if (filterReason && item.reviewReason !== filterReason) return;
+    items.push(item);
+  };
 
   // Check suggestions directory
   const suggestionsDir = path.join(memoryDir, "suggestions");
@@ -93,7 +98,7 @@ export function listReviewItems(options: ReviewOptions): ReviewListResult {
       const body = extractBody(content);
       if (!fm?.id) return;
 
-      items.push({
+      addItem({
         id: fm.id as string,
         content: body,
         category: (fm.category as string) ?? "suggestion",
@@ -117,7 +122,7 @@ export function listReviewItems(options: ReviewOptions): ReviewListResult {
       const body = extractBody(content);
       if (!fm?.id) return;
 
-      items.push({
+      addItem({
         id: fm.id as string,
         content: body,
         category: (fm.category as string) ?? "review",
@@ -153,7 +158,7 @@ export function listReviewItems(options: ReviewOptions): ReviewListResult {
       // Skip if already in items
       if (items.some((i) => i.id === fm.id)) return;
 
-      items.push({
+      addItem({
         id: fm.id as string,
         content: body,
         category: (fm.category as string) ?? category.slice(0, -1),
@@ -167,14 +172,9 @@ export function listReviewItems(options: ReviewOptions): ReviewListResult {
     });
   }
 
-  // Filter by reason
-  const filtered = filterReason
-    ? items.filter((i) => i.reviewReason === filterReason)
-    : items;
-
   return {
-    items: filtered.slice(0, limit),
-    total: filtered.length,
+    items,
+    total: items.length,
     durationMs: Date.now() - startTime,
   };
 }

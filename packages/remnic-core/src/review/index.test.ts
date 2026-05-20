@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { TestContext } from "node:test";
-import { performReview } from "./index.js";
+import { listReviewItems, performReview, type ReviewItem } from "./index.js";
 
 async function makeMemoryDir(t: TestContext): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "remnic-review-"));
@@ -12,7 +12,10 @@ async function makeMemoryDir(t: TestContext): Promise<string> {
   return dir;
 }
 
-function reviewMarkdown(id: string): string {
+function reviewMarkdown(
+  id: string,
+  reviewReason: ReviewItem["reviewReason"] = "low_confidence",
+): string {
   return `---
 id: ${id}
 category: fact
@@ -20,10 +23,30 @@ confidence: 0.4
 confidenceTier: low
 source: test
 created: 2026-05-17T00:00:00.000Z
-reviewReason: low_confidence
+reviewReason: ${reviewReason}
 ---
 Candidate memory.`;
 }
+
+test("listReviewItems applies reason filtering before enforcing the limit", async (t) => {
+  const memoryDir = await makeMemoryDir(t);
+  const suggestionsDir = path.join(memoryDir, "suggestions");
+  const reviewDir = path.join(memoryDir, "review");
+  await mkdir(suggestionsDir, { recursive: true });
+  await mkdir(reviewDir, { recursive: true });
+  await writeFile(path.join(suggestionsDir, "first.md"), reviewMarkdown("suggestion-1", "suggestion"), "utf8");
+  await writeFile(path.join(suggestionsDir, "second.md"), reviewMarkdown("suggestion-2", "suggestion"), "utf8");
+  await writeFile(path.join(reviewDir, "contradiction.md"), reviewMarkdown("matching-review", "contradiction"), "utf8");
+
+  const result = listReviewItems({
+    memoryDir,
+    reason: "contradiction",
+    limit: 1,
+  });
+
+  assert.deepEqual(result.items.map((item) => item.id), ["matching-review"]);
+  assert.equal(result.total, 1);
+});
 
 test("approve promotes to the source basename when no target exists", async (t) => {
   const memoryDir = await makeMemoryDir(t);
