@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import { homedir } from "node:os";
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, readdir } from "node:fs/promises";
 import { log } from "./logger.js";
 import type { JudgeVerdictKind } from "./extraction-judge.js";
 
@@ -121,8 +121,12 @@ export async function recordJudgeTrainingPair(
   const dir = resolveTrainingDir(options);
   const filePath = trainingFilePathFor(dir, row.ts);
   try {
-    await mkdir(dir, { recursive: true });
-    await appendFile(filePath, `${JSON.stringify(row)}\n`, "utf-8");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await appendFile(filePath, `${JSON.stringify(row)}\n`, {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    await chmod(filePath, 0o600);
   } catch (err) {
     log.debug(
       `extraction-judge-training: append failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
