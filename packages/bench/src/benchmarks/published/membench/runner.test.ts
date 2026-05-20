@@ -232,3 +232,78 @@ test("MemBench normalizes upstream JSONL trajectory QA records", async () => {
     await rm(datasetDir, { recursive: true, force: true });
   }
 });
+
+test("MemBench records a task failure when ingestion drain fails before scoring", async () => {
+  let completedTasks = 0;
+  let recallCalls = 0;
+  let responderCalls = 0;
+  let judgeCalls = 0;
+
+  const result = await runMemBenchBenchmark({
+    benchmark: memBenchDefinition,
+    mode: "quick",
+    limit: 1,
+    onTaskComplete() {
+      completedTasks += 1;
+    },
+    system: {
+      async reset() {},
+      async store() {},
+      async drain() {
+        throw new Error("drain timed out");
+      },
+      async recall() {
+        recallCalls += 1;
+        return "Lisbon";
+      },
+      async search() {
+        return [];
+      },
+      async destroy() {},
+      async getStats() {
+        return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+      },
+      responder: {
+        async respond() {
+          responderCalls += 1;
+          return {
+            text: "Lisbon",
+            tokens: { input: 1, output: 1 },
+            latencyMs: 1,
+            model: "membench-test-responder",
+          };
+        },
+      },
+      judge: {
+        async score() {
+          judgeCalls += 1;
+          return 1;
+        },
+        async scoreWithMetrics() {
+          judgeCalls += 1;
+          return {
+            score: 1,
+            tokens: { input: 0, output: 0 },
+            latencyMs: 0,
+            model: "membench-test-judge",
+          };
+        },
+      },
+    },
+  });
+
+  assert.equal(completedTasks, 1);
+  assert.equal(recallCalls, 0);
+  assert.equal(responderCalls, 0);
+  assert.equal(judgeCalls, 0);
+
+  const task = result.results.tasks[0]!;
+  assert.match(task.actual, /MemBench drain failed for factual-participant-1/);
+  assert.deepEqual(task.scores, {
+    f1: -1,
+    contains_answer: -1,
+    llm_judge: -1,
+    membench_accuracy: -1,
+  });
+  assert.equal(task.details?.error, "MemBench drain failed for factual-participant-1: drain timed out");
+});

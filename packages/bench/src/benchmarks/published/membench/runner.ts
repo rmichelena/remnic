@@ -100,7 +100,9 @@ export async function runMemBenchBenchmark(
       try {
         await options.system.drain?.();
       } catch (drainErr) {
-        console.error(`  [WARN] membench drain failed for ${testCase.id}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+        throw new Error(
+          `MemBench drain failed for ${testCase.id}: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`,
+        );
       }
 
       const recallQuery = buildRecallQuery(testCase);
