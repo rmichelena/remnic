@@ -92,8 +92,8 @@ export function createTimeoutGuardedAdapter(
       if (phaseTimeoutMs === undefined) {
         return adapter.store(sessionId, messages);
       }
-      return run(`store session=${sessionId} messages=${messages.length}`, () =>
-        adapter.store(sessionId, messages),
+      return run(`store session=${sessionId} messages=${messages.length}`, (signal) =>
+        adapter.store(sessionId, messages, { signal }),
       );
     },
     recall(
@@ -105,8 +105,8 @@ export function createTimeoutGuardedAdapter(
       if (phaseTimeoutMs === undefined) {
         return adapter.recall(sessionId, query, budgetChars, recallOptions);
       }
-      return run(`recall session=${sessionId}`, () =>
-        adapter.recall(sessionId, query, budgetChars, recallOptions),
+      return run(`recall session=${sessionId}`, (signal) =>
+        adapter.recall(sessionId, query, budgetChars, recallOptions, { signal }),
       );
     },
     search(
@@ -117,24 +117,24 @@ export function createTimeoutGuardedAdapter(
       if (phaseTimeoutMs === undefined) {
         return adapter.search(query, limit, sessionId);
       }
-      return run(`search session=${sessionId ?? "all"} limit=${limit}`, () =>
-        adapter.search(query, limit, sessionId),
+      return run(`search session=${sessionId ?? "all"} limit=${limit}`, (signal) =>
+        adapter.search(query, limit, sessionId, { signal }),
       );
     },
     reset(sessionId?: string): Promise<void> {
       if (phaseTimeoutMs === undefined) {
         return adapter.reset(sessionId);
       }
-      return run(`reset session=${sessionId ?? "all"}`, () =>
-        adapter.reset(sessionId),
+      return run(`reset session=${sessionId ?? "all"}`, (signal) =>
+        adapter.reset(sessionId, { signal }),
       );
     },
     getStats(sessionId?: string): Promise<MemoryStats> {
       if (phaseTimeoutMs === undefined) {
         return adapter.getStats(sessionId);
       }
-      return run(`stats session=${sessionId ?? "all"}`, () =>
-        adapter.getStats(sessionId),
+      return run(`stats session=${sessionId ?? "all"}`, (signal) =>
+        adapter.getStats(sessionId, { signal }),
       );
     },
     destroy(): Promise<void> {
@@ -146,7 +146,7 @@ export function createTimeoutGuardedAdapter(
     wrapped.drain = (): Promise<void> =>
       drainTimeoutMs === undefined
         ? adapter.drain!()
-        : run("drain", () => adapter.drain!(), drainTimeoutMs);
+        : run("drain", (signal) => adapter.drain!({ signal }), drainTimeoutMs);
   }
   if (adapter.responder) {
     wrapped.responder =

@@ -82,18 +82,28 @@ export interface BenchJudge {
 }
 
 export interface BenchMemoryAdapter {
-  store(sessionId: string, messages: Message[]): Promise<void>;
+  store(
+    sessionId: string,
+    messages: Message[],
+    control?: BenchPhaseControl,
+  ): Promise<void>;
   recall(
     sessionId: string,
     query: string,
     budgetChars?: number,
     options?: BenchRecallOptions,
+    control?: BenchPhaseControl,
   ): Promise<string>;
-  search(query: string, limit: number, sessionId?: string): Promise<SearchResult[]>;
-  reset(sessionId?: string): Promise<void>;
-  getStats(sessionId?: string): Promise<MemoryStats>;
+  search(
+    query: string,
+    limit: number,
+    sessionId?: string,
+    control?: BenchPhaseControl,
+  ): Promise<SearchResult[]>;
+  reset(sessionId?: string, control?: BenchPhaseControl): Promise<void>;
+  getStats(sessionId?: string, control?: BenchPhaseControl): Promise<MemoryStats>;
   /** Wait for background summarization (e.g. LCM) to finish after store(). */
-  drain?(): Promise<void>;
+  drain?(control?: BenchPhaseControl): Promise<void>;
   destroy(): Promise<void>;
   responder?: BenchResponder;
   judge?: BenchJudge;

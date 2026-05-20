@@ -45,6 +45,44 @@ test("timeout guard rejects a stuck adapter phase", async () => {
   assert.equal(timedOutPhase, "timeout-test:recall session=s");
 });
 
+test("timeout guard aborts adapter phase work on timeout", async () => {
+  const adapter = makeAdapter();
+  let sawAbort = false;
+  let delayedSideEffect = false;
+  let sideEffectTimer: ReturnType<typeof setTimeout> | undefined;
+  adapter.store = (_sessionId, _messages, control) =>
+    new Promise<never>((_, reject) => {
+      sideEffectTimer = setTimeout(() => {
+        delayedSideEffect = true;
+      }, 25);
+      const signal = control?.signal;
+      const onAbort = () => {
+        sawAbort = true;
+        if (sideEffectTimer) {
+          clearTimeout(sideEffectTimer);
+        }
+        reject(signal?.reason);
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "timeout-test",
+    timeoutMs: 5,
+  });
+
+  await assert.rejects(
+    () => guarded.store("s", [{ role: "user", content: "hello" }]),
+    /benchmark phase timed out after 5ms: timeout-test:store session=s messages=1/,
+  );
+  assert.equal(sawAbort, true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(delayedSideEffect, false);
+});
+
 test("timeout guard forwards recall options", async () => {
   const adapter = makeAdapter();
   let forwardedAsOf = "";
