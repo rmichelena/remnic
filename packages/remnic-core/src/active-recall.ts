@@ -1,5 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_REASONING_MODEL } from "./config.js";
 import { collapseWhitespace, truncateCodePointSafe } from "./whitespace.js";
 import type {
   ActiveRecallChatType,
@@ -407,14 +408,14 @@ export function createActiveRecallEngine(
             prompt,
             sessionKey: input.sessionKey,
             agentId: input.agentId,
-            model: config.modelOverride ?? "gpt-5.5",
+            model: config.modelOverride ?? DEFAULT_REASONING_MODEL,
             timeoutMs: config.timeoutMs,
             thinking: config.thinking,
             fallbackPolicy: config.modelFallbackPolicy,
           })
         : {
             text: recallContext,
-            modelUsed: config.modelOverride ?? "gpt-5.5",
+            modelUsed: config.modelOverride ?? DEFAULT_REASONING_MODEL,
             cacheHit: false,
           };
       const summary = normalizeActiveRecallSummary(
@@ -431,7 +432,7 @@ export function createActiveRecallEngine(
         citations,
         latencyMs: Math.max(0, now() - start),
         cacheHit: generated.cacheHit === true,
-        modelUsed: generated.modelUsed ?? config.modelOverride ?? "gpt-5.5",
+        modelUsed: generated.modelUsed ?? config.modelOverride ?? DEFAULT_REASONING_MODEL,
         transcriptPath: null,
       };
       if (config.persistTranscripts) {

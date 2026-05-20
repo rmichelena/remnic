@@ -109,6 +109,14 @@ function readSourceToolNames(): string[] {
 }
 
 for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
+  test(`${manifestPath} keeps model defaults aligned with runtime config defaults`, () => {
+    const manifest = readManifest(manifestPath);
+    const configSchema = manifest.configSchema?.properties ?? {};
+
+    assert.equal(configSchema.model?.default, "gpt-5.5");
+    assert.equal(configSchema.recallPlannerModel?.default, "gpt-5.5");
+  });
+
   test(`${manifestPath} advertises the v2026.4.10 runtime capability surfaces`, () => {
     const manifest = readManifest(manifestPath);
 
@@ -225,6 +233,11 @@ for (const manifestPath of OPENCLAW_MANIFEST_PATHS) {
       manifest.configSchema?.properties?.openaiApiKey?.description ?? "",
       /conversation and memory content/,
       "openaiApiKey schema should disclose that configured model providers may process memory content",
+    );
+    assert.deepEqual(
+      manifest.configSchema?.properties?.openaiApiKey?.anyOf,
+      [{ type: "string" }, { const: false }],
+      "openaiApiKey schema must accept strings or false, but reject boolean true",
     );
   });
 

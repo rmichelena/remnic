@@ -115,7 +115,10 @@
     "additionalProperties": false,
     "properties": {
       "openaiApiKey": {
-        "type": "string",
+        "anyOf": [
+          { "type": "string" },
+          { "const": false }
+        ],
         "description": "Optional OpenAI API key for plugin mode (or set OPENAI_API_KEY env var). Ignored by default gateway-mode installs; in plugin mode, Remnic may send conversation and memory content to OpenAI or the configured OpenAI-compatible endpoint for extraction, consolidation, summarization, and embeddings."
       },
       "openaiBaseUrl": {
@@ -124,7 +127,7 @@
       },
       "model": {
         "type": "string",
-        "default": "gpt-5.2",
+        "default": "gpt-5.5",
         "description": "OpenAI model for extraction/consolidation"
       },
       "reasoningEffort": {
@@ -1768,7 +1771,7 @@
       },
       "recallPlannerModel": {
         "type": "string",
-        "default": "gpt-5.2-mini",
+        "default": "gpt-5.5",
         "description": "Model to use for the recall planner."
       },
       "recallPlannerTimeoutMs": {
@@ -4765,7 +4768,7 @@
     "model": {
       "label": "Extraction Model",
       "advanced": true,
-      "placeholder": "gpt-5.2"
+      "placeholder": "gpt-5.5"
     },
     "reasoningEffort": {
       "label": "Reasoning Effort",

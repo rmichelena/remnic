@@ -39,6 +39,8 @@ import * as childProcess from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   parseConfig,
+  isOpenaiApiKeyDisabled,
+  resolveEnvVars,
   Orchestrator,
   EngramAccessService,
   initLogger,
@@ -3901,11 +3903,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
     ? JSON.parse(fs.readFileSync(configPath, "utf8"))
     : {};
   const remnicCfg = raw.remnic ?? raw.engram ?? raw;
-  const remnicQueryCfg =
-    remnicCfg && typeof remnicCfg === "object" && !Array.isArray(remnicCfg)
-      ? { ...remnicCfg, qmdMaintenanceEnabled: false }
-      : { qmdMaintenanceEnabled: false };
-  const config = parseConfig(remnicQueryCfg);
+  const config = parseConfig(remnicCfg);
   const orchestrator = new Orchestrator(config);
   await orchestrator.initialize();
   const service = new EngramAccessService(orchestrator);
@@ -3977,6 +3975,7 @@ async function cmdQuery(queryText: string, json: boolean, explain: boolean): Pro
   } finally {
     // One-shot CLI calls should not wait for or orphan deferred QMD
     // maintenance; the daemon/gateway process performs full warmup instead.
+    orchestrator.abortDeferredInit();
     await orchestrator.destroy();
   }
 }
@@ -4919,7 +4918,7 @@ async function cmdDoctor(): Promise<void> {
         typeof remnicCfg === "object" &&
         remnicCfg !== null &&
         !Array.isArray(remnicCfg) &&
-        (remnicCfg as Record<string, unknown>).openaiApiKey === false;
+        isOpenaiApiKeyDisabled((remnicCfg as Record<string, unknown>).openaiApiKey);
       standaloneConfig = parseConfig(remnicCfg);
     } catch (err) {
       standaloneConfigError = err instanceof Error ? err.message : String(err);
@@ -4941,6 +4940,7 @@ async function cmdDoctor(): Promise<void> {
   let openclawConfigValid = false;
   let openclawPluginModeConfigured = false;
   let activeOpenclawModelSource: string | undefined;
+  let activeOpenclawEntryConfig: Record<string, unknown> | null = null;
 
   if (openclawConfigExists) {
     try {
@@ -5087,6 +5087,7 @@ async function cmdDoctor(): Promise<void> {
         (slotValue === REMNIC_OPENCLAW_PLUGIN_ID || slotValue === REMNIC_OPENCLAW_LEGACY_PLUGIN_ID)
       ) {
         openclawPluginModeConfigured = true;
+        activeOpenclawEntryConfig = entryConfig;
         activeOpenclawModelSource =
           typeof entryConfig?.modelSource === "string" ? entryConfig.modelSource : undefined;
       }
@@ -5123,28 +5124,67 @@ async function cmdDoctor(): Promise<void> {
     }
   }
 
-  const hasApiKey = standaloneConfig
+  const standaloneHasApiKey = standaloneConfig
     ? !!standaloneConfig.openaiApiKey
     : !!process.env.OPENAI_API_KEY;
+  const activeOpenclawOpenaiApiKey = activeOpenclawEntryConfig?.openaiApiKey;
+  const activeOpenclawOpenaiApiKeyExplicitlyFalse =
+    isOpenaiApiKeyDisabled(activeOpenclawOpenaiApiKey);
+  const hasExplicitOpenclawOpenaiApiKey =
+    typeof activeOpenclawOpenaiApiKey === "string" && activeOpenclawOpenaiApiKey.trim().length > 0;
+  let activeOpenclawConfigHasApiKey = false;
+  let activeOpenclawOpenaiApiKeyError: string | undefined;
+  if (hasExplicitOpenclawOpenaiApiKey) {
+    try {
+      activeOpenclawConfigHasApiKey = resolveEnvVars(activeOpenclawOpenaiApiKey).trim().length > 0;
+    } catch (err) {
+      activeOpenclawOpenaiApiKeyError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const openclawHasApiKey = activeOpenclawOpenaiApiKeyExplicitlyFalse
+    ? false
+    : hasExplicitOpenclawOpenaiApiKey
+      ? activeOpenclawConfigHasApiKey
+      : !!process.env.OPENAI_API_KEY;
+  const diagnosingOpenclawPluginMode = openclawPluginModeConfigured;
+  const hasApiKey = diagnosingOpenclawPluginMode ? openclawHasApiKey : standaloneHasApiKey;
+  const openclawKeyErrorBlocksOk = diagnosingOpenclawPluginMode && !!activeOpenclawOpenaiApiKeyError;
+  const standaloneConfigErrorBlocksOk = !diagnosingOpenclawPluginMode && !!standaloneConfigError;
   const localLlmConfigured = standaloneConfig?.localLlmEnabled === true;
-  const openaiKeyOptionalForGateway =
-    openclawPluginModeConfigured && activeOpenclawModelSource === "gateway";
+  const activeOpenclawLocalLlmConfigured =
+    activeOpenclawEntryConfig?.localLlmEnabled === true || activeOpenclawEntryConfig?.localLlmEnabled === "true";
+  const openaiKeyOptionalForOpenclaw =
+    openclawPluginModeConfigured &&
+    (activeOpenclawModelSource === "gateway" || activeOpenclawLocalLlmConfigured);
   const openaiKeyOptionalForStandalone =
-    standaloneConfig?.modelSource === "gateway" || localLlmConfigured;
+    !diagnosingOpenclawPluginMode &&
+    (standaloneConfig?.modelSource === "gateway" || localLlmConfigured);
   checks.push({
     name: "OPENAI_API_KEY",
-    ok: hasApiKey || openaiKeyOptionalForGateway || openaiKeyOptionalForStandalone,
-    warn: !hasApiKey && !openaiKeyOptionalForGateway && !openaiKeyOptionalForStandalone,
-    detail: standaloneConfigError
-      ? `config parse failed (${standaloneConfigError})`
+    ok:
+      !openclawKeyErrorBlocksOk &&
+      !standaloneConfigErrorBlocksOk &&
+      (hasApiKey || openaiKeyOptionalForOpenclaw || openaiKeyOptionalForStandalone),
+    warn:
+      openclawKeyErrorBlocksOk ||
+      standaloneConfigErrorBlocksOk ||
+      (!hasApiKey && !openaiKeyOptionalForOpenclaw && !openaiKeyOptionalForStandalone),
+    detail: standaloneConfigErrorBlocksOk
+      ? "config parse failed"
+      : openclawKeyErrorBlocksOk
+      ? "OpenClaw openaiApiKey placeholder failed"
       : hasApiKey
       ? "configured"
-      : standaloneOpenaiApiKeyExplicitlyFalse && localLlmConfigured
+      : !diagnosingOpenclawPluginMode && standaloneOpenaiApiKeyExplicitlyFalse && localLlmConfigured
       ? "disabled by config (local LLM enabled)"
-      : standaloneOpenaiApiKeyExplicitlyFalse && standaloneConfig?.modelSource === "gateway"
+      : !diagnosingOpenclawPluginMode && standaloneOpenaiApiKeyExplicitlyFalse && standaloneConfig?.modelSource === "gateway"
       ? "disabled by config (gateway modelSource)"
-      : openaiKeyOptionalForGateway
-      ? "not set (not required for OpenClaw gateway modelSource)"
+      : activeOpenclawOpenaiApiKeyExplicitlyFalse
+      ? "disabled by OpenClaw config"
+      : openaiKeyOptionalForOpenclaw
+      ? activeOpenclawModelSource === "gateway"
+        ? "not set (not required for OpenClaw gateway modelSource)"
+        : "not set (not required for OpenClaw local LLM)"
       : openaiKeyOptionalForStandalone
       ? "not set (standalone local/gateway model path configured)"
       : "not set (required for direct OpenAI-backed extraction)",

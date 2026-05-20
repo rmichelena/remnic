@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { parseConfig, Orchestrator, EngramAccessService, EngramAccessHttpServer, initLogger, log, getAllValidTokens, getAllValidTokensCached, expandTildePath, type PluginConfig } from "@remnic/core";
+import { parseConfig, isOpenaiApiKeyDisabled, Orchestrator, EngramAccessService, EngramAccessHttpServer, initLogger, log, getAllValidTokens, getAllValidTokensCached, expandTildePath, type PluginConfig } from "@remnic/core";
 
 // ── Config loading ──────────────────────────────────────────────────────────
 
@@ -134,7 +134,7 @@ export function mergeRemnicConfigForServer(
   envRemnic: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const effectiveEnvRemnic = { ...(envRemnic ?? {}) };
-  if (fileRemnic.openaiApiKey === false) {
+  if (isOpenaiApiKeyDisabled(fileRemnic.openaiApiKey)) {
     // A local/gateway-only deployment can explicitly disable the direct
     // OpenAI client. Preserve that opt-out even when the process has a
     // global OPENAI_API_KEY for unrelated tools.

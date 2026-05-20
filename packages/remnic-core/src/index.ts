@@ -26,7 +26,7 @@ export { PLUGIN_ID, LEGACY_PLUGIN_ID, resolveRemnicPluginEntry } from "./plugin-
 // Configuration
 // ---------------------------------------------------------------------------
 
-export { parseConfig } from "./config.js";
+export { parseConfig, isOpenaiApiKeyDisabled, resolveEnvVars } from "./config.js";
 export {
   parseFlexibleIsoTimestamp,
   parseIsoOffsetTimestamp,

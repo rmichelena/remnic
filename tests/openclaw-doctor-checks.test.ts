@@ -148,6 +148,84 @@ test("doctor: OPENAI_API_KEY failure message is unambiguous", async () => {
   );
 });
 
+test("doctor: OPENAI_API_KEY optionality is scoped to the active runtime mode", async () => {
+  const src = await readCli();
+  assert.ok(
+    src.includes("const diagnosingOpenclawPluginMode = openclawPluginModeConfigured"),
+    "CLI doctor must first determine whether OpenClaw plugin mode is the active runtime",
+  );
+  assert.ok(
+    src.includes("const hasApiKey = diagnosingOpenclawPluginMode ? openclawHasApiKey : standaloneHasApiKey"),
+    "CLI doctor must check the OpenClaw key source in OpenClaw mode and the standalone key source otherwise",
+  );
+  assert.ok(
+    src.includes("activeOpenclawOpenaiApiKeyError") &&
+      src.includes("OpenClaw openaiApiKey placeholder failed"),
+    "CLI doctor must fail unresolved OpenClaw openaiApiKey placeholders instead of treating them as configured",
+  );
+  assert.ok(
+    src.includes("const openclawKeyErrorBlocksOk = diagnosingOpenclawPluginMode && !!activeOpenclawOpenaiApiKeyError") &&
+      src.includes("!openclawKeyErrorBlocksOk") &&
+      src.includes("openclawKeyErrorBlocksOk ||"),
+    "unresolved OpenClaw openaiApiKey placeholders must block a healthy result even when ambient OPENAI_API_KEY is set",
+  );
+  assert.ok(
+    src.includes("const standaloneConfigErrorBlocksOk = !diagnosingOpenclawPluginMode && !!standaloneConfigError") &&
+      src.includes("!standaloneConfigErrorBlocksOk") &&
+      src.includes("standaloneConfigErrorBlocksOk ||"),
+    "standalone config parse failures must block a healthy OPENAI_API_KEY result",
+  );
+  assert.ok(
+    src.includes("detail: standaloneConfigErrorBlocksOk") &&
+      src.includes(": openclawKeyErrorBlocksOk"),
+    "OPENAI_API_KEY detail must report errors only from the active runtime mode",
+  );
+  assert.ok(
+    src.includes("isOpenaiApiKeyDisabled,") &&
+    src.includes("isOpenaiApiKeyDisabled((remnicCfg as Record<string, unknown>).openaiApiKey)"),
+    "doctor must use the shared core helper to treat CLI-style string false as an explicit standalone OpenAI key opt-out",
+  );
+  assert.ok(
+    src.includes("resolveEnvVars,") &&
+      src.includes("activeOpenclawConfigHasApiKey = resolveEnvVars(activeOpenclawOpenaiApiKey).trim().length > 0"),
+    "doctor must use the shared core env resolver so Remnic/Engram placeholder fallbacks match runtime config parsing",
+  );
+  assert.ok(
+    src.includes("const activeOpenclawOpenaiApiKeyExplicitlyFalse") &&
+      src.includes("activeOpenclawOpenaiApiKeyExplicitlyFalse") &&
+      src.includes("? false"),
+    "doctor must not fall back to ambient OPENAI_API_KEY when OpenClaw config explicitly disables direct OpenAI",
+  );
+  assert.ok(
+    src.includes("!diagnosingOpenclawPluginMode") &&
+      src.includes("standaloneConfig?.modelSource === \"gateway\" || localLlmConfigured"),
+    "standalone local/gateway optionality must not make OpenClaw direct/plugin mode look healthy",
+  );
+  assert.ok(
+    src.includes("!diagnosingOpenclawPluginMode && standaloneOpenaiApiKeyExplicitlyFalse && localLlmConfigured") &&
+      src.includes("!diagnosingOpenclawPluginMode && standaloneOpenaiApiKeyExplicitlyFalse && standaloneConfig?.modelSource === \"gateway\""),
+    "standalone OpenAI key opt-out details must not override OpenClaw-mode diagnostics",
+  );
+  assert.ok(
+    src.includes("const openaiKeyOptionalForOpenclaw") &&
+      src.includes("activeOpenclawModelSource === \"gateway\" || activeOpenclawLocalLlmConfigured"),
+    "OpenClaw gateway modelSource and local LLM mode must both make OPENAI_API_KEY optional in plugin mode",
+  );
+});
+
+test("query command preserves QMD maintenance for startup index sync", async () => {
+  const src = await readCli();
+  assert.equal(
+    src.includes("qmdMaintenanceEnabled: false"),
+    false,
+    "remnic query must not disable startup QMD index maintenance",
+  );
+  assert.ok(
+    src.includes("const config = parseConfig(remnicCfg);"),
+    "remnic query must parse the configured Remnic settings without overriding qmdMaintenanceEnabled",
+  );
+});
+
 // ── Logic unit tests (pure config parsing) ───────────────────────────────────
 
 interface OpenclawConfig {
