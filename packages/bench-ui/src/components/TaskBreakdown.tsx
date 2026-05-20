@@ -4,9 +4,11 @@ import { formatDuration, formatMetricValue } from "../bench-data";
 export function TaskBreakdown({
   rows,
   title,
+  metricName,
 }: {
   rows: TaskDeltaRow[];
   title: string;
+  metricName?: string;
 }) {
   if (rows.length === 0) {
     return (
@@ -31,9 +33,9 @@ export function TaskBreakdown({
             </div>
             <p>{row.question}</p>
             <div className="task-card__scores">
-              <span>Baseline {formatMetricValue(row.baseline)}</span>
-              <span>Candidate {formatMetricValue(row.candidate)}</span>
-              <span>Delta {formatMetricValue(row.delta)}</span>
+              <span>Baseline {formatMetricValue(row.baseline, metricName)}</span>
+              <span>Candidate {formatMetricValue(row.candidate, metricName)}</span>
+              <span>Delta {formatMetricValue(row.delta, metricName)}</span>
             </div>
           </article>
         ))}

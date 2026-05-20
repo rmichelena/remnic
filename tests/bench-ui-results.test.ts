@@ -742,3 +742,19 @@ test("buildProviderRows keeps the newest benchmark score for each provider", () 
   assert.equal(rows[0]?.averageScore, (0.91 + 0.42) / 2);
   assert.equal(rows[0]?.averageCostUsd, (0.14 + 0.18) / 2);
 });
+
+test("benchmark detail helpers rank lower-is-better raw counts by highest friction", () => {
+  const taskRows: import("../packages/bench-ui/src/bench-data.js").TaskDeltaRow[] = [
+    { taskId: "setup-1", baseline: null, candidate: 1, delta: null, question: "Q1", latencyMs: 10 },
+    { taskId: "setup-4", baseline: null, candidate: 4, delta: null, question: "Q4", latencyMs: 10 },
+    { taskId: "setup-8", baseline: null, candidate: 8, delta: null, question: "Q8", latencyMs: 10 },
+    { taskId: "setup-0", baseline: null, candidate: 0, delta: null, question: "Q0", latencyMs: 10 },
+  ];
+
+  const frictionTasks = selectLowestScoringTasks(taskRows, "setup_friction");
+  assert.equal(frictionTasks.length, 3);
+  assert.equal(frictionTasks[0]?.taskId, "setup-8");
+  assert.equal(frictionTasks[1]?.taskId, "setup-4");
+  assert.equal(frictionTasks[2]?.taskId, "setup-1");
+  assert.equal(formatMetricValue(taskRows[0]?.candidate ?? null, "setup_friction"), "1");
+});
