@@ -167,6 +167,7 @@ async function copyTreeMissing(
   source: string,
   destination: string,
   copied: string[],
+  manifest: RollbackManifest,
   isRoot = true,
 ): Promise<void> {
   if (!existsSync(source)) return;
@@ -188,6 +189,7 @@ async function copyTreeMissing(
         path.join(source, entry.name),
         path.join(destination, entry.name),
         copied,
+        manifest,
         false,
       );
     }
@@ -197,6 +199,7 @@ async function copyTreeMissing(
   if (await pathExistsNoFollow(destination)) return;
   await ensureParent(destination);
   await copyFile(source, destination);
+  await recordCreatedPath(destination, manifest);
   copied.push(destination);
 }
 
@@ -462,7 +465,11 @@ async function updateConnectorConfigs(
   return updated;
 }
 
-async function copyLegacyConfig(homeDir: string, copied: string[]): Promise<void> {
+async function copyLegacyConfig(
+  homeDir: string,
+  copied: string[],
+  manifest: RollbackManifest,
+): Promise<void> {
   const source = legacyConfigPath(homeDir);
   const destination = remnicConfigPath(homeDir);
   if (!existsSync(source) || existsSync(destination)) return;
@@ -480,6 +487,7 @@ async function copyLegacyConfig(homeDir: string, copied: string[]): Promise<void
     // Keep rewritten text when config is not JSON.
   }
   await writeFile(destination, `${next.trimEnd()}\n`, "utf8");
+  await recordCreatedPath(destination, manifest);
   copied.push(destination);
 }
 
@@ -738,8 +746,8 @@ export async function migrateFromEngram(options?: MigrationOptions): Promise<Mig
 
     logger("First run after Engram -> Remnic rename. Migrating...");
     await mkdir(remnicRoot(homeDir), { recursive: true });
-    await copyTreeMissing(legacyRoot(homeDir), remnicRoot(homeDir), copied);
-    await copyLegacyConfig(homeDir, copied);
+    await copyTreeMissing(legacyRoot(homeDir), remnicRoot(homeDir), copied, manifest);
+    await copyLegacyConfig(homeDir, copied, manifest);
 
     const legacyTokens = path.join(legacyRoot(homeDir), "tokens.json");
     const remnicTokens = path.join(remnicRoot(homeDir), "tokens.json");

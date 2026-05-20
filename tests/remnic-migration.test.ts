@@ -734,6 +734,74 @@ test("rollbackFromEngramMigration restores backed up connector configs and remov
   await assertFileMode(claudeConfig, 0o644);
 });
 
+test("rollbackFromEngramMigration removes files created from first-run legacy copies", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-created-rollback-");
+  const legacyRoot = path.join(homeDir, ".engram");
+  const legacyConfig = path.join(homeDir, ".config", "engram", "config.json");
+  const remnicTokensPath = path.join(homeDir, ".remnic", "tokens.json");
+  const remnicLogPath = path.join(homeDir, ".remnic", "logs", "daemon.log");
+  const remnicConfig = path.join(homeDir, ".config", "remnic", "config.json");
+
+  await mkdir(path.join(legacyRoot, "logs"), { recursive: true });
+  await mkdir(path.dirname(legacyConfig), { recursive: true });
+  await writeFile(
+    path.join(legacyRoot, "tokens.json"),
+    JSON.stringify({
+      tokens: [
+        { connector: "claude-code", token: "engram_cc_created", createdAt: "2026-04-08T00:00:00.000Z" },
+      ],
+    }),
+    "utf8",
+  );
+  await writeFile(path.join(legacyRoot, "logs", "daemon.log"), "legacy log\n", "utf8");
+  await writeFile(
+    legacyConfig,
+    JSON.stringify({
+      engram: {
+        memoryDir: path.join(homeDir, ".engram", "memory"),
+      },
+    }),
+    "utf8",
+  );
+
+  const result = await migrateFromEngram({
+    homeDir,
+    cwd: homeDir,
+    quiet: true,
+  });
+
+  assert.equal(result.status, "migrated");
+  assert.ok(result.copied.includes(remnicTokensPath));
+  assert.ok(result.copied.includes(remnicLogPath));
+  assert.ok(result.copied.includes(remnicConfig));
+
+  const manifest = JSON.parse(await readFile(path.join(homeDir, ".remnic", ".rollback.json"), "utf8")) as {
+    entries: Array<{ targetPath: string; createdByMigration?: boolean }>;
+  };
+  const createdTargets = new Set(
+    manifest.entries
+      .filter((entry) => entry.createdByMigration)
+      .map((entry) => entry.targetPath),
+  );
+  assert.ok(createdTargets.has(remnicTokensPath), "expected copied token store in rollback manifest");
+  assert.ok(createdTargets.has(remnicLogPath), "expected copied log file in rollback manifest");
+  assert.ok(createdTargets.has(remnicConfig), "expected copied config in rollback manifest");
+
+  const rollback = await rollbackFromEngramMigration({
+    homeDir,
+    cwd: homeDir,
+    quiet: true,
+  });
+
+  assert.ok(rollback.removed.includes(remnicTokensPath));
+  assert.ok(rollback.removed.includes(remnicLogPath));
+  assert.ok(rollback.removed.includes(remnicConfig));
+  assert.equal(existsSync(remnicTokensPath), false);
+  assert.equal(existsSync(remnicLogPath), false);
+  assert.equal(existsSync(remnicConfig), false);
+  assert.equal(existsSync(path.join(homeDir, ".remnic", ".migrated-from-engram")), false);
+});
+
 test("rollbackFromEngramMigration reloads systemd after removing migrated unit files", async () => {
   const homeDir = await makeTempHome("remnic-migrate-linux-rollback-");
   const cwd = path.join(homeDir, "repo");
