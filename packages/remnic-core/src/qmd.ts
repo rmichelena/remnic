@@ -20,6 +20,76 @@ export interface QmdClientOptions {
   qmdPath?: string;
   daemonUrl?: string;
   daemonRecheckIntervalMs?: number;
+  qmdSupportedVersion?: string;
+  qmdAutoUpgradeEnabled?: boolean;
+  qmdAutoUpgradeCheckIntervalMs?: number;
+  qmdChunkStrategy?: QmdChunkStrategy;
+  qmdCandidateLimit?: number;
+  qmdQueryRerankEnabled?: boolean;
+  qmdIndexName?: string;
+  qmdForceCpu?: boolean;
+  qmdGpuBackend?: "auto" | "metal" | "cuda" | "vulkan" | "false";
+  qmdEmbedParallelism?: number;
+  qmdEmbedModel?: string;
+  qmdRerankModel?: string;
+  qmdGenerateModel?: string;
+}
+
+export type QmdVersionTuple = [number, number, number];
+export type QmdChunkStrategy = "auto" | "regex";
+export type QmdStructuredSearchType = "lex" | "vec" | "hyde";
+export interface QmdStructuredSearch {
+  type: QmdStructuredSearchType;
+  query: string;
+}
+
+export interface QmdCapabilities {
+  version: string | null;
+  parsedVersion: QmdVersionTuple | null;
+  stableSdk: boolean;
+  unifiedSearch: boolean;
+  getDocumentBody: boolean;
+  maintenanceApi: boolean;
+  legacySkillInstall: boolean;
+  intentHints: boolean;
+  explainTraces: boolean;
+  candidateLimit: boolean;
+  v2McpQueryTool: boolean;
+  structuredSearches: boolean;
+  queryRerankToggle: boolean;
+  chunkStrategy: boolean;
+  qmdBench: boolean;
+  perCollectionModels: boolean;
+  jsonLineNumbers: boolean;
+  editorLinks: boolean;
+  doctor: boolean;
+  versionedSkills: boolean;
+  absoluteSnippetLines: boolean;
+  fullQueryOutput: boolean;
+  forceCpu: boolean;
+  gpuBackendOverride: boolean;
+  embedParallelism: boolean;
+  modelEnvConsistency: boolean;
+  scopedEmbed: boolean;
+  safeStatusDeviceProbe: boolean;
+  mcpIndexSelection: boolean;
+}
+
+export interface QmdVersionStatus {
+  installedVersion: string | null;
+  supportedVersion: string;
+  supported: boolean;
+  newerThanSupported: boolean;
+  upgradeAvailable: boolean;
+  capabilities: QmdCapabilities;
+}
+
+export interface QmdDoctorReport {
+  available: boolean;
+  skipped?: string;
+  report?: unknown;
+  raw?: string;
+  error?: string;
 }
 
 const QMD_TIMEOUT_MS = 30_000;
@@ -34,6 +104,11 @@ const QMD_PROBE_TIMEOUT_MS = 8_000;
 const QMD_UPDATE_BACKOFF_MS = 15 * 60 * 1000; // 15m
 const QMD_EMBED_BACKOFF_MS = 60 * 60 * 1000; // 60m
 const QMD_CLI_WARN_THROTTLE_MS = 15 * 60 * 1000; // 15m
+export const QMD_SUPPORTED_VERSION = "2.5.1";
+const QMD_PACKAGE_NAME = "@tobilu/qmd";
+const QMD_AUTO_UPGRADE_TIMEOUT_MS = 120_000;
+const QMD_AUTO_UPGRADE_CHECK_INTERVAL_MS = 24 * 60 * 60_000;
+const QMD_STRUCTURED_HYDE_MAX_CHARS = 320;
 const QMD_FALLBACK_PATHS = [
   path.join(os.homedir(), ".bun", "bin", "qmd"),
   "/usr/local/bin/qmd",
@@ -52,7 +127,13 @@ type QmdGlobalState = {
   lastUpdateFailByCollectionMs: Record<string, number>;
   lastEmbedByCollectionMs: Record<string, number>;
   lastEmbedFailByCollectionMs: Record<string, number>;
+  lastAutoUpgradeCheckAtMs: number | null;
+  lastAutoUpgradeStatus: string | null;
+  lastAutoUpgradeCheckByTargetMs: Record<string, number>;
+  lastAutoUpgradeStatusByTarget: Record<string, string>;
 };
+
+type QmdRuntimeEnv = Record<string, string | undefined>;
 
 function getGlobalQmdState(): QmdGlobalState {
   const g = globalThis as any;
@@ -68,9 +149,16 @@ function getGlobalQmdState(): QmdGlobalState {
       lastUpdateFailByCollectionMs: {},
       lastEmbedByCollectionMs: {},
       lastEmbedFailByCollectionMs: {},
+      lastAutoUpgradeCheckAtMs: null,
+      lastAutoUpgradeStatus: null,
+      lastAutoUpgradeCheckByTargetMs: {},
+      lastAutoUpgradeStatusByTarget: {},
     } satisfies QmdGlobalState;
   }
-  return g[QMD_GLOBAL_STATE_KEY] as QmdGlobalState;
+  const state = g[QMD_GLOBAL_STATE_KEY] as QmdGlobalState;
+  state.lastAutoUpgradeCheckByTargetMs ??= {};
+  state.lastAutoUpgradeStatusByTarget ??= {};
+  return state;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -148,7 +236,7 @@ function isVectorDimensionMismatchError(err: unknown): boolean {
   );
 }
 
-function parseQmdVersion(version: string | null): [number, number, number] | null {
+export function parseQmdVersion(version: string | null): QmdVersionTuple | null {
   if (!version) return null;
   const match = version.match(/v?(\d{1,10})\.(\d{1,10})\.(\d{1,10})/i);
   if (!match) return null;
@@ -159,16 +247,104 @@ function parseQmdVersion(version: string | null): [number, number, number] | nul
   ];
 }
 
-function versionAtLeast(
-  current: [number, number, number] | null,
-  target: [number, number, number],
-): boolean {
-  if (!current) return false;
+export function parseQmdVersionOutput(stdout: string, stderr: string): string | null {
+  const lines = `${stdout}\n${stderr}`
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (lines.length === 0) return null;
+  const semanticLines = lines.filter((line) => parseQmdVersion(line) !== null);
+  if (semanticLines.length === 0) return lines[0] ?? null;
+  return semanticLines.find((line) => /\bqmd\b/i.test(line)) ?? semanticLines[0] ?? null;
+}
+
+export function compareQmdVersions(
+  left: QmdVersionTuple | null,
+  right: QmdVersionTuple | null,
+): number {
+  if (!left && !right) return 0;
+  if (!left) return -1;
+  if (!right) return 1;
   for (let i = 0; i < 3; i += 1) {
-    if ((current[i] ?? 0) > target[i]) return true;
-    if ((current[i] ?? 0) < target[i]) return false;
+    if ((left[i] ?? 0) > (right[i] ?? 0)) return 1;
+    if ((left[i] ?? 0) < (right[i] ?? 0)) return -1;
   }
-  return true;
+  return 0;
+}
+
+export function versionAtLeast(
+  current: QmdVersionTuple | null,
+  target: QmdVersionTuple,
+): boolean {
+  return compareQmdVersions(current, target) >= 0;
+}
+
+export function resolveQmdCapabilities(version: string | null): QmdCapabilities {
+  const parsedVersion = parseQmdVersion(version);
+  const atLeast = (target: QmdVersionTuple): boolean => versionAtLeast(parsedVersion, target);
+  return {
+    version,
+    parsedVersion,
+    stableSdk: atLeast([2, 0, 0]),
+    unifiedSearch: atLeast([2, 0, 0]),
+    getDocumentBody: atLeast([2, 0, 0]),
+    maintenanceApi: atLeast([2, 0, 0]),
+    legacySkillInstall: atLeast([2, 0, 1]),
+    intentHints: atLeast([1, 1, 5]),
+    explainTraces: atLeast([1, 1, 2]),
+    candidateLimit: atLeast([1, 1, 2]),
+    v2McpQueryTool: atLeast([2, 0, 0]),
+    structuredSearches: atLeast([2, 0, 0]),
+    queryRerankToggle: atLeast([2, 1, 0]),
+    chunkStrategy: atLeast([2, 1, 0]),
+    qmdBench: atLeast([2, 1, 0]),
+    perCollectionModels: atLeast([2, 1, 0]),
+    jsonLineNumbers: atLeast([2, 1, 0]),
+    editorLinks: atLeast([2, 1, 0]),
+    doctor: atLeast([2, 5, 0]),
+    versionedSkills: atLeast([2, 5, 0]),
+    absoluteSnippetLines: atLeast([2, 5, 0]),
+    fullQueryOutput: atLeast([2, 5, 0]),
+    forceCpu: atLeast([2, 5, 0]),
+    gpuBackendOverride: atLeast([2, 5, 0]),
+    embedParallelism: atLeast([2, 5, 0]),
+    modelEnvConsistency: atLeast([2, 5, 0]),
+    scopedEmbed: atLeast([2, 5, 0]),
+    safeStatusDeviceProbe: atLeast([2, 5, 0]),
+    mcpIndexSelection: atLeast([2, 5, 0]),
+  };
+}
+
+export function shouldAutoUpgradeQmd(
+  installedVersion: string | null,
+  supportedVersion: string = QMD_SUPPORTED_VERSION,
+): boolean {
+  const installed = parseQmdVersion(installedVersion);
+  const supported = parseQmdVersion(supportedVersion);
+  if (!installed || !supported) return false;
+  return compareQmdVersions(installed, supported) < 0;
+}
+
+export function getQmdPostInstallProbeTargets(
+  qmdPath: string,
+  qmdPathSource: "configured" | "auto-path" | "auto-fallback",
+): Array<{ qmdPath: string; source: "auto-path" | "auto-fallback" }> {
+  const targets: Array<{ qmdPath: string; source: "auto-path" | "auto-fallback" }> = [
+    { qmdPath: "qmd", source: "auto-path" },
+  ];
+  const normalizedPath = qmdPath.trim();
+  if (
+    qmdPathSource === "auto-fallback" &&
+    normalizedPath.length > 0 &&
+    normalizedPath !== "qmd"
+  ) {
+    targets.push({ qmdPath: normalizedPath, source: "auto-fallback" });
+  }
+  return targets;
+}
+
+function qmdVersionToString(version: QmdVersionTuple): string {
+  return `${version[0]}.${version[1]}.${version[2]}`;
 }
 
 function normalizeSearchOptions(options?: SearchQueryOptions): SearchQueryOptions | undefined {
@@ -181,7 +357,64 @@ function normalizeSearchOptions(options?: SearchQueryOptions): SearchQueryOption
   if (options.explain === true) {
     normalized.explain = true;
   }
+  if (options.rerank === false) {
+    normalized.rerank = false;
+  }
+  if (options.chunkStrategy === "auto" || options.chunkStrategy === "regex") {
+    normalized.chunkStrategy = options.chunkStrategy;
+  }
+  if (
+    typeof options.candidateLimit === "number" &&
+    Number.isFinite(options.candidateLimit) &&
+    options.candidateLimit > 0
+  ) {
+    normalized.candidateLimit = Math.floor(options.candidateLimit);
+  }
+  const structuredSearches = normalizeStructuredSearches(options.structuredSearches);
+  if (structuredSearches.length > 0) {
+    normalized.structuredSearches = structuredSearches;
+  }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeStructuredSearches(value: unknown): QmdStructuredSearch[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: QmdStructuredSearch[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const candidate = entry as { type?: unknown; query?: unknown };
+    const type = candidate.type;
+    const query = typeof candidate.query === "string" ? candidate.query.trim() : "";
+    if ((type === "lex" || type === "vec" || type === "hyde") && query.length > 0) {
+      normalized.push({ type, query });
+    }
+    if (normalized.length >= 10) break;
+  }
+  return normalized;
+}
+
+function buildSyntheticHydeQuery(query: string, intent?: string): string {
+  const base = intent && intent.trim().length > 0
+    ? `A relevant Remnic memory for ${intent.trim()} would answer: ${query.trim()}`
+    : `A relevant Remnic memory would answer: ${query.trim()}`;
+  return base.length > QMD_STRUCTURED_HYDE_MAX_CHARS
+    ? base.slice(0, QMD_STRUCTURED_HYDE_MAX_CHARS)
+    : base;
+}
+
+function buildDefaultStructuredSearches(
+  query: string,
+  options?: SearchQueryOptions,
+): QmdStructuredSearch[] {
+  const explicit = normalizeStructuredSearches(options?.structuredSearches);
+  if (explicit.length > 0) return explicit;
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  return [
+    { type: "lex", query: trimmed },
+    { type: "vec", query: trimmed },
+    { type: "hyde", query: buildSyntheticHydeQuery(trimmed, options?.intent) },
+  ];
 }
 
 function parseExplainScores(value: unknown): number[] | undefined {
@@ -193,10 +426,27 @@ function parseExplainScores(value: unknown): number[] | undefined {
 export function parseQmdExplain(value: unknown): QmdSearchExplain | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
+  const rrf =
+    typeof candidate.rrf === "number"
+      ? candidate.rrf
+      : candidate.rrf && typeof candidate.rrf === "object" &&
+        typeof (candidate.rrf as Record<string, unknown>).totalScore === "number"
+      ? ((candidate.rrf as Record<string, unknown>).totalScore as number)
+      : undefined;
+  const rrfObj =
+    candidate.rrf && typeof candidate.rrf === "object"
+      ? (candidate.rrf as Record<string, unknown>)
+      : undefined;
   const parsed: QmdSearchExplain = {
     ftsScores: parseExplainScores(candidate.ftsScores),
     vectorScores: parseExplainScores(candidate.vectorScores),
-    rrf: typeof candidate.rrf === "number" ? candidate.rrf : undefined,
+    rrf,
+    rrfRank: typeof rrfObj?.rank === "number" ? rrfObj.rank : undefined,
+    rrfPositionScore:
+      typeof rrfObj?.positionScore === "number" ? rrfObj.positionScore : undefined,
+    rrfBaseScore: typeof rrfObj?.baseScore === "number" ? rrfObj.baseScore : undefined,
+    rrfTopRankBonus:
+      typeof rrfObj?.topRankBonus === "number" ? rrfObj.topRankBonus : undefined,
     rerankScore: typeof candidate.rerankScore === "number" ? candidate.rerankScore : undefined,
     blendedScore: typeof candidate.blendedScore === "number" ? candidate.blendedScore : undefined,
   };
@@ -273,6 +523,7 @@ function runQmd(
   timeoutMs: number = QMD_TIMEOUT_MS,
   qmdPath: string = "qmd",
   signal?: AbortSignal,
+  runtimeEnv?: QmdRuntimeEnv,
 ): Promise<{ stdout: string; stderr: string }> {
   // Serialize all qmd calls. This avoids SQLite lock contention when multiple
   // channels/agents trigger QMD operations at nearly the same time.
@@ -281,7 +532,7 @@ function runQmd(
     const maxAttempts = isLikelyWriteCommand(args) ? 3 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        return await runQmdOnce(args, timeoutMs, qmdPath, signal);
+        return await runQmdOnce(args, timeoutMs, qmdPath, signal, runtimeEnv);
       } catch (err) {
         if (isAbortError(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
@@ -300,8 +551,26 @@ function runQmd(
 }
 
 function isLikelyWriteCommand(args: string[]): boolean {
-  const cmd = args[0] ?? "";
+  const cmd = getQmdCommandName(args);
   return cmd === "update" || cmd === "embed" || cmd === "cleanup" || cmd === "collection";
+}
+
+export function getQmdCommandName(args: string[]): string {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? "";
+    if (arg === "--index") {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--index=")) {
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      continue;
+    }
+    return arg;
+  }
+  return "";
 }
 
 function runQmdOnce(
@@ -309,15 +578,39 @@ function runQmdOnce(
   timeoutMs: number,
   qmdPath: string,
   signal?: AbortSignal,
+  runtimeEnv?: QmdRuntimeEnv,
 ): Promise<{ stdout: string; stderr: string }> {
+  const isVersionCheck = args.length === 1 && args[0] === "--version";
+  return runCommandWithTimeout(qmdPath, args, {
+    timeoutMs,
+    signal,
+    env: runtimeEnv,
+    label: `qmd ${args.join(" ")}`,
+    isSuccessExitCode: (code) => code === 0 || (isVersionCheck && code === 1),
+  });
+}
+
+function runCommandWithTimeout(
+  command: string,
+  args: string[],
+  options: {
+    timeoutMs: number;
+    signal?: AbortSignal;
+    env?: QmdRuntimeEnv;
+    label?: string;
+    isSuccessExitCode?: (code: number | null) => boolean;
+  },
+): Promise<{ stdout: string; stderr: string }> {
+  const label = options.label ?? `${command} ${args.join(" ")}`;
+  const isSuccessExitCode = options.isSuccessExitCode ?? ((code: number | null) => code === 0);
   return new Promise((resolve, reject) => {
-    throwIfAborted(signal, `qmd ${args.join(" ")} aborted before spawn`);
-    const child = launchProcess(qmdPath, args, {
-      env: mergeEnv({ NO_COLOR: "1" }),
+    throwIfAborted(options.signal, `${label} aborted before spawn`);
+    const child = launchProcess(command, args, {
+      env: mergeEnv({ NO_COLOR: "1", ...options.env }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (!child.stdout || !child.stderr) {
-      reject(new Error(`qmd ${args.join(" ")} failed to open stdio pipes`));
+      reject(new Error(`${label} failed to open stdio pipes`));
       return;
     }
 
@@ -329,20 +622,20 @@ function runQmdOnce(
       settled = true;
       cleanup();
       child.kill("SIGKILL");
-      reject(new Error(`qmd ${args.join(" ")} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+      reject(new Error(`${label} timed out after ${options.timeoutMs}ms`));
+    }, options.timeoutMs);
     const onAbort = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       cleanup();
       child.kill("SIGKILL");
-      reject(abortError(`qmd ${args.join(" ")} aborted`));
+      reject(abortError(`${label} aborted`));
     };
     const cleanup = () => {
-      signal?.removeEventListener("abort", onAbort);
+      options.signal?.removeEventListener("abort", onAbort);
     };
-    signal?.addEventListener("abort", onAbort, { once: true });
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (data: Buffer) => {
       stdout += data.toString();
@@ -362,18 +655,28 @@ function runQmdOnce(
       settled = true;
       clearTimeout(timer);
       cleanup();
-      // QMD returns exit code 1 for --version (shows usage), but that's ok
-      const isVersionCheck = args.length === 1 && args[0] === "--version";
-      if (code === 0 || (isVersionCheck && code === 1)) {
+      if (isSuccessExitCode(code)) {
         resolve({ stdout, stderr });
       } else {
         reject(
           new Error(
-            `qmd ${args.join(" ")} failed (code ${code}): ${truncateForLog(stderr || stdout)}`,
+            `${label} failed (code ${code}): ${truncateForLog(stderr || stdout)}`,
           ),
         );
       }
     });
+  });
+}
+
+function runProcessCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
+  return runCommandWithTimeout(command, args, {
+    timeoutMs,
+    signal,
   });
 }
 
@@ -398,9 +701,13 @@ class QmdDaemonSession {
     }
   >();
   private readonly qmdPath: string;
+  private readonly runtimeEnv: QmdRuntimeEnv;
+  private readonly indexName?: string;
 
-  constructor(qmdPath: string) {
+  constructor(qmdPath: string, runtimeEnv: QmdRuntimeEnv = {}, indexName?: string) {
     this.qmdPath = qmdPath;
+    this.runtimeEnv = runtimeEnv;
+    this.indexName = indexName?.trim() || undefined;
   }
 
   /** Spawn the qmd mcp child process and perform MCP handshake. */
@@ -422,8 +729,9 @@ class QmdDaemonSession {
           this.cleanup({ killChild: true });
         }
         try {
-          const child = launchProcess(this.qmdPath, ["mcp"], {
-            env: mergeEnv({ NO_COLOR: "1" }),
+          const args = this.indexName ? ["--index", this.indexName, "mcp"] : ["mcp"];
+          const child = launchProcess(this.qmdPath, args, {
+            env: mergeEnv({ NO_COLOR: "1", ...this.runtimeEnv }),
             stdio: ["pipe", "pipe", "pipe"],
           });
           this.child = child;
@@ -727,6 +1035,9 @@ function parseMcpSearchResult(
           : (typeof d.docid === "string" ? d.docid.replace(/^#/, "") : "unknown"),
         snippet: typeof d.snippet === "string" ? d.snippet : "",
         score: typeof d.score === "number" ? d.score : 0,
+        line: typeof d.line === "number" && Number.isFinite(d.line)
+          ? Math.max(1, Math.floor(d.line))
+          : undefined,
         explain: parseQmdExplain(d.explain),
         transport,
       });
@@ -781,6 +1092,9 @@ function parseQmdSearchStdout(
         "unknown",
       snippet: (entry.snippet as string) ?? "",
       score: typeof entry.score === "number" ? entry.score : 0,
+      line: typeof entry.line === "number" && Number.isFinite(entry.line)
+        ? Math.max(1, Math.floor(entry.line))
+        : undefined,
       explain: parseQmdExplain(entry.explain),
       transport,
     }),
@@ -794,16 +1108,41 @@ type SharedDaemonSessionEntry = {
 
 const SHARED_DAEMON_SESSIONS = new Map<string, SharedDaemonSessionEntry>();
 
-function retainSharedDaemonSession(qmdPath: string): QmdDaemonSession {
+function stableRuntimeEnvKey(runtimeEnv: QmdRuntimeEnv): string {
+  return JSON.stringify(
+    Object.keys(runtimeEnv)
+      .sort()
+      .map((key) => [key, runtimeEnv[key]]),
+  );
+}
+
+function recordAutoUpgradeStatus(
+  state: QmdGlobalState,
+  targetKey: string,
+  status: string,
+): void {
+  state.lastAutoUpgradeStatusByTarget[targetKey] = status;
+  state.lastAutoUpgradeStatus = status;
+}
+
+function retainSharedDaemonSession(
+  qmdPath: string,
+  runtimeEnv: QmdRuntimeEnv = {},
+  indexName?: string,
+  cliVersion?: string | null,
+): QmdDaemonSession {
   const normalizedPath = qmdPath.trim() || "qmd";
-  const existing = SHARED_DAEMON_SESSIONS.get(normalizedPath);
+  const normalizedIndex = indexName?.trim() || "";
+  const normalizedVersion = cliVersion?.trim() || "";
+  const sessionKey = `${normalizedPath}\0${normalizedIndex}\0${normalizedVersion}\0${stableRuntimeEnvKey(runtimeEnv)}`;
+  const existing = SHARED_DAEMON_SESSIONS.get(sessionKey);
   if (existing) {
     existing.refs += 1;
     return existing.session;
   }
 
-  const session = new QmdDaemonSession(normalizedPath);
-  SHARED_DAEMON_SESSIONS.set(normalizedPath, {
+  const session = new QmdDaemonSession(normalizedPath, runtimeEnv, normalizedIndex || undefined);
+  SHARED_DAEMON_SESSIONS.set(sessionKey, {
     refs: 1,
     session,
   });
@@ -854,9 +1193,18 @@ export class QmdClient implements SearchBackend {
   private readonly updateMinIntervalMs: number;
   private readonly slowLog?: { enabled: boolean; thresholdMs: number };
   private readonly configuredQmdPath?: string;
+  private readonly qmdSupportedVersion: string;
+  private readonly qmdAutoUpgradeEnabled: boolean;
+  private readonly qmdAutoUpgradeCheckIntervalMs: number;
+  private readonly qmdChunkStrategy?: QmdChunkStrategy;
+  private readonly qmdCandidateLimit?: number;
+  private readonly qmdQueryRerankEnabled: boolean;
+  private readonly qmdIndexName?: string;
+  private readonly qmdRuntimeEnv: QmdRuntimeEnv;
   private qmdPathSource: "auto-path" | "auto-fallback" | "configured" = "auto-path";
   private cliVersion: string | null = null;
   private lastCliProbeError: string | null = null;
+  private qmdCapabilities: QmdCapabilities = resolveQmdCapabilities(null);
 
   // Daemon mode fields
   private daemonSession: QmdDaemonSession | null = null;
@@ -878,6 +1226,28 @@ export class QmdClient implements SearchBackend {
     this.updateTimeoutMs = opts?.updateTimeoutMs ?? 120_000;
     this.updateMinIntervalMs = Math.max(0, opts?.updateMinIntervalMs ?? 15 * 60_000);
     this.configuredQmdPath = opts?.qmdPath?.trim() ? opts.qmdPath.trim() : undefined;
+    this.qmdSupportedVersion =
+      parseQmdVersion(opts?.qmdSupportedVersion ?? null) !== null
+        ? (opts?.qmdSupportedVersion ?? QMD_SUPPORTED_VERSION)
+        : QMD_SUPPORTED_VERSION;
+    this.qmdAutoUpgradeEnabled = opts?.qmdAutoUpgradeEnabled === true;
+    this.qmdAutoUpgradeCheckIntervalMs = Math.max(
+      60_000,
+      Math.floor(opts?.qmdAutoUpgradeCheckIntervalMs ?? QMD_AUTO_UPGRADE_CHECK_INTERVAL_MS),
+    );
+    this.qmdChunkStrategy =
+      opts?.qmdChunkStrategy === "auto" || opts?.qmdChunkStrategy === "regex"
+        ? opts.qmdChunkStrategy
+        : undefined;
+    this.qmdCandidateLimit =
+      typeof opts?.qmdCandidateLimit === "number" &&
+      Number.isFinite(opts.qmdCandidateLimit) &&
+      opts.qmdCandidateLimit > 0
+        ? Math.floor(opts.qmdCandidateLimit)
+        : undefined;
+    this.qmdQueryRerankEnabled = opts?.qmdQueryRerankEnabled !== false;
+    this.qmdIndexName = opts?.qmdIndexName?.trim() || undefined;
+    this.qmdRuntimeEnv = this.buildRuntimeEnv(opts);
     if (this.configuredQmdPath) {
       this.qmdPath = this.configuredQmdPath;
       this.qmdPathSource = "configured";
@@ -887,6 +1257,33 @@ export class QmdClient implements SearchBackend {
   }
 
   private qmdPath: string = "qmd";
+
+  private buildRuntimeEnv(opts?: QmdClientOptions): QmdRuntimeEnv {
+    const env: QmdRuntimeEnv = {};
+    if (opts?.qmdForceCpu === true) {
+      env.QMD_FORCE_CPU = "1";
+    }
+    if (opts?.qmdGpuBackend) {
+      env.QMD_LLAMA_GPU = opts.qmdGpuBackend;
+    }
+    if (
+      typeof opts?.qmdEmbedParallelism === "number" &&
+      Number.isFinite(opts.qmdEmbedParallelism) &&
+      opts.qmdEmbedParallelism > 0
+    ) {
+      env.QMD_EMBED_PARALLELISM = String(Math.min(8, Math.max(1, Math.floor(opts.qmdEmbedParallelism))));
+    }
+    if (opts?.qmdEmbedModel?.trim()) {
+      env.QMD_EMBED_MODEL = opts.qmdEmbedModel.trim();
+    }
+    if (opts?.qmdRerankModel?.trim()) {
+      env.QMD_RERANK_MODEL = opts.qmdRerankModel.trim();
+    }
+    if (opts?.qmdGenerateModel?.trim()) {
+      env.QMD_GENERATE_MODEL = opts.qmdGenerateModel.trim();
+    }
+    return env;
+  }
 
   async probe(): Promise<boolean> {
     const cliOk = await this.probeCli();
@@ -899,10 +1296,20 @@ export class QmdClient implements SearchBackend {
   private async probeDaemon(): Promise<boolean> {
     this.lastDaemonCheckAtMs = Date.now();
     const normalizedPath = this.qmdPath.trim() || "qmd";
-    if (!this.daemonSession || this.daemonSessionPath !== normalizedPath) {
+    const daemonIndexName =
+      this.qmdIndexName && this.qmdCapabilities.mcpIndexSelection
+        ? this.qmdIndexName
+        : undefined;
+    const daemonSessionPath = `${normalizedPath}\0${daemonIndexName ?? ""}\0${this.cliVersion ?? ""}`;
+    if (!this.daemonSession || this.daemonSessionPath !== daemonSessionPath) {
       await releaseSharedDaemonSession(this.daemonSession);
-      this.daemonSession = retainSharedDaemonSession(normalizedPath);
-      this.daemonSessionPath = normalizedPath;
+      this.daemonSession = retainSharedDaemonSession(
+        normalizedPath,
+        this.qmdRuntimeEnv,
+        daemonIndexName,
+        this.cliVersion,
+      );
+      this.daemonSessionPath = daemonSessionPath;
     }
     try {
       // Race start() against a short window: if the session is already initialized
@@ -934,28 +1341,27 @@ export class QmdClient implements SearchBackend {
   }
 
   private async probeCli(): Promise<boolean> {
-    const parseVersion = (stdout: string, stderr: string): string | null => {
-      const lines = `${stdout}\n${stderr}`
-        .split("\n")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-      if (lines.length === 0) return null;
-      const semanticLines = lines.filter((line) => parseQmdVersion(line) !== null);
-      if (semanticLines.length === 0) return lines[0] ?? null;
-      return semanticLines.find((line) => /\bqmd\b/i.test(line)) ?? semanticLines[0] ?? null;
-    };
     const markProbeFailure = (err: unknown): void => {
       this.lastCliProbeError = err instanceof Error ? err.message : String(err);
+    };
+    const recordProbeSuccess = async (
+      result: { stdout: string; stderr: string },
+      qmdPath: string,
+      source: typeof this.qmdPathSource,
+    ): Promise<void> => {
+      this.available = true;
+      this.qmdPath = qmdPath;
+      this.qmdPathSource = source;
+      this.cliVersion = parseQmdVersionOutput(result.stdout, result.stderr);
+      this.qmdCapabilities = resolveQmdCapabilities(this.cliVersion);
+      this.lastCliProbeError = null;
+      await this.maybeAutoUpgradeQmd();
     };
 
     if (this.configuredQmdPath) {
       try {
-        const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, this.configuredQmdPath);
-        this.available = true;
-        this.qmdPath = this.configuredQmdPath;
-        this.qmdPathSource = "configured";
-        this.cliVersion = parseVersion(result.stdout, result.stderr);
-        this.lastCliProbeError = null;
+        const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, this.configuredQmdPath, undefined, this.qmdRuntimeEnv);
+        await recordProbeSuccess(result, this.configuredQmdPath, "configured");
         return true;
       } catch (err) {
         markProbeFailure(err);
@@ -969,24 +1375,16 @@ export class QmdClient implements SearchBackend {
 
     // Try PATH first
     try {
-      const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, "qmd");
-      this.available = true;
-      this.qmdPath = "qmd";
-      this.qmdPathSource = "auto-path";
-      this.cliVersion = parseVersion(result.stdout, result.stderr);
-      this.lastCliProbeError = null;
+      const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, "qmd", undefined, this.qmdRuntimeEnv);
+      await recordProbeSuccess(result, "qmd", "auto-path");
       return true;
     } catch (err) {
       markProbeFailure(err);
       // Try fallback paths
       for (const fallbackPath of QMD_FALLBACK_PATHS) {
         try {
-          const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, fallbackPath);
-          this.available = true;
-          this.qmdPath = fallbackPath;
-          this.qmdPathSource = "auto-fallback";
-          this.cliVersion = parseVersion(result.stdout, result.stderr);
-          this.lastCliProbeError = null;
+          const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, fallbackPath, undefined, this.qmdRuntimeEnv);
+          await recordProbeSuccess(result, fallbackPath, "auto-fallback");
           log.info(`QMD: found at ${fallbackPath}`);
           return true;
         } catch (fallbackErr) {
@@ -997,6 +1395,128 @@ export class QmdClient implements SearchBackend {
       this.available = false;
       return false;
     }
+  }
+
+  private async maybeAutoUpgradeQmd(): Promise<void> {
+    if (!this.qmdAutoUpgradeEnabled) return;
+    const state = getGlobalQmdState();
+    const targetKey = this.autoUpgradeTargetKey();
+    const now = Date.now();
+    const lastCheckAtMs = state.lastAutoUpgradeCheckByTargetMs[targetKey];
+    if (
+      Number.isFinite(lastCheckAtMs) &&
+      now - lastCheckAtMs < this.qmdAutoUpgradeCheckIntervalMs
+    ) {
+      return;
+    }
+    state.lastAutoUpgradeCheckByTargetMs[targetKey] = now;
+    state.lastAutoUpgradeCheckAtMs = now;
+
+    const installed = parseQmdVersion(this.cliVersion);
+    const supported = parseQmdVersion(this.qmdSupportedVersion);
+    if (!installed || !supported) {
+      const status = `skipped: unable to parse installed=${this.cliVersion ?? "unknown"} supported=${this.qmdSupportedVersion}`;
+      recordAutoUpgradeStatus(state, targetKey, status);
+      log.warn(`QMD auto-upgrade skipped: ${status}`);
+      return;
+    }
+    if (compareQmdVersions(installed, supported) >= 0) {
+      recordAutoUpgradeStatus(
+        state,
+        targetKey,
+        `current: installed=${qmdVersionToString(installed)} supported=${qmdVersionToString(supported)}`,
+      );
+      return;
+    }
+    if (this.qmdPathSource === "configured") {
+      const status = `skipped: configured qmdPath=${this.qmdPath}`;
+      recordAutoUpgradeStatus(state, targetKey, status);
+      log.warn(
+        `QMD auto-upgrade skipped because qmdPath is explicitly configured (${this.qmdPath}); install ${QMD_PACKAGE_NAME}@${this.qmdSupportedVersion} manually for that path.`,
+      );
+      return;
+    }
+
+    const packageSpec = `${QMD_PACKAGE_NAME}@${this.qmdSupportedVersion}`;
+    try {
+      log.warn(
+        `QMD auto-upgrade: installed=${qmdVersionToString(installed)} supported=${qmdVersionToString(supported)}; running npm install -g ${packageSpec}`,
+      );
+      await runProcessCommand(
+        "npm",
+        ["install", "-g", packageSpec],
+        QMD_AUTO_UPGRADE_TIMEOUT_MS,
+      );
+      const postInstall = await this.probePostInstallQmdVersion(supported);
+      this.qmdPath = postInstall.qmdPath;
+      this.qmdPathSource = postInstall.source;
+      this.cliVersion = postInstall.version;
+      this.qmdCapabilities = resolveQmdCapabilities(this.cliVersion);
+      await releaseSharedDaemonSession(this.daemonSession);
+      this.daemonSession = null;
+      this.daemonSessionPath = null;
+      this.daemonAvailable = false;
+      this.daemonTransientFailures = 0;
+      const upgraded = parseQmdVersion(this.cliVersion);
+      if (!upgraded || compareQmdVersions(upgraded, supported) < 0) {
+        const status = `failed: post-install version=${this.cliVersion ?? "unknown"} target=${this.qmdSupportedVersion}`;
+        recordAutoUpgradeStatus(state, targetKey, status);
+        log.warn(`QMD auto-upgrade did not reach supported version: ${status}`);
+        return;
+      }
+      recordAutoUpgradeStatus(
+        state,
+        targetKey,
+        `upgraded: installed=${this.cliVersion ?? "unknown"} target=${this.qmdSupportedVersion}`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      recordAutoUpgradeStatus(state, targetKey, `failed: ${msg}`);
+      log.warn(`QMD auto-upgrade failed: ${msg}`);
+    }
+  }
+
+  private async probePostInstallQmdVersion(supported: QmdVersionTuple): Promise<{
+    qmdPath: string;
+    source: "auto-path" | "auto-fallback";
+    version: string | null;
+  }> {
+    let lastErr: unknown;
+    let lastResult: { qmdPath: string; source: "auto-path" | "auto-fallback"; version: string | null } | null = null;
+    for (const candidate of getQmdPostInstallProbeTargets(this.qmdPath, this.qmdPathSource)) {
+      try {
+        const result = await runQmd(
+          ["--version"],
+          QMD_PROBE_TIMEOUT_MS,
+          candidate.qmdPath,
+          undefined,
+          this.qmdRuntimeEnv,
+        );
+        const postInstall = {
+          ...candidate,
+          version: parseQmdVersionOutput(result.stdout, result.stderr),
+        };
+        lastResult = postInstall;
+        const parsed = parseQmdVersion(postInstall.version);
+        if (parsed && compareQmdVersions(parsed, supported) >= 0) {
+          return postInstall;
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastResult) return lastResult;
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  private autoUpgradeTargetKey(): string {
+    return JSON.stringify({
+      path: this.qmdPath.trim() || "qmd",
+      source: this.qmdPathSource,
+      index: this.qmdIndexName ?? "",
+      supportedVersion: this.qmdSupportedVersion,
+      runtimeEnv: stableRuntimeEnvKey(this.qmdRuntimeEnv),
+    });
   }
 
   private logCliProbeWarning(message: string): void {
@@ -1039,8 +1559,58 @@ export class QmdClient implements SearchBackend {
   debugStatus(): string {
     const cliPath = this.available ? this.qmdPath : (this.configuredQmdPath ?? "unavailable");
     const cliVersion = this.cliVersion ?? "unknown";
+    const status = this.getVersionStatus();
+    const enabledFeatures = Object.entries(status.capabilities)
+      .filter(([key, value]) => key !== "version" && key !== "parsedVersion" && value === true)
+      .map(([key]) => key)
+      .join(",");
+    const globalState = getGlobalQmdState();
+    const autoUpgradeStatus =
+      globalState.lastAutoUpgradeStatusByTarget[this.autoUpgradeTargetKey()] ??
+      globalState.lastAutoUpgradeStatus;
     const probeError = this.lastCliProbeError ? ` cliProbeError=${this.lastCliProbeError}` : "";
-    return `cli=${this.available} daemon=${this.daemonAvailable} session=${!!this.daemonSession} cliPath=${cliPath} cliPathSource=${this.qmdPathSource} cliVersion=${cliVersion}${probeError}`;
+    return `cli=${this.available} daemon=${this.daemonAvailable} session=${!!this.daemonSession} cliPath=${cliPath} cliPathSource=${this.qmdPathSource} cliVersion=${cliVersion} supportedVersion=${status.supportedVersion} upgradeAvailable=${status.upgradeAvailable} qmdFeatures=${enabledFeatures || "none"}${autoUpgradeStatus ? ` autoUpgrade=${autoUpgradeStatus}` : ""}${probeError}`;
+  }
+
+  getVersionStatus(): QmdVersionStatus {
+    const installed = parseQmdVersion(this.cliVersion);
+    const supported = parseQmdVersion(this.qmdSupportedVersion) ?? parseQmdVersion(QMD_SUPPORTED_VERSION)!;
+    const cmp = compareQmdVersions(installed, supported);
+    return {
+      installedVersion: this.cliVersion,
+      supportedVersion: qmdVersionToString(supported),
+      supported: installed !== null && cmp >= 0,
+      newerThanSupported: installed !== null && cmp > 0,
+      upgradeAvailable: installed !== null && cmp < 0,
+      capabilities: this.qmdCapabilities,
+    };
+  }
+
+  async doctor(): Promise<QmdDoctorReport> {
+    if (!this.isAvailable()) {
+      return { available: false, skipped: "qmd unavailable" };
+    }
+    if (!this.qmdCapabilities.doctor) {
+      return {
+        available: false,
+        skipped: `qmd doctor requires qmd >=2.5.0; installed ${this.cliVersion ?? "unknown"}`,
+      };
+    }
+    try {
+      const { stdout } = await this.runQmdCommand(["doctor", "--json"], QMD_TIMEOUT_MS);
+      const trimmed = stdout.trim();
+      if (!trimmed) return { available: true, report: null };
+      try {
+        return { available: true, report: JSON.parse(trimmed) };
+      } catch {
+        return { available: true, raw: trimmed };
+      }
+    } catch (err) {
+      return {
+        available: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   isDaemonMode(): boolean {
@@ -1092,15 +1662,31 @@ export class QmdClient implements SearchBackend {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<{ stdout: string; stderr: string }> {
-    return runQmd(args, timeoutMs, this.qmdPath, signal);
+    const commandArgs =
+      this.qmdIndexName && this.qmdCapabilities.mcpIndexSelection
+        ? ["--index", this.qmdIndexName, ...args]
+        : args;
+    return runQmd(commandArgs, timeoutMs, this.qmdPath, signal, this.qmdRuntimeEnv);
   }
 
   private supportsIntentHints(): boolean {
-    return versionAtLeast(parseQmdVersion(this.cliVersion), [1, 1, 5]);
+    return this.qmdCapabilities.intentHints;
   }
 
   private supportsExplainTraces(): boolean {
-    return versionAtLeast(parseQmdVersion(this.cliVersion), [1, 1, 2]);
+    return this.qmdCapabilities.explainTraces;
+  }
+
+  private supportsCandidateLimit(): boolean {
+    return this.qmdCapabilities.candidateLimit;
+  }
+
+  private supportsRerankToggle(): boolean {
+    return this.qmdCapabilities.queryRerankToggle;
+  }
+
+  private supportsChunkStrategy(): boolean {
+    return this.qmdCapabilities.chunkStrategy;
   }
 
   /**
@@ -1111,24 +1697,100 @@ export class QmdClient implements SearchBackend {
    * - `collection` (singular) → `collections` (plural array)
    */
   private isQmdV2(): boolean {
-    return versionAtLeast(parseQmdVersion(this.cliVersion), [2, 0, 0]);
+    return this.qmdCapabilities.v2McpQueryTool;
   }
 
   private resolveSearchOptions(options?: SearchQueryOptions): SearchQueryOptions | undefined {
     const normalized = normalizeSearchOptions(options);
-    if (!normalized) return undefined;
-    const resolved: SearchQueryOptions = {};
-    if (normalized.intent && this.supportsIntentHints()) {
-      resolved.intent = normalized.intent;
+    const withDefaults: SearchQueryOptions = { ...(normalized ?? {}) };
+    if (this.qmdCandidateLimit !== undefined && withDefaults.candidateLimit === undefined) {
+      withDefaults.candidateLimit = this.qmdCandidateLimit;
     }
-    if (normalized.explain === true && this.supportsExplainTraces()) {
+    if (!this.qmdQueryRerankEnabled && withDefaults.rerank === undefined) {
+      withDefaults.rerank = false;
+    }
+    if (this.qmdChunkStrategy && withDefaults.chunkStrategy === undefined) {
+      withDefaults.chunkStrategy = this.qmdChunkStrategy;
+    }
+    const resolved: SearchQueryOptions = {};
+    if (withDefaults.intent && this.supportsIntentHints()) {
+      resolved.intent = withDefaults.intent;
+    }
+    if (withDefaults.explain === true && this.supportsExplainTraces()) {
       resolved.explain = true;
+    }
+    if (
+      typeof withDefaults.candidateLimit === "number" &&
+      withDefaults.candidateLimit > 0 &&
+      this.supportsCandidateLimit()
+    ) {
+      resolved.candidateLimit = Math.floor(withDefaults.candidateLimit);
+    }
+    if (withDefaults.rerank === false && this.supportsRerankToggle()) {
+      resolved.rerank = false;
+    }
+    if (withDefaults.chunkStrategy && this.supportsChunkStrategy()) {
+      resolved.chunkStrategy = withDefaults.chunkStrategy;
+    }
+    if (this.qmdCapabilities.structuredSearches) {
+      const structuredSearches = normalizeStructuredSearches(withDefaults.structuredSearches);
+      if (structuredSearches.length > 0) {
+        resolved.structuredSearches = structuredSearches;
+      }
     }
     return Object.keys(resolved).length > 0 ? resolved : undefined;
   }
 
   resolveSupportedSearchOptions(options?: SearchQueryOptions): SearchQueryOptions | undefined {
     return this.resolveSearchOptions(options);
+  }
+
+  private addResolvedSearchOptionsToArgs(args: string[], options?: SearchQueryOptions): void {
+    if (options?.intent) {
+      args.push("--intent", options.intent);
+    }
+    if (options?.explain === true) {
+      args.push("--explain");
+    }
+    if (typeof options?.candidateLimit === "number" && options.candidateLimit > 0) {
+      args.push("--candidate-limit", String(Math.floor(options.candidateLimit)));
+    }
+    if (options?.rerank === false) {
+      args.push("--no-rerank");
+    }
+    if (options?.chunkStrategy) {
+      args.push("--chunk-strategy", options.chunkStrategy);
+    }
+  }
+
+  private addResolvedSearchOptionsToMcpArgs(
+    args: Record<string, unknown>,
+    options?: SearchQueryOptions,
+  ): void {
+    if (options?.intent) {
+      args.intent = options.intent;
+    }
+    if (options?.explain === true) {
+      args.explain = true;
+    }
+    if (typeof options?.candidateLimit === "number" && options.candidateLimit > 0) {
+      args.candidateLimit = Math.floor(options.candidateLimit);
+    }
+    if (options?.rerank === false) {
+      args.rerank = false;
+    }
+    // QMD 2.5.1 MCP query does not expose chunkStrategy even though CLI/SDK
+    // search and embed do. Keep chunk strategy on CLI/embed paths only.
+  }
+
+  private buildEmbedArgs(collection: string, force = false): string[] {
+    const args = ["embed"];
+    if (force) args.push("-f");
+    args.push("-c", collection);
+    if (this.qmdChunkStrategy && this.qmdCapabilities.chunkStrategy) {
+      args.push("--chunk-strategy", this.qmdChunkStrategy);
+    }
+    return args;
   }
 
   async search(
@@ -1213,6 +1875,7 @@ export class QmdClient implements SearchBackend {
     if (!trimmed) return [];
 
     const n = maxResults ?? 6;
+    const searchOptions = this.resolveSearchOptions();
 
     // Try daemon first
     await this.maybeProbeDaemon();
@@ -1220,7 +1883,7 @@ export class QmdClient implements SearchBackend {
       // Global search: no collection filter
       let results: QmdSearchResult[] | null;
       try {
-        results = await this.searchViaDaemon(trimmed, undefined, n, undefined, execution?.signal);
+        results = await this.searchViaDaemon(trimmed, undefined, n, searchOptions, execution?.signal);
       } catch (err) {
         if (isCallerCancellation(err, execution?.signal)) {
           throw isAbortError(err) ? err : abortError("QMD daemon global search aborted");
@@ -1245,7 +1908,7 @@ export class QmdClient implements SearchBackend {
     }
 
     // Subprocess fallback (only reached when daemon is unavailable and not loading)
-    return this.searchGlobalViaSubprocess(trimmed, n, execution?.signal);
+    return this.searchGlobalViaSubprocess(trimmed, n, searchOptions, execution?.signal);
   }
 
   /**
@@ -1391,32 +2054,22 @@ export class QmdClient implements SearchBackend {
       let args: Record<string, unknown>;
       if (v2) {
         // QMD v2: query tool expects { searches: [...], collections?: [...] }
-        // A plain query without type prefix uses LLM auto-expansion on the daemon side
-        const searches: Array<{ type: string; query: string }> = [{ type: "lex", query }];
-        // Add a vec sub-query for hybrid recall (mirrors v1 behavior)
-        searches.push({ type: "vec", query });
+        // The MCP tool is structured-only in 2.x; use lex+vec+hyde by default
+        // to exercise QMD's RRF + rerank path and let callers override when
+        // they have stronger query-document structure.
+        const searches = buildDefaultStructuredSearches(query, options);
         args = { searches, limit: maxResults };
         if (collection) {
           args.collections = [collection];
         }
-        if (options?.intent) {
-          args.intent = options.intent;
-        }
-        if (options?.explain === true) {
-          args.explain = true;
-        }
+        this.addResolvedSearchOptionsToMcpArgs(args, options);
       } else {
         // QMD v1: query tool accepts { query, collection?, limit }
         args = { query, limit: maxResults };
         if (collection) {
           args.collection = collection;
         }
-        if (options?.intent) {
-          args.intent = options.intent;
-        }
-        if (options?.explain === true) {
-          args.explain = true;
-        }
+        this.addResolvedSearchOptionsToMcpArgs(args, options);
       }
 
       const result = await this.daemonSession.callTool("query", args, QMD_DAEMON_TIMEOUT_MS, signal);
@@ -1568,18 +2221,8 @@ export class QmdClient implements SearchBackend {
     const startedAtMs = Date.now();
     try {
       const args = ["query", query, "-c", collection, "--json", "-n", String(maxResults)];
-      if (options?.intent) {
-        args.push("--intent", options.intent);
-      }
-      if (options?.explain === true) {
-        args.push("--explain");
-      }
-      const { stdout } = await runQmd(
-        args,
-        QMD_TIMEOUT_MS,
-        this.qmdPath,
-        signal,
-      );
+      this.addResolvedSearchOptionsToArgs(args, options);
+      const { stdout } = await this.runQmdCommand(args, QMD_TIMEOUT_MS, signal);
       const durationMs = Date.now() - startedAtMs;
       if (this.slowLog?.enabled && durationMs >= this.slowLog.thresholdMs) {
         log.warn(
@@ -1606,10 +2249,9 @@ export class QmdClient implements SearchBackend {
     if (this.available === false) return [];
     const startedAtMs = Date.now();
     try {
-      const { stdout } = await runQmd(
+      const { stdout } = await this.runQmdCommand(
         ["search", query, "-c", collection, "--json", "-n", String(maxResults)],
         QMD_TIMEOUT_MS,
-        this.qmdPath,
         signal,
       );
       log.debug(`QMD bm25: ${Date.now() - startedAtMs}ms`);
@@ -1632,10 +2274,9 @@ export class QmdClient implements SearchBackend {
     if (this.available === false) return [];
     const startedAtMs = Date.now();
     try {
-      const { stdout } = await runQmd(
+      const { stdout } = await this.runQmdCommand(
         ["vsearch", query, "-c", collection, "--json", "-n", String(maxResults)],
         QMD_TIMEOUT_MS,
-        this.qmdPath,
         signal,
       );
       log.debug(`QMD vsearch: ${Date.now() - startedAtMs}ms`);
@@ -1652,18 +2293,16 @@ export class QmdClient implements SearchBackend {
   private async searchGlobalViaSubprocess(
     query: string,
     maxResults: number,
+    options?: SearchQueryOptions,
     signal?: AbortSignal,
   ): Promise<QmdSearchResult[]> {
     if (this.available === false) return [];
 
     const startedAtMs = Date.now();
     try {
-      const { stdout } = await runQmd(
-        ["query", query, "--json", "-n", String(maxResults)],
-        QMD_TIMEOUT_MS,
-        this.qmdPath,
-        signal,
-      );
+      const args = ["query", query, "--json", "-n", String(maxResults)];
+      this.addResolvedSearchOptionsToArgs(args, options);
+      const { stdout } = await this.runQmdCommand(args, QMD_TIMEOUT_MS, signal);
       const durationMs = Date.now() - startedAtMs;
       if (this.slowLog?.enabled && durationMs >= this.slowLog.thresholdMs) {
         log.warn(
@@ -1854,7 +2493,7 @@ export class QmdClient implements SearchBackend {
     }
     try {
       const startedAtMs = Date.now();
-      await this.runQmdCommand(["embed", "-c", this.collection], 300_000);
+      await this.runQmdCommand(this.buildEmbedArgs(this.collection), 300_000);
       const durationMs = Date.now() - startedAtMs;
       if (this.slowLog?.enabled && durationMs >= this.slowLog.thresholdMs) {
         log.warn(`SLOW QMD embed: durationMs=${durationMs}`);
@@ -1865,7 +2504,7 @@ export class QmdClient implements SearchBackend {
       if (isVectorDimensionMismatchError(err)) {
         try {
           log.warn("QMD embed hit a vector dimension mismatch; retrying with force re-embed");
-          await this.runQmdCommand(["embed", "-f", "-c", this.collection], 300_000);
+          await this.runQmdCommand(this.buildEmbedArgs(this.collection, true), 300_000);
           globalState.lastGlobalEmbedRunAtMs = Date.now();
           this.lastEmbedFailAtMs = null;
           globalState.lastGlobalEmbedFailAtMs = null;
@@ -1914,7 +2553,7 @@ export class QmdClient implements SearchBackend {
       return;
     }
     try {
-      await this.runQmdCommand(["embed", "-c", name], 300_000);
+      await this.runQmdCommand(this.buildEmbedArgs(name), 300_000);
       const at = Date.now();
       globalState.lastEmbedByCollectionMs[name] = at;
       globalState.lastGlobalEmbedRunAtMs = at;
@@ -1922,7 +2561,7 @@ export class QmdClient implements SearchBackend {
       if (isVectorDimensionMismatchError(err)) {
         try {
           log.warn(`QMD embed for collection ${name} hit a vector dimension mismatch; retrying with force re-embed`);
-          await this.runQmdCommand(["embed", "-f", "-c", name], 300_000);
+          await this.runQmdCommand(this.buildEmbedArgs(name, true), 300_000);
           const recoveredAt = Date.now();
           globalState.lastEmbedByCollectionMs[name] = recoveredAt;
           globalState.lastGlobalEmbedRunAtMs = recoveredAt;
@@ -1948,11 +2587,7 @@ export class QmdClient implements SearchBackend {
     // If only daemon is available (no CLI), skip collection check
     if (this.available === false) return "skipped";
     try {
-      const { stdout } = await runQmd(
-        ["collection", "list"],
-        QMD_TIMEOUT_MS,
-        this.qmdPath,
-      );
+      const { stdout } = await this.runQmdCommand(["collection", "list"], QMD_TIMEOUT_MS);
       // Parse text output: "openclaw-engram (qmd://openclaw-engram/)"
       const collectionRegex = new RegExp(
         `^${this.collection}\\s+\\(qmd://`,

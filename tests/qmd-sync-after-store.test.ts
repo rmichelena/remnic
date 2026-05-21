@@ -38,8 +38,14 @@ test("QmdClient.update() passes collection flag to qmd subprocess", async () => 
   // embed() must pass -c collection
   assert.match(
     qmdSource,
-    /runQmd(?:Command)?\(\["embed",\s*"-c",\s*this\.collection\]/,
+    /runQmd(?:Command)?\(this\.buildEmbedArgs\(this\.collection\)/,
     "embed() should pass -c this.collection to scope embedding to the remnic collection",
+  );
+
+  assert.match(
+    qmdSource,
+    /private buildEmbedArgs\(collection: string,\s*force = false\): string\[\]\s*\{\s*const args = \["embed"\];[\s\S]*?args\.push\("-c",\s*collection\);/,
+    "buildEmbedArgs() should pass -c collection to scope embedding to the target collection",
   );
 });
 

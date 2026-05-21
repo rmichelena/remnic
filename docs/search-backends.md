@@ -19,10 +19,13 @@ QMD provides the highest quality retrieval through hybrid BM25 + vector + LLM re
 
 ### Setup
 
-Install QMD:
+Install QMD. Remnic currently supports QMD `2.5.1` and detects the installed
+version with `qmd --version` at runtime:
 
 ```bash
-bun install -g github:tobi/qmd
+npm install -g @tobilu/qmd@2.5.1
+# or: bun install -g @tobilu/qmd@2.5.1
+qmd --version
 ```
 
 Add your memory directory to `~/.config/qmd/index.yml`:
@@ -47,11 +50,39 @@ qmd update && qmd embed
   "qmdEnabled": true,
   "qmdCollection": "openclaw-engram",
   "qmdMaxResults": 8,
+  "qmdSupportedVersion": "2.5.1",
+  "qmdAutoUpgradeEnabled": false, // opt-in: npm install -g @tobilu/qmd@2.5.1
+  "qmdChunkStrategy": "auto",
+  "qmdIndexName": "remnic",
+  "qmdForceCpu": false,
   "qmdDaemonEnabled": true,      // Keep the shared MCP session warm for fast queries
   "qmdIntentHintsEnabled": false,
   "qmdExplainEnabled": false
 }
 ```
+
+When QMD `2.5.1` is installed, Remnic uses the newer capability set when
+available: `qmd doctor` diagnostics, version-matched skill metadata, structured
+MCP `lex`/`vec`/`hyde` searches, candidate-limit forwarding, rerank toggles,
+AST-aware chunking for CLI/embed paths, scoped collection embedding, model/env
+overrides (`QMD_EMBED_MODEL`, `QMD_RERANK_MODEL`, `QMD_GENERATE_MODEL`,
+`QMD_FORCE_CPU`, `QMD_LLAMA_GPU`, `QMD_EMBED_PARALLELISM`), named index selection
+via `qmdIndexName`, and absolute snippet line numbers. Older QMD installs
+continue to work with unsupported flags omitted.
+
+Auto-upgrade is intentionally disabled by default. Set
+`qmdAutoUpgradeEnabled: true` to let Remnic upgrade PATH/fallback QMD installs to
+`qmdSupportedVersion`. Remnic does not auto-upgrade an explicitly configured
+`qmdPath`; install the supported package manually for that path.
+
+QMD version coverage:
+
+| QMD version | Remnic behavior |
+|-------------|-----------------|
+| `2.0.0` | Uses the v2 MCP `query` tool shape and unified search semantics; legacy `search`/`vsearch` daemon tools are avoided. |
+| `2.0.1` | Detects the skill-install generation, but leaves user/global agent skill installation explicit. |
+| `2.1.0` | Enables AST chunk strategy on CLI/embed paths, rerank toggles, candidate limits, per-collection model config compatibility, and JSON line capture. |
+| `2.5.1` | Enables doctor/status diagnostics, version-matched skills, structured MCP `lex`/`vec`/`hyde` searches, absolute snippet lines, scoped embed behavior, and QMD model/GPU env controls. |
 
 ### QMD Daemon Mode
 
@@ -66,6 +97,12 @@ Engram automatically prefers the shared MCP session when available and falls bac
 | `qmdDaemonRecheckIntervalMs` | `60000` | Re-probe interval after failure |
 | `qmdIntentHintsEnabled` | `false` | Forward inferred recall intent into QMD unified search when supported |
 | `qmdExplainEnabled` | `false` | Capture QMD explain traces into `memory_qmd_debug` snapshots |
+| `qmdSupportedVersion` | `2.5.1` | Highest QMD version this Remnic build will auto-install |
+| `qmdAutoUpgradeEnabled` | `false` | Opt-in auto-upgrade for PATH/fallback QMD installs |
+| `qmdAutoUpgradeCheckIntervalMs` | `86400000` | Minimum interval between auto-upgrade attempts |
+| `qmdChunkStrategy` | `auto` | Forward QMD's AST-aware chunk strategy when supported |
+| `qmdCandidateLimit` | `(none)` | Optional QMD candidate limit forwarded when supported |
+| `qmdQueryRerankEnabled` | `true` | Set `false` to pass QMD's rerank-disable flag when supported |
 
 ## Orama
 

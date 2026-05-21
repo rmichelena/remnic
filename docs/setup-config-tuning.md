@@ -436,9 +436,11 @@ Reliability / load:
   - Populate `cronRecallAllowlist` with only context-heavy cron job ids/patterns (`*:cron:<job-id>:*`).
   - Keep ingestion/integration script crons out of the allowlist unless they genuinely need memory context.
 - QMD version:
-  - **QMD 2.0+ is recommended.** All 1.x patches (PRs #166, #112, #117) are resolved natively in 2.0. QMD 1.x still works but requires manual patches.
+  - **QMD 2.5.1 is the current supported target.** Remnic detects the installed version with `qmd --version` and gates 2.5 features such as `qmd doctor`, version-matched skills, scoped embed behavior, named index selection, model/GPU env controls, and absolute snippet line numbers.
+  - **QMD 2.0+ is the minimum practical baseline.** All 1.x patches (PRs #166, #112, #117) are resolved natively in 2.0. QMD 1.x still works but requires manual patches.
+  - Set `qmdAutoUpgradeEnabled: true` to let Remnic upgrade PATH/fallback installs to `qmdSupportedVersion`; explicit `qmdPath` installs must be upgraded manually.
   - The QMD daemon keeps models warm — queries drop from ~13s to ~30ms after the first call.
-  - See [Getting Started](getting-started.md#upgrading-from-qmd-1x-to-20) for upgrade steps.
+  - See [Getting Started](getting-started.md#upgrading-qmd) for upgrade steps.
 - Local LLM failure damping:
   - `localLlmRetry5xxCount: 1`
   - `localLlmRetryBackoffMs: 400`

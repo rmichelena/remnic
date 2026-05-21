@@ -119,6 +119,19 @@ See [Search Backends](search-backends.md) for detailed configuration and compari
 | `qmdColdCollection` | `openclaw-engram-cold` | QMD collection name used for cold-tier recall |
 | `qmdColdMaxResults` | `8` | Final result cap for cold-tier recall before merging into the normal ranking pipeline |
 | `qmdPath` | `(auto)` | Absolute path to `qmd` binary (bypasses PATH) |
+| `qmdSupportedVersion` | `2.5.1` | Highest QMD version this Remnic build will auto-install |
+| `qmdAutoUpgradeEnabled` | `false` | Opt-in auto-upgrade for PATH/fallback QMD installs; explicit `qmdPath` is never overwritten |
+| `qmdAutoUpgradeCheckIntervalMs` | `86400000` | Minimum interval between auto-upgrade attempts |
+| `qmdChunkStrategy` | `auto` | QMD chunk strategy to forward when the installed QMD supports it (`auto` or `regex`) |
+| `qmdCandidateLimit` | `(none)` | Optional QMD candidate limit forwarded to supported QMD query paths |
+| `qmdQueryRerankEnabled` | `true` | Set `false` to ask QMD to skip its built-in rerank step when supported |
+| `qmdIndexName` | `(none)` | Optional QMD named index forwarded as `qmd --index <name> ...` when QMD 2.5+ supports named index selection |
+| `qmdForceCpu` | `false` | Set `QMD_FORCE_CPU=1` for QMD child processes to bypass GPU probing |
+| `qmdGpuBackend` | `(none)` | Optional `QMD_LLAMA_GPU` override (`auto`, `metal`, `cuda`, `vulkan`, or `false`) |
+| `qmdEmbedParallelism` | `(none)` | Optional `QMD_EMBED_PARALLELISM` override, clamped to 1-8 |
+| `qmdEmbedModel` | `(none)` | Optional `QMD_EMBED_MODEL` override used by QMD indexing and vector search |
+| `qmdRerankModel` | `(none)` | Optional `QMD_RERANK_MODEL` override used by QMD reranking |
+| `qmdGenerateModel` | `(none)` | Optional `QMD_GENERATE_MODEL` override used by QMD query expansion |
 | `qmdDaemonEnabled` | `true` | Prefer QMD MCP daemon for recall/search when available (lower contention); fail-open to subprocess search/hybrid paths |
 | `qmdDaemonUrl` | `http://localhost:8181/mcp` | Legacy compatibility setting; current runtime uses shared stdio `qmd mcp` rather than the HTTP endpoint directly |
 | `qmdDaemonRecheckIntervalMs` | `60000` | Interval to re-probe daemon availability after failure |

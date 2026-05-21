@@ -570,6 +570,19 @@ export interface PluginConfig {
   qmdTierParityGraphEnabled: boolean;
   qmdTierParityHiMemEnabled: boolean;
   qmdTierAutoBackfillEnabled: boolean;
+  qmdSupportedVersion: string;
+  qmdAutoUpgradeEnabled: boolean;
+  qmdAutoUpgradeCheckIntervalMs: number;
+  qmdChunkStrategy: "auto" | "regex";
+  qmdCandidateLimit?: number;
+  qmdQueryRerankEnabled: boolean;
+  qmdIndexName?: string;
+  qmdForceCpu: boolean;
+  qmdGpuBackend?: "auto" | "metal" | "cuda" | "vulkan" | "false";
+  qmdEmbedParallelism?: number;
+  qmdEmbedModel?: string;
+  qmdRerankModel?: string;
+  qmdGenerateModel?: string;
   embeddingFallbackEnabled: boolean;
   embeddingFallbackProvider: "auto" | "openai" | "local";
   /**
@@ -2622,6 +2635,7 @@ export interface QmdSearchResult {
   path: string;
   snippet: string;
   score: number;
+  line?: number;
   explain?: QmdSearchExplain;
   transport?: "daemon" | "subprocess" | "hybrid" | "scoped_prefilter";
 }
@@ -2629,7 +2643,12 @@ export interface QmdSearchResult {
 export interface QmdSearchExplain {
   ftsScores?: number[];
   vectorScores?: number[];
+  /** QMD 2.5 nested RRF `totalScore`, or legacy numeric RRF score. */
   rrf?: number;
+  rrfRank?: number;
+  rrfPositionScore?: number;
+  rrfBaseScore?: number;
+  rrfTopRankBonus?: number;
   rerankScore?: number;
   blendedScore?: number;
   /** Additive boost applied from `reinforcement_count` frontmatter (issue #687 PR 3/4). */

@@ -14663,7 +14663,8 @@ export class Orchestrator {
       const snippet = r.snippet
         ? r.snippet.slice(0, 500).replace(/\n/g, " ")
         : "(no preview)";
-      return `[${i + 1}] ${r.path} (score: ${r.score.toFixed(3)})\n${snippet}`;
+      const source = typeof r.line === "number" ? `${r.path}:${r.line}` : r.path;
+      return `[${i + 1}] ${source} (score: ${r.score.toFixed(3)})\n${snippet}`;
     });
     return `## ${title}\n\n${lines.join("\n\n")}`;
   }

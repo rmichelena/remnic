@@ -88,6 +88,19 @@ function qmdOptions(config: PluginConfig): QmdClientOptions {
     qmdPath: config.qmdPath,
     daemonUrl: config.qmdDaemonEnabled ? config.qmdDaemonUrl : undefined,
     daemonRecheckIntervalMs: config.qmdDaemonRecheckIntervalMs,
+    qmdSupportedVersion: config.qmdSupportedVersion,
+    qmdAutoUpgradeEnabled: config.qmdAutoUpgradeEnabled,
+    qmdAutoUpgradeCheckIntervalMs: config.qmdAutoUpgradeCheckIntervalMs,
+    qmdChunkStrategy: config.qmdChunkStrategy,
+    qmdCandidateLimit: config.qmdCandidateLimit,
+    qmdQueryRerankEnabled: config.qmdQueryRerankEnabled,
+    qmdIndexName: config.qmdIndexName,
+    qmdForceCpu: config.qmdForceCpu,
+    qmdGpuBackend: config.qmdGpuBackend,
+    qmdEmbedParallelism: config.qmdEmbedParallelism,
+    qmdEmbedModel: config.qmdEmbedModel,
+    qmdRerankModel: config.qmdRerankModel,
+    qmdGenerateModel: config.qmdGenerateModel,
   };
 }
 

@@ -6,6 +6,10 @@ export type SearchResult = QmdSearchResult;
 export interface SearchQueryOptions {
   intent?: string;
   explain?: boolean;
+  candidateLimit?: number;
+  rerank?: boolean;
+  chunkStrategy?: "auto" | "regex";
+  structuredSearches?: Array<{ type: "lex" | "vec" | "hyde"; query: string }>;
 }
 
 export interface SearchExecutionOptions {

@@ -62,6 +62,7 @@ describe("search backend factory", () => {
     const { QmdClient } = await import("../src/qmd.js");
     const client = new QmdClient("test-collection", 10);
     (client as any).cliVersion = "warning: experimental build\nqmd 1.1.5";
+    (client as any).qmdCapabilities = (await import("../src/qmd.js")).resolveQmdCapabilities((client as any).cliVersion);
     assert.deepEqual(
       client.resolveSupportedSearchOptions({
         intent: "goal:review",
@@ -99,6 +100,39 @@ describe("search backend factory", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("QMD 2.x supported options include structured searches but keep MCP-unsupported chunking out of args", async () => {
+    const { QmdClient, resolveQmdCapabilities } = await import("../src/qmd.js");
+    const client = new QmdClient("test-collection", 10);
+    (client as any).cliVersion = "qmd 2.5.1";
+    (client as any).qmdCapabilities = resolveQmdCapabilities("qmd 2.5.1");
+    assert.deepEqual(
+      client.resolveSupportedSearchOptions({
+        intent: "goal:review",
+        explain: true,
+        candidateLimit: 12,
+        rerank: false,
+        chunkStrategy: "auto",
+        structuredSearches: [
+          { type: "lex", query: "review" },
+          { type: "vec", query: "review current work" },
+          { type: "hyde", query: "A memory about reviewing the current work." },
+        ],
+      }),
+      {
+        intent: "goal:review",
+        explain: true,
+        candidateLimit: 12,
+        rerank: false,
+        chunkStrategy: "auto",
+        structuredSearches: [
+          { type: "lex", query: "review" },
+          { type: "vec", query: "review current work" },
+          { type: "hyde", query: "A memory about reviewing the current work." },
+        ],
+      },
+    );
   });
 });
 

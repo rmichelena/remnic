@@ -288,6 +288,83 @@
         "default": false,
         "description": "Allow automated cold-tier backfill jobs to repair parity gaps"
       },
+      "qmdSupportedVersion": {
+        "type": "string",
+        "default": "2.5.1",
+        "description": "Highest QMD version this Remnic build will auto-install"
+      },
+      "qmdAutoUpgradeEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Opt-in auto-upgrade for PATH/fallback QMD installs"
+      },
+      "qmdAutoUpgradeCheckIntervalMs": {
+        "type": "number",
+        "minimum": 60000,
+        "default": 86400000,
+        "description": "Minimum interval between QMD auto-upgrade checks"
+      },
+      "qmdChunkStrategy": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "regex"
+        ],
+        "default": "auto",
+        "description": "QMD chunk strategy forwarded when the installed QMD supports it"
+      },
+      "qmdCandidateLimit": {
+        "type": "number",
+        "minimum": 1,
+        "description": "Optional candidate limit forwarded to supported QMD query paths"
+      },
+      "qmdQueryRerankEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "When false, ask supported QMD versions to skip the built-in rerank step"
+      },
+      "qmdIndexName": {
+        "type": "string",
+        "description": "Optional QMD named index forwarded as qmd --index <name> when supported"
+      },
+      "qmdForceCpu": {
+        "type": "boolean",
+        "default": false,
+        "description": "Set QMD_FORCE_CPU=1 for QMD child processes to bypass GPU probing and run predictably on CPU"
+      },
+      "qmdGpuBackend": {
+        "type": [
+          "string",
+          "boolean"
+        ],
+        "enum": [
+          "auto",
+          "metal",
+          "cuda",
+          "vulkan",
+          "false",
+          false
+        ],
+        "description": "Optional QMD_LLAMA_GPU override for QMD child processes"
+      },
+      "qmdEmbedParallelism": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 8,
+        "description": "Optional QMD_EMBED_PARALLELISM override, clamped to 1-8"
+      },
+      "qmdEmbedModel": {
+        "type": "string",
+        "description": "Optional QMD_EMBED_MODEL override"
+      },
+      "qmdRerankModel": {
+        "type": "string",
+        "description": "Optional QMD_RERANK_MODEL override"
+      },
+      "qmdGenerateModel": {
+        "type": "string",
+        "description": "Optional QMD_GENERATE_MODEL override"
+      },
       "embeddingFallbackEnabled": {
         "type": "boolean",
         "default": true,
@@ -4872,6 +4949,66 @@
       "label": "Tier Auto Backfill",
       "advanced": true,
       "help": "Enable automated cold-tier backfill runs for parity repair"
+    },
+    "qmdSupportedVersion": {
+      "label": "QMD Supported Version",
+      "advanced": true,
+      "placeholder": "2.5.1"
+    },
+    "qmdAutoUpgradeEnabled": {
+      "label": "QMD Auto Upgrade",
+      "advanced": true,
+      "help": "Upgrade PATH/fallback QMD installs to the supported version; explicit qmdPath installs are skipped"
+    },
+    "qmdAutoUpgradeCheckIntervalMs": {
+      "label": "QMD Auto Upgrade Interval",
+      "advanced": true,
+      "placeholder": "86400000"
+    },
+    "qmdChunkStrategy": {
+      "label": "QMD Chunk Strategy",
+      "advanced": true,
+      "placeholder": "auto"
+    },
+    "qmdCandidateLimit": {
+      "label": "QMD Candidate Limit",
+      "advanced": true
+    },
+    "qmdQueryRerankEnabled": {
+      "label": "QMD Query Rerank",
+      "advanced": true
+    },
+    "qmdIndexName": {
+      "label": "QMD Index Name",
+      "advanced": true,
+      "help": "Use a named QMD index when QMD 2.5+ supports --index"
+    },
+    "qmdForceCpu": {
+      "label": "QMD Force CPU",
+      "advanced": true,
+      "help": "Set QMD_FORCE_CPU=1 for QMD child processes"
+    },
+    "qmdGpuBackend": {
+      "label": "QMD GPU Backend",
+      "advanced": true,
+      "placeholder": "metal"
+    },
+    "qmdEmbedParallelism": {
+      "label": "QMD Embed Parallelism",
+      "advanced": true,
+      "placeholder": "4"
+    },
+    "qmdEmbedModel": {
+      "label": "QMD Embed Model",
+      "advanced": true
+    },
+    "qmdRerankModel": {
+      "label": "QMD Rerank Model",
+      "advanced": true
+    },
+    "qmdGenerateModel": {
+      "label": "QMD Generate Model",
+      "advanced": true
     },
     "embeddingFallbackEnabled": {
       "label": "Embedding Fallback",

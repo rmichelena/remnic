@@ -68,6 +68,82 @@ function parseBoundedIntegerMs(
   return Math.min(max, Math.max(min, Math.floor(coerced)));
 }
 
+function parsePositiveInteger(value: unknown, keyName: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const coerced = coerceNumber(value);
+  if (
+    coerced === undefined ||
+    !Number.isFinite(coerced) ||
+    !Number.isInteger(coerced) ||
+    coerced <= 0
+  ) {
+    throw new Error(
+      `${keyName} must be a positive integer; got ${JSON.stringify(value)}`,
+    );
+  }
+  return coerced;
+}
+
+function parseBoundedPositiveInteger(
+  value: unknown,
+  min: number,
+  max: number,
+  keyName: string,
+): number | undefined {
+  const parsed = parsePositiveInteger(value, keyName);
+  if (parsed === undefined) return undefined;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function parseQmdSupportedVersion(value: unknown): string {
+  if (value === undefined || value === null) return "2.5.1";
+  if (typeof value !== "string") {
+    throw new Error(`qmdSupportedVersion must be a semantic version string; got ${JSON.stringify(value)}`);
+  }
+  const normalized = value.trim();
+  if (!/^\d+\.\d+\.\d+$/.test(normalized)) {
+    throw new Error(
+      `qmdSupportedVersion must be a semantic version string like "2.5.1"; got ${JSON.stringify(value)}`,
+    );
+  }
+  return normalized;
+}
+
+function parseQmdGpuBackend(value: unknown): "auto" | "metal" | "cuda" | "vulkan" | "false" | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === false) return "false";
+  if (typeof value !== "string") {
+    throw new Error(`qmdGpuBackend must be one of "auto", "metal", "cuda", "vulkan", or false; got ${JSON.stringify(value)}`);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "auto" ||
+    normalized === "metal" ||
+    normalized === "cuda" ||
+    normalized === "vulkan" ||
+    normalized === "false"
+  ) {
+    return normalized;
+  }
+  throw new Error(`qmdGpuBackend must be one of "auto", "metal", "cuda", "vulkan", or false; got ${JSON.stringify(value)}`);
+}
+
+function parseQmdChunkStrategy(value: unknown): "auto" | "regex" {
+  if (value === undefined || value === null) return "auto";
+  if (typeof value !== "string") {
+    throw new Error(`qmdChunkStrategy must be "auto" or "regex"; got ${JSON.stringify(value)}`);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "regex") return normalized;
+  throw new Error(`qmdChunkStrategy must be "auto" or "regex"; got ${JSON.stringify(value)}`);
+}
+
+function parseOptionalNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function parseIntegerAtLeast(
   value: unknown,
   fallback: number,
@@ -1246,6 +1322,29 @@ export function parseConfig(raw: unknown): PluginConfig {
     qmdTierParityGraphEnabled: cfg.qmdTierParityGraphEnabled !== false,
     qmdTierParityHiMemEnabled: cfg.qmdTierParityHiMemEnabled !== false,
     qmdTierAutoBackfillEnabled: cfg.qmdTierAutoBackfillEnabled === true,
+    qmdSupportedVersion: parseQmdSupportedVersion(cfg.qmdSupportedVersion),
+    qmdAutoUpgradeEnabled: coerceBool(cfg.qmdAutoUpgradeEnabled) === true,
+    qmdAutoUpgradeCheckIntervalMs: parseBoundedIntegerMs(
+      cfg.qmdAutoUpgradeCheckIntervalMs,
+      24 * 60 * 60_000,
+      60_000,
+      30 * 24 * 60 * 60_000,
+    ),
+    qmdChunkStrategy: parseQmdChunkStrategy(cfg.qmdChunkStrategy),
+    qmdCandidateLimit: parsePositiveInteger(cfg.qmdCandidateLimit, "qmdCandidateLimit"),
+    qmdQueryRerankEnabled: coerceBooleanLike(cfg.qmdQueryRerankEnabled) ?? true,
+    qmdIndexName: parseOptionalNonEmptyString(cfg.qmdIndexName),
+    qmdForceCpu: coerceBooleanLike(cfg.qmdForceCpu) ?? false,
+    qmdGpuBackend: parseQmdGpuBackend(cfg.qmdGpuBackend),
+    qmdEmbedParallelism: parseBoundedPositiveInteger(
+      cfg.qmdEmbedParallelism,
+      1,
+      8,
+      "qmdEmbedParallelism",
+    ),
+    qmdEmbedModel: parseOptionalNonEmptyString(cfg.qmdEmbedModel),
+    qmdRerankModel: parseOptionalNonEmptyString(cfg.qmdRerankModel),
+    qmdGenerateModel: parseOptionalNonEmptyString(cfg.qmdGenerateModel),
     embeddingFallbackEnabled: cfg.embeddingFallbackEnabled !== false,
     embeddingFallbackProvider:
       cfg.embeddingFallbackProvider === "openai"

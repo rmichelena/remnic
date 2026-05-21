@@ -79,14 +79,18 @@ grep '\[engram\]' ~/.openclaw/logs/gateway.log | tail -5
 
 [QMD](https://github.com/tobi/qmd) provides hybrid BM25 + vector + reranking search. Without it, Remnic falls back to semantic embedding search (using your OpenAI key when available) and then recency-ordered file reads.
 
-**QMD 2.0+ is recommended.** QMD 1.x still works but 2.0 resolves several known issues natively (session ID crash, model override env vars, join performance). Install via bun or npm:
+**QMD 2.5.1 is the current supported target.** QMD 1.x still works, but 2.0+
+resolves several known issues natively (session ID crash, model override env
+vars, join performance), and 2.5.1 adds runtime diagnostics, structured MCP
+searches, safer indexing, model/GPU env controls, and absolute snippet line
+numbers that Remnic can detect and use. Install via npm or bun:
 
 ```bash
-bun install -g @tobilu/qmd
-# or: npm install -g @tobilu/qmd
+npm install -g @tobilu/qmd@2.5.1
+# or: bun install -g @tobilu/qmd@2.5.1
 
 # Verify
-qmd --version  # should show 2.0.0+
+qmd --version  # should show 2.5.1
 ```
 
 Add to `~/.config/qmd/index.yml`:
@@ -112,9 +116,12 @@ Enable in your plugin config:
 }
 ```
 
-### Upgrading from QMD 1.x to 2.0
+### Upgrading QMD
 
-QMD 2.0 is a drop-in upgrade — existing collections, indexes, and config files work without changes. The MCP tool interface (`query`, `get`, `multi_get`, `status`) is backward compatible.
+QMD 2.5.1 is a drop-in upgrade from older 2.x installs. Existing collections,
+indexes, and config files work without changes. Remnic detects the installed
+version at startup and enables newer features only when the installed binary
+supports them.
 
 **What changed:**
 - Unified `search()` replaces the old query/search/structuredSearch split internally
@@ -131,24 +138,32 @@ QMD 2.0 is a drop-in upgrade — existing collections, indexes, and config files
 **Upgrade steps:**
 
 ```bash
-# 1. Install QMD 2.0
-bun install -g @tobilu/qmd
+# 1. Install the supported QMD target
+npm install -g @tobilu/qmd@2.5.1
+# or: bun install -g @tobilu/qmd@2.5.1
 
 # 2. If native bindings need repair, rebuild better-sqlite3 manually
 cd ~/.bun/install/global/node_modules/better-sqlite3
 npm rebuild better-sqlite3
 
 # 3. Verify
-qmd --version       # 2.0.0+
+qmd --version       # 2.5.1
+qmd doctor          # available on QMD 2.5+
 qmd status           # should show existing collections
 
 # 4. Restart the gateway
 launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
 
-# 5. Verify Remnic picked up QMD 2.0
+# 5. Verify Remnic picked up the new QMD version
 grep "cliVersion" ~/.openclaw/logs/gateway.log | tail -1
-# Should show: cliVersion=qmd 2.0.x
+# Should show: cliVersion=qmd 2.5.1
 ```
+
+To let Remnic perform this upgrade for PATH/fallback installs, set
+`qmdAutoUpgradeEnabled: true`. Remnic will install
+`@tobilu/qmd@qmdSupportedVersion` at most once per
+`qmdAutoUpgradeCheckIntervalMs`. Explicit `qmdPath` installs are never
+auto-upgraded.
 
 **Note:** If you used the OpenClaw patcher for QMD patches, those patches target QMD 1.x source paths that no longer exist in 2.0. The patcher will harmlessly skip them. You can remove old QMD patch entries from the patcher config.
 
