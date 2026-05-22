@@ -150,30 +150,29 @@ const EXCLUDED_FILE_NAMES = new Set([
   ".sync-state.json",
 ]);
 
-const DERIVED_RUNTIME_REL_PATHS = new Set([
-  "state/fact-hashes.ready",
-  "state/fact-hashes.txt",
-  "state/buffer-surprise-ledger.jsonl",
-  "state/buffer.json",
-  "state/embeddings.json",
-  "state/index_tags.json",
-  "state/index_time.json",
-  "state/last_graph_recall.json",
-  "state/last_intent.json",
-  "state/last_qmd_recall.json",
-  "state/last_recall.json",
-  "state/lcm.sqlite",
-  "state/lcm.sqlite-shm",
-  "state/lcm.sqlite-wal",
-  "state/memory-lifecycle-ledger.jsonl",
-  "state/memory-projection.sqlite",
-  "state/memory-projection.sqlite-shm",
-  "state/memory-projection.sqlite-wal",
-  "state/recall_impressions.jsonl",
-]);
-
-const EXCLUDED_REL_PATHS = new Set([
-  ...DERIVED_RUNTIME_REL_PATHS,
+const DERIVED_RUNTIME_STATE_BASENAMES = new Set([
+  ".artifact-write-version.log",
+  ".memory-status-version.log",
+  "fact-hashes.ready",
+  "fact-hashes.txt",
+  "buffer-surprise-ledger.jsonl",
+  "buffer.json",
+  "embeddings.json",
+  "entity-mention-index.json",
+  "index_tags.json",
+  "index_time.json",
+  "last_graph_recall.json",
+  "last_intent.json",
+  "last_qmd_recall.json",
+  "last_recall.json",
+  "lcm.sqlite",
+  "lcm.sqlite-shm",
+  "lcm.sqlite-wal",
+  "memory-lifecycle-ledger.jsonl",
+  "memory-projection.sqlite",
+  "memory-projection.sqlite-shm",
+  "memory-projection.sqlite-wal",
+  "recall_impressions.jsonl",
 ]);
 
 const EXCLUDED_FILE_PREFIXES = [
@@ -432,10 +431,10 @@ function shouldExcludeRelPath(relPosix: string, includeTranscripts: boolean): bo
   const parts = relPosix.split("/");
   if (parts.some((part) => DEFAULT_TRANSFER_EXCLUDE_DIRS.has(part))) return true;
   if (parts.some((part) => part === SYNC_INTERNAL_DIR)) return true;
-  if (EXCLUDED_REL_PATHS.has(relPosix)) return true;
+  if (isDerivedRuntimeStatePath(parts)) return true;
   if (!includeTranscripts && parts[0] === "transcripts") return true;
   const basename = parts[parts.length - 1] ?? "";
-  if (parts[0] === "state" && basename.includes(".tmp-")) return true;
+  if (isCanonicalRuntimeStatePath(parts) && basename.includes(".tmp-")) return true;
   if (EXCLUDED_FILE_NAMES.has(basename)) return true;
   return EXCLUDED_FILE_PREFIXES.some((prefix) => basename.startsWith(prefix));
 }
@@ -443,7 +442,17 @@ function shouldExcludeRelPath(relPosix: string, includeTranscripts: boolean): bo
 function shouldIgnoreIncomingRuntimePath(relPosix: string): boolean {
   const parts = relPosix.split("/");
   const basename = parts[parts.length - 1] ?? "";
-  return DERIVED_RUNTIME_REL_PATHS.has(relPosix) || (parts[0] === "state" && basename.includes(".tmp-"));
+  return isDerivedRuntimeStatePath(parts) || (isCanonicalRuntimeStatePath(parts) && basename.includes(".tmp-"));
+}
+
+function isDerivedRuntimeStatePath(parts: string[]): boolean {
+  const basename = parts[parts.length - 1] ?? "";
+  return isCanonicalRuntimeStatePath(parts) && DERIVED_RUNTIME_STATE_BASENAMES.has(basename);
+}
+
+function isCanonicalRuntimeStatePath(parts: string[]): boolean {
+  if (parts[0] === "state") return true;
+  return parts[0] === "namespaces" && parts.length >= 4 && parts[2] === "state";
 }
 
 function filterBaseFilesForMode(
