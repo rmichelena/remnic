@@ -150,9 +150,14 @@ const EXCLUDED_FILE_NAMES = new Set([
   ".sync-state.json",
 ]);
 
-const EXCLUDED_REL_PATHS = new Set([
+const DERIVED_RUNTIME_REL_PATHS = new Set([
   "state/fact-hashes.ready",
   "state/fact-hashes.txt",
+  "state/buffer-surprise-ledger.jsonl",
+  "state/buffer.json",
+  "state/embeddings.json",
+  "state/index_tags.json",
+  "state/index_time.json",
   "state/last_graph_recall.json",
   "state/last_intent.json",
   "state/last_qmd_recall.json",
@@ -160,6 +165,15 @@ const EXCLUDED_REL_PATHS = new Set([
   "state/lcm.sqlite",
   "state/lcm.sqlite-shm",
   "state/lcm.sqlite-wal",
+  "state/memory-lifecycle-ledger.jsonl",
+  "state/memory-projection.sqlite",
+  "state/memory-projection.sqlite-shm",
+  "state/memory-projection.sqlite-wal",
+  "state/recall_impressions.jsonl",
+]);
+
+const EXCLUDED_REL_PATHS = new Set([
+  ...DERIVED_RUNTIME_REL_PATHS,
 ]);
 
 const EXCLUDED_FILE_PREFIXES = [
@@ -284,6 +298,7 @@ export function normalizeOfflineSyncSnapshot(
   const files = obj.files
     .map((entry, index) =>
       normalizeFileRecord(entry, `files[${index}]`, options.requireContent === true))
+    .filter((file) => !shouldIgnoreIncomingRuntimePath(file.path))
     .sort(compareByPath);
   assertUniquePaths(files, "offline sync snapshot");
   if (!includeTranscripts) {
@@ -360,7 +375,7 @@ export function normalizeOfflineSyncChangeset(input: unknown): OfflineSyncChange
       };
     }
     throw new Error(`changes[${index}].type must be "upsert" or "delete"`);
-  });
+  }).filter((change) => !shouldIgnoreIncomingRuntimePath(change.path));
   assertUniquePaths(changes, "offline sync changeset");
   if (!includeTranscripts) {
     const transcriptPath = changes.find((change) => change.path.split("/")[0] === "transcripts")?.path;
@@ -420,8 +435,15 @@ function shouldExcludeRelPath(relPosix: string, includeTranscripts: boolean): bo
   if (EXCLUDED_REL_PATHS.has(relPosix)) return true;
   if (!includeTranscripts && parts[0] === "transcripts") return true;
   const basename = parts[parts.length - 1] ?? "";
+  if (parts[0] === "state" && basename.includes(".tmp-")) return true;
   if (EXCLUDED_FILE_NAMES.has(basename)) return true;
   return EXCLUDED_FILE_PREFIXES.some((prefix) => basename.startsWith(prefix));
+}
+
+function shouldIgnoreIncomingRuntimePath(relPosix: string): boolean {
+  const parts = relPosix.split("/");
+  const basename = parts[parts.length - 1] ?? "";
+  return DERIVED_RUNTIME_REL_PATHS.has(relPosix) || (parts[0] === "state" && basename.includes(".tmp-"));
 }
 
 function filterBaseFilesForMode(
@@ -725,6 +747,50 @@ export function summarizeOfflineSyncChangeset(
     upserts,
     deletes,
     total: changeset.changes.length,
+  };
+}
+
+export async function summarizeOfflineSyncPendingChanges(options: {
+  root: string;
+  sourceId: string;
+  baseFiles?: readonly OfflineSyncFileState[];
+  includeTranscripts?: boolean;
+  now?: Date;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+}): Promise<OfflineSyncChangesetSummary> {
+  const includeTranscripts = options.includeTranscripts !== false;
+  const base = byPath(filterBaseFilesForMode(
+    normalizeFileStates(options.baseFiles),
+    includeTranscripts,
+  ));
+  const current = await buildOfflineSyncSnapshot({
+    root: options.root,
+    sourceId: options.sourceId,
+    includeContent: false,
+    includeTranscripts,
+    now: options.now,
+    readFile: options.readFile,
+  });
+  const currentMap = byPath(current.files);
+  let upserts = 0;
+  let deletes = 0;
+
+  for (const relPath of unionPaths(base, currentMap)) {
+    const baseEntry = base.get(relPath);
+    const currentEntry = currentMap.get(relPath);
+    if (currentEntry && currentEntry.sha256 !== baseEntry?.sha256) {
+      upserts += 1;
+      continue;
+    }
+    if (!currentEntry && baseEntry) {
+      deletes += 1;
+    }
+  }
+
+  return {
+    upserts,
+    deletes,
+    total: upserts + deletes,
   };
 }
 

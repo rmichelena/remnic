@@ -134,6 +134,7 @@ import {
   offlineSyncStateFromSnapshot,
   readOfflineSyncState,
   summarizeOfflineSyncChangeset,
+  summarizeOfflineSyncPendingChanges,
   writeOfflineSyncState,
   type OfflineSyncFileState,
   type OfflineSyncFileWriteTarget,
@@ -5966,15 +5967,17 @@ async function hydrateOfflineSnapshotContent(args: {
   baseFiles: readonly OfflineSyncFileState[];
   currentFiles?: readonly OfflineSyncFileState[];
 }): Promise<OfflineSyncSnapshot & { namespace?: string }> {
+  const snapshot = normalizeOfflineSyncSnapshot(args.snapshot);
   const neededFiles = offlineSnapshotContentFilesForApply({
-    snapshot: args.snapshot,
+    snapshot,
     baseFiles: args.baseFiles,
     currentFiles: args.currentFiles,
   });
-  if (neededFiles.length === 0) return args.snapshot;
+  if (neededFiles.length === 0) return { ...args.snapshot, files: snapshot.files };
 
-  const expectedByPath = new Map(args.snapshot.files.map((file) => [file.path, file]));
+  const expectedByPath = new Map(snapshot.files.map((file) => [file.path, file]));
   const contentByPath = new Map<string, string>();
+  const updatedByPath = new Map<string, OfflineSyncFileState & { contentBase64: string }>();
   try {
     for (const batch of chunkOfflineFileContentBatches(neededFiles)) {
       const partial = await fetchOfflineFiles({
@@ -5987,11 +5990,11 @@ async function hydrateOfflineSnapshotContent(args: {
       for (const file of partial.files) {
         const expected = expectedByPath.get(file.path);
         if (!expected) continue;
-        if (file.sha256 !== expected.sha256 || file.bytes !== expected.bytes) {
-          throw new Error(`remote file changed while fetching offline content: ${file.path}`);
-        }
         if (typeof file.contentBase64 !== "string") {
           throw new Error(`remote offline content response omitted contentBase64 for ${file.path}`);
+        }
+        if (file.sha256 !== expected.sha256 || file.bytes !== expected.bytes || file.mtimeMs !== expected.mtimeMs) {
+          updatedByPath.set(file.path, file as OfflineSyncFileState & { contentBase64: string });
         }
         contentByPath.set(file.path, file.contentBase64);
       }
@@ -6018,7 +6021,9 @@ async function hydrateOfflineSnapshotContent(args: {
 
   return {
     ...args.snapshot,
-    files: args.snapshot.files.map((file) => {
+    files: snapshot.files.map((file) => {
+      const updated = updatedByPath.get(file.path);
+      if (updated) return updated;
       const contentBase64 = contentByPath.get(file.path);
       return contentBase64 === undefined ? file : { ...file, contentBase64 };
     }),
@@ -6423,14 +6428,13 @@ Environment fallbacks:
       });
     }
     const storageIo = await createOfflineStorageIo(memoryDir);
-    const changeset = await buildOfflineSyncChangeset({
+    const summary = await summarizeOfflineSyncPendingChanges({
       root: memoryDir,
       sourceId: localOfflineSourceId(memoryDir),
       baseFiles: state?.baseFiles ?? [],
       includeTranscripts,
       readFile: storageIo.readFile,
     });
-    const summary = summarizeOfflineSyncChangeset(changeset);
     if (json) {
       console.log(JSON.stringify({ statePath: statePath ?? null, state, pending: summary }, null, 2));
     } else {
