@@ -181,17 +181,24 @@ test("offline sync excludes runtime-derived state without deleting existing loca
   const root = await tempDir("remnic-offline-runtime-state");
   try {
     await write(root, "facts/a.md", "alpha");
+    await write(root, "assets/state/fact-hashes.txt", "durable asset");
     await write(root, "state/buffer-surprise-ledger.jsonl", "surprise");
     await write(root, "state/buffer.json", "buffer");
     await write(root, "state/buffer.json.tmp-123-456", "tmp");
     await write(root, "state/embeddings.json", "embeddings");
+    await write(root, "state/entity-mention-index.json", "entities");
     await write(root, "state/index_tags.json", "tags");
     await write(root, "state/index_time.json", "time");
     await write(root, "state/memory-lifecycle-ledger.jsonl", "ledger");
+    await write(root, "state/.artifact-write-version.log", "version");
+    await write(root, "state/.memory-status-version.log", "version");
     await write(root, "state/memory-projection.sqlite", "projection");
     await write(root, "state/memory-projection.sqlite-shm", "projection-shm");
     await write(root, "state/memory-projection.sqlite-wal", "projection-wal");
     await write(root, "state/recall_impressions.jsonl", "impressions");
+    await write(root, "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json", "intent");
+    await write(root, "namespaces/generalist-project-origin-6ebeaa54/state/entity-mention-index.json", "entities");
+    await write(root, "namespaces/generalist-project-origin-6ebeaa54/state/.memory-status-version.log", "version");
 
     const snapshot = await buildOfflineSyncSnapshot({
       root,
@@ -199,7 +206,10 @@ test("offline sync excludes runtime-derived state without deleting existing loca
       includeContent: true,
     });
 
-    assert.deepEqual(snapshot.files.map((file) => file.path), ["facts/a.md"]);
+    assert.deepEqual(snapshot.files.map((file) => file.path), [
+      "assets/state/fact-hashes.txt",
+      "facts/a.md",
+    ]);
     await assert.rejects(
       () =>
         buildOfflineSyncSnapshotForPaths({
@@ -217,6 +227,16 @@ test("offline sync excludes runtime-derived state without deleting existing loca
           path: "state/buffer.json.tmp-123-456",
         }),
       /offline sync file content path is excluded: state\/buffer\.json\.tmp-123-456/,
+    );
+    await assert.rejects(
+      () =>
+        buildOfflineSyncSnapshotForPaths({
+          root,
+          sourceId: "remote",
+          paths: ["namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json"],
+          includeContent: true,
+        }),
+      /offline sync snapshot path is excluded: namespaces\/generalist-project-origin-6ebeaa54\/state\/last_intent\.json/,
     );
 
     const oldLedger = Buffer.from("old ledger");
@@ -243,8 +263,10 @@ test("offline sync ignores runtime-derived records from older peers", async () =
   try {
     const fact = Buffer.from("alpha");
     const runtime = Buffer.from("legacy runtime");
+    const asset = Buffer.from("durable asset");
     const runtimeSha = createHash("sha256").update(runtime).digest("hex");
     const factSha = createHash("sha256").update(fact).digest("hex");
+    const assetSha = createHash("sha256").update(asset).digest("hex");
 
     const pull = await applyOfflineSyncSnapshot({
       root,
@@ -263,20 +285,39 @@ test("offline sync ignores runtime-derived records from older peers", async () =
             contentBase64: runtime.toString("base64"),
           },
           {
+            path: "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json",
+            sha256: runtimeSha,
+            bytes: runtime.byteLength,
+            mtimeMs: 0,
+            contentBase64: runtime.toString("base64"),
+          },
+          {
             path: "facts/a.md",
             sha256: factSha,
             bytes: fact.byteLength,
             mtimeMs: 0,
             contentBase64: fact.toString("base64"),
           },
+          {
+            path: "assets/state/fact-hashes.txt",
+            sha256: assetSha,
+            bytes: asset.byteLength,
+            mtimeMs: 0,
+            contentBase64: asset.toString("base64"),
+          },
         ],
       },
     });
 
-    assert.equal(pull.upserted, 1);
+    assert.equal(pull.upserted, 2);
     assert.equal(await readUtf8(root, "facts/a.md"), "alpha");
+    assert.equal(await readUtf8(root, "assets/state/fact-hashes.txt"), "durable asset");
     await assert.rejects(
       () => readFile(path.join(root, "state", "buffer.json")),
+      /ENOENT/,
+    );
+    await assert.rejects(
+      () => readFile(path.join(root, "namespaces", "generalist-project-origin-6ebeaa54", "state", "last_intent.json")),
       /ENOENT/,
     );
 
@@ -304,6 +345,17 @@ test("offline sync ignores runtime-derived records from older peers", async () =
             },
             {
               type: "upsert",
+              path: "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json",
+              file: {
+                path: "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json",
+                sha256: runtimeSha,
+                bytes: runtime.byteLength,
+                mtimeMs: 0,
+                contentBase64: runtime.toString("base64"),
+              },
+            },
+            {
+              type: "upsert",
               path: "facts/a.md",
               file: {
                 path: "facts/a.md",
@@ -313,14 +365,30 @@ test("offline sync ignores runtime-derived records from older peers", async () =
                 contentBase64: fact.toString("base64"),
               },
             },
+            {
+              type: "upsert",
+              path: "assets/state/fact-hashes.txt",
+              file: {
+                path: "assets/state/fact-hashes.txt",
+                sha256: assetSha,
+                bytes: asset.byteLength,
+                mtimeMs: 0,
+                contentBase64: asset.toString("base64"),
+              },
+            },
           ],
         },
       });
 
-      assert.equal(push.appliedUpserts, 1);
+      assert.equal(push.appliedUpserts, 2);
       assert.equal(await readUtf8(remote, "facts/a.md"), "alpha");
+      assert.equal(await readUtf8(remote, "assets/state/fact-hashes.txt"), "durable asset");
       await assert.rejects(
         () => readFile(path.join(remote, "state", "memory-lifecycle-ledger.jsonl")),
+        /ENOENT/,
+      );
+      await assert.rejects(
+        () => readFile(path.join(remote, "namespaces", "generalist-project-origin-6ebeaa54", "state", "last_intent.json")),
         /ENOENT/,
       );
     } finally {
