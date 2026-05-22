@@ -11,6 +11,7 @@ import { createVersion as createPageVersion, type VersioningConfig, type Version
 import {
   SecureStoreLockedError,
   isEncryptedFile,
+  readMaybeEncryptedFileBuffer,
   readMaybeEncryptedFile,
   writeMaybeEncryptedFile,
 } from "./secure-store/secure-fs.js";
@@ -1056,6 +1057,14 @@ export class ContentHashIndex {
 
   get size(): number {
     return this.hashes.size;
+  }
+
+  /** Clear all loaded hashes so the next save rewrites the index from scratch. */
+  clear(): void {
+    if (this.hashes.size > 0) {
+      this.hashes.clear();
+    }
+    this.dirty = true;
   }
 
   /** Persist index to disk if changed. */
@@ -2478,6 +2487,55 @@ export class StorageManager {
   private writeStorageSecureFile(filePath: string, content: string): Promise<void> {
     return writeMaybeEncryptedFile(filePath, content, this.resolveWriteKey(), {}, this.baseDir);
   }
+
+  private assertManagedStoragePath(filePath: string, method: string): string {
+    const resolved = path.resolve(filePath);
+    const base = path.resolve(this.baseDir);
+    const rel = path.relative(base, resolved);
+    if (rel === "" || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      throw new Error(`${method}: file path escapes memory dir`);
+    }
+    return resolved;
+  }
+
+  async readOfflineSyncFile(filePath: string): Promise<Buffer> {
+    const target = this.assertManagedStoragePath(filePath, "storage.readOfflineSyncFile");
+    return readMaybeEncryptedFileBuffer(target, this._secureStoreKey, this.baseDir);
+  }
+
+  async writeOfflineSyncFile(filePath: string, content: Buffer): Promise<void> {
+    const target = this.assertManagedStoragePath(filePath, "storage.writeOfflineSyncFile");
+    await writeMaybeEncryptedFile(target, content, this.resolveWriteKey(), {}, this.baseDir);
+    await this.invalidateAfterOfflineSyncMutation(target);
+  }
+
+  async deleteOfflineSyncFile(filePath: string): Promise<void> {
+    const target = this.assertManagedStoragePath(filePath, "storage.deleteOfflineSyncFile");
+    await unlink(target).catch((error: unknown) => {
+      if (isErrnoCode(error, "ENOENT")) return;
+      throw error;
+    });
+    await this.invalidateAfterOfflineSyncMutation(target);
+  }
+
+  private async invalidateAfterOfflineSyncMutation(filePath: string): Promise<void> {
+    this.invalidateAllMemoriesCache();
+    invalidateCachedEntities(this.baseDir);
+    this.invalidateKnowledgeIndexCache();
+    this.factHashIndexAuthoritative = false;
+    await unlink(this.factHashIndexReadyPath).catch((error: unknown) => {
+      if (isErrnoCode(error, "ENOENT")) return;
+      throw error;
+    });
+    if (filePath.includes(`${path.sep}cold${path.sep}`)) {
+      this.invalidateColdMemoriesCache();
+    }
+    if (filePath.includes(`${path.sep}artifacts${path.sep}`)) {
+      this.bumpArtifactWriteVersion();
+    }
+    this.bumpMemoryStatusVersion();
+  }
+
   createContentHashIndex(): ContentHashIndex {
     return new ContentHashIndex(
       this.stateDir,
@@ -2577,6 +2635,7 @@ export class StorageManager {
       }
 
       const factHashIndex = await this.getFactHashIndex();
+      factHashIndex.clear();
       const existing = await this.readAllMemories();
       let legacyRecovered = 0;
       for (const memory of existing) {
