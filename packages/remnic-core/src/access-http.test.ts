@@ -557,7 +557,7 @@ test("HTTP offline apply-file-content forwards binary chunks and metadata", asyn
   }
 });
 
-test("HTTP offline apply-file-content rate limits accepted chunks", async () => {
+test("HTTP offline apply-file-content allows bulk sync chunks outside the generic write throttle", async () => {
   let calls = 0;
   const service = {
     offlineSyncApplyFileContent: async (options: {
@@ -618,8 +618,8 @@ test("HTTP offline apply-file-content rate limits accepted chunks", async () => 
       await response.arrayBuffer();
     }
 
-    assert.equal(lastStatus, 429);
-    assert.equal(calls, 30);
+    assert.equal(lastStatus, 200);
+    assert.equal(calls, 31);
   } finally {
     await server.stop();
   }
@@ -721,6 +721,69 @@ test("HTTP offline apply validates and forwards changesets", async () => {
       principal: "writer",
       changeset,
     }]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP offline apply accepts bulk changesets above the generic JSON body limit", async () => {
+  let calls = 0;
+  const largeContent = Buffer.alloc(256 * 1024, 7).toString("base64");
+  const changeset = {
+    format: "remnic.offline-sync.changeset.v1",
+    schemaVersion: 1,
+    createdAt: new Date("2026-05-21T00:00:00Z").toISOString(),
+    sourceId: "laptop:test",
+    includeTranscripts: true,
+    changes: [{
+      type: "upsert",
+      path: "facts/large.md",
+      file: {
+        path: "facts/large.md",
+        sha256: "b".repeat(64),
+        bytes: 256 * 1024,
+        mtimeMs: 1,
+        contentBase64: largeContent,
+      },
+    }],
+  };
+  const service = {
+    offlineSyncApply: async () => {
+      calls += 1;
+      return {
+        namespace: "team",
+        appliedUpserts: 1,
+        appliedDeletes: 0,
+        skipped: 0,
+        conflicts: [],
+        currentFiles: [],
+      };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    principal: "writer",
+    maxBodyBytes: 1024,
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${status.port}/remnic/v1/offline-sync/apply`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ namespace: "team", changeset }),
+    });
+    const body = await response.json() as { appliedUpserts?: number };
+
+    assert.equal(response.status, 200);
+    assert.equal(body.appliedUpserts, 1);
+    assert.equal(calls, 1);
   } finally {
     await server.stop();
   }

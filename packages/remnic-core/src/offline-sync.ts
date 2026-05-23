@@ -29,6 +29,8 @@ export const OFFLINE_SYNC_SNAPSHOT_FORMAT = "remnic.offline-sync.snapshot.v1";
 export const OFFLINE_SYNC_CHANGESET_FORMAT = "remnic.offline-sync.changeset.v1";
 export const OFFLINE_SYNC_STATE_VERSION = 1;
 export const OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+export const OFFLINE_SYNC_FILE_CONTENT_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+export const OFFLINE_SYNC_APPLY_MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 export interface OfflineSyncFileState {
   path: string;

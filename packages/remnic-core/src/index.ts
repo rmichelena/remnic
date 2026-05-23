@@ -679,8 +679,10 @@ export {
 // ---------------------------------------------------------------------------
 
 export {
+  OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
   OFFLINE_SYNC_CHANGESET_FORMAT,
   OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+  OFFLINE_SYNC_FILE_CONTENT_TRANSFER_CHUNK_BYTES,
   OFFLINE_SYNC_SNAPSHOT_FORMAT,
   OFFLINE_SYNC_STATE_VERSION,
   applyOfflineSyncFileContentChunk,

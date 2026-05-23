@@ -125,7 +125,9 @@ import {
   formatProcedureStatsText,
   parseXrayCliOptions,
   renderXray,
+  OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+  OFFLINE_SYNC_FILE_CONTENT_TRANSFER_CHUNK_BYTES,
   applyOfflineSyncSnapshot,
   buildOfflineSyncChangeset,
   buildOfflineSyncSnapshot,
@@ -5686,6 +5688,16 @@ interface OfflineFileContentChunk {
 
 const OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES = 16 * 1024 * 1024;
 const OFFLINE_SYNC_FILES_CONTENT_MAX_BATCH_BYTES = 8 * 1024 * 1024;
+export const OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES = Math.floor(OFFLINE_SYNC_APPLY_MAX_BODY_BYTES / 2);
+const OFFLINE_SYNC_DIRECT_PUSH_INLINE_MARGIN_BYTES = 256 * 1024;
+const OFFLINE_SYNC_INLINE_CONTENT_MAX_BYTES = Math.max(
+  1,
+  Math.floor((OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES - OFFLINE_SYNC_DIRECT_PUSH_INLINE_MARGIN_BYTES) * 3 / 4),
+);
+export const OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES = Math.min(
+  OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES,
+  OFFLINE_SYNC_INLINE_CONTENT_MAX_BYTES,
+);
 
 function parseOfflineHeaderNumber(headers: Headers, name: string): number {
   const raw = headers.get(name);
@@ -5890,7 +5902,7 @@ function offlineDirectPushFiles(options: {
   const base = offlineFileStateMap(options.baseFiles);
   return options.currentFiles
     .filter((current) => {
-      if (current.bytes < OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES) return false;
+      if (current.bytes < OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES) return false;
       return current.sha256 !== base.get(current.path)?.sha256;
     })
     .sort((left, right) => right.bytes - left.bytes || left.path.localeCompare(right.path));
@@ -5905,6 +5917,9 @@ function resolveOfflineDirectHydrationPath(memoryDir: string, relPath: string): 
   }
   return target;
 }
+
+export const OFFLINE_SYNC_FILE_CONTENT_UPLOAD_CHUNK_BYTES =
+  OFFLINE_SYNC_FILE_CONTENT_TRANSFER_CHUNK_BYTES;
 
 type OfflineFileChunkReader = (
   target: OfflineSyncFileTarget & { chunkSize: number },
@@ -5935,7 +5950,7 @@ async function pushOfflineFileContent(args: {
       path: args.file.path,
       offset,
       length: Math.min(
-        OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+        OFFLINE_SYNC_FILE_CONTENT_UPLOAD_CHUNK_BYTES,
         Math.max(1, args.file.bytes - offset),
       ),
       includeTranscripts: args.includeTranscripts,
@@ -5997,7 +6012,7 @@ async function pushOfflineFileContentFromChunkReader(args: {
     root: path.resolve(args.memoryDir),
     path: args.file.path,
     filePath,
-    chunkSize: OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+    chunkSize: OFFLINE_SYNC_FILE_CONTENT_UPLOAD_CHUNK_BYTES,
   });
   let offset = 0;
   let pending: Buffer | null = null;
@@ -6274,7 +6289,44 @@ async function hydrateOfflineSnapshotContent(args: {
   };
 }
 
-async function pushOfflineChanges(args: {
+export function chunkOfflineChangesetApplyBatches(
+  changeset: Awaited<ReturnType<typeof buildOfflineSyncChangeset>>,
+  namespace?: string,
+  maxRequestBytes = OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES,
+): Array<Awaited<ReturnType<typeof buildOfflineSyncChangeset>>> {
+  if (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1) {
+    throw new Error("offline sync apply max request bytes must be a positive integer");
+  }
+  const chunks: Array<Awaited<ReturnType<typeof buildOfflineSyncChangeset>>> = [];
+  let current: Awaited<ReturnType<typeof buildOfflineSyncChangeset>>["changes"] = [];
+  const requestBytesFor = (changes: typeof current) => Buffer.byteLength(JSON.stringify({
+    namespace,
+    changeset: {
+      ...changeset,
+      changes,
+    },
+  }), "utf-8");
+  for (const change of changeset.changes) {
+    const withChange = [...current, change];
+    if (current.length > 0 && requestBytesFor(withChange) > maxRequestBytes) {
+      chunks.push({ ...changeset, changes: current });
+      current = [];
+    }
+    const singleBytes = requestBytesFor([...current, change]);
+    if (singleBytes > maxRequestBytes) {
+      throw new Error(
+        `offline sync change for ${change.path} exceeds the apply request size budget; retry after direct-push threshold is lowered`,
+      );
+    }
+    current.push(change);
+  }
+  if (current.length > 0) {
+    chunks.push({ ...changeset, changes: current });
+  }
+  return chunks;
+}
+
+async function postOfflineChangesBatch(args: {
   remoteUrl: string;
   token: string;
   namespace?: string;
@@ -6297,6 +6349,43 @@ async function pushOfflineChanges(args: {
       }),
     },
   );
+}
+
+async function pushOfflineChanges(args: {
+  remoteUrl: string;
+  token: string;
+  namespace?: string;
+  changeset: Awaited<ReturnType<typeof buildOfflineSyncChangeset>>;
+}): Promise<{
+  namespace: string;
+  appliedUpserts: number;
+  appliedDeletes: number;
+  skipped: number;
+  conflicts: Array<{ path: string; reason: string; conflictPath?: string }>;
+}> {
+  let namespace = args.namespace ?? "";
+  let appliedUpserts = 0;
+  let appliedDeletes = 0;
+  let skipped = 0;
+  const conflicts: Array<{ path: string; reason: string; conflictPath?: string }> = [];
+  for (const changeset of chunkOfflineChangesetApplyBatches(args.changeset, args.namespace)) {
+    const result = await postOfflineChangesBatch({
+      ...args,
+      changeset,
+    });
+    namespace = result.namespace || namespace;
+    appliedUpserts += result.appliedUpserts;
+    appliedDeletes += result.appliedDeletes;
+    skipped += result.skipped;
+    conflicts.push(...result.conflicts);
+  }
+  return {
+    namespace,
+    appliedUpserts,
+    appliedDeletes,
+    skipped,
+    conflicts,
+  };
 }
 
 function parseOfflineIntervalMs(args: string[]): number {

@@ -9,7 +9,10 @@ import { log } from "./logger.js";
 import { EngramAccessInputError, type EngramAccessService } from "./access-service.js";
 import { EngramMcpServer } from "./access-mcp.js";
 import { validateRequest, type SchemaName, type SchemaTypeFor } from "./access-schema.js";
-import { OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES } from "./offline-sync.js";
+import {
+  OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
+  OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+} from "./offline-sync.js";
 import type { RecallDisclosure, RecallPlanMode } from "./types.js";
 import { isRecallDisclosure } from "./types.js";
 import { isTrustZoneName, type TrustZoneName, type TrustZoneRecordKind, type TrustZoneSourceClass } from "./trust-zones.js";
@@ -680,8 +683,6 @@ export class EngramAccessHttpServer {
       const namespaceParam = parsed.searchParams.get("namespace");
       const bytes = this.readRequiredIntegerHeader(req, "x-remnic-file-bytes");
       const offset = this.readOptionalIntegerHeader(req, "x-remnic-chunk-offset") ?? 0;
-      const startsUpload = offset === 0;
-      if (startsUpload) this.ensureWriteRateLimitAvailable();
       const content = await this.readBinaryBody(req, OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES);
       const result = await this.service.offlineSyncApplyFileContent({
         namespace: this.resolveNamespace(
@@ -703,7 +704,6 @@ export class EngramAccessHttpServer {
         baseSha256: this.readOptionalHeader(req, "x-remnic-base-sha256"),
         content,
       });
-      if (startsUpload) this.recordWriteRateLimitHit();
       this.respondJson(res, 200, result);
       return;
     }
@@ -712,14 +712,12 @@ export class EngramAccessHttpServer {
       req.method === "POST" &&
       (pathname === "/engram/v1/offline-sync/apply" || pathname === "/remnic/v1/offline-sync/apply")
     ) {
-      const body = await this.readValidatedBody(req, "offlineSyncApply");
-      this.ensureWriteRateLimitAvailable();
+      const body = await this.readValidatedBody(req, "offlineSyncApply", OFFLINE_SYNC_APPLY_MAX_BODY_BYTES);
       const result = await this.service.offlineSyncApply({
         namespace: this.resolveNamespace(req, body.namespace),
         principal: this.resolveRequestPrincipal(req),
         changeset: body.changeset,
       });
-      this.recordWriteRateLimitHit();
       this.respondJson(res, 200, result);
       return;
     }
@@ -1924,13 +1922,16 @@ export class EngramAccessHttpServer {
     }
   }
 
-  private async readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  private async readJsonBody(
+    req: IncomingMessage,
+    maxBodyBytes = this.maxBodyBytes,
+  ): Promise<Record<string, unknown>> {
     const chunks: Buffer[] = [];
     let total = 0;
     for await (const chunk of req) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += buffer.length;
-      if (total > this.maxBodyBytes) {
+      if (total > maxBodyBytes) {
         throw new HttpError(413, "request_body_too_large", "request_body_too_large");
       }
       chunks.push(buffer);
@@ -2027,8 +2028,12 @@ export class EngramAccessHttpServer {
     throw new EngramAccessInputError(`${name} header must be one of: true, false`);
   }
 
-  private async readValidatedBody<S extends SchemaName>(req: IncomingMessage, schemaName: S): Promise<SchemaTypeFor<S>> {
-    const raw = await this.readJsonBody(req);
+  private async readValidatedBody<S extends SchemaName>(
+    req: IncomingMessage,
+    schemaName: S,
+    maxBodyBytes?: number,
+  ): Promise<SchemaTypeFor<S>> {
+    const raw = await this.readJsonBody(req, maxBodyBytes);
     const result = validateRequest(schemaName, raw);
     if (!result.success) {
       throw new HttpError(400, result.error.error, "validation_error", result.error.details);
