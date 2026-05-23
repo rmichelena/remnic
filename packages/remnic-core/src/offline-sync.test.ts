@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  applyOfflineSyncFileContentChunk,
   applyOfflineSyncChangeset,
   applyOfflineSyncSnapshot,
   buildOfflineSyncChangeset,
@@ -58,7 +59,21 @@ test("offline snapshot captures source-of-truth files and excludes private/inter
 
     assert.deepEqual(
       snapshot.files.map((file) => file.path),
-      ["assets/blob.bin", "facts/a.md", "facts/fact-hashes.txt", "transcripts/session.jsonl"],
+      [
+        "assets/blob.bin",
+        "facts/a.md",
+        "facts/fact-hashes.txt",
+        "state/fact-hashes.ready",
+        "state/fact-hashes.txt",
+        "state/last_graph_recall.json",
+        "state/last_intent.json",
+        "state/last_qmd_recall.json",
+        "state/last_recall.json",
+        "state/lcm.sqlite",
+        "state/lcm.sqlite-shm",
+        "state/lcm.sqlite-wal",
+        "transcripts/session.jsonl",
+      ],
     );
     const binary = snapshot.files.find((file) => file.path === "assets/blob.bin");
     assert.equal(Buffer.from(binary?.contentBase64 ?? "", "base64")[3], 255);
@@ -71,14 +86,27 @@ test("offline snapshot captures source-of-truth files and excludes private/inter
     });
     assert.deepEqual(
       withoutTranscripts.files.map((file) => file.path),
-      ["assets/blob.bin", "facts/a.md", "facts/fact-hashes.txt"],
+      [
+        "assets/blob.bin",
+        "facts/a.md",
+        "facts/fact-hashes.txt",
+        "state/fact-hashes.ready",
+        "state/fact-hashes.txt",
+        "state/last_graph_recall.json",
+        "state/last_intent.json",
+        "state/last_qmd_recall.json",
+        "state/last_recall.json",
+        "state/lcm.sqlite",
+        "state/lcm.sqlite-shm",
+        "state/lcm.sqlite-wal",
+      ],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("offline sync excludes volatile retrieval debug snapshots without deleting existing local copies", async () => {
+test("offline sync includes retrieval debug snapshots for full-fidelity offline recall", async () => {
   const root = await tempDir("remnic-offline-debug-snapshots");
   try {
     await write(root, "facts/a.md", "alpha");
@@ -93,25 +121,25 @@ test("offline sync excludes volatile retrieval debug snapshots without deleting 
       includeContent: true,
     });
 
-    assert.deepEqual(snapshot.files.map((file) => file.path), ["facts/a.md"]);
-    await assert.rejects(
-      () =>
-        buildOfflineSyncSnapshotForPaths({
-          root,
-          sourceId: "remote",
-          paths: ["state/last_graph_recall.json"],
-          includeContent: true,
-        }),
-      /offline sync snapshot path is excluded: state\/last_graph_recall\.json/,
-    );
-    await assert.rejects(
-      () =>
-        readOfflineSyncFileContentChunk({
-          root,
-          path: "state/last_graph_recall.json",
-        }),
-      /offline sync file content path is excluded: state\/last_graph_recall\.json/,
-    );
+    assert.deepEqual(snapshot.files.map((file) => file.path), [
+      "facts/a.md",
+      "state/last_graph_recall.json",
+      "state/last_intent.json",
+      "state/last_qmd_recall.json",
+      "state/last_recall.json",
+    ]);
+    const focused = await buildOfflineSyncSnapshotForPaths({
+      root,
+      sourceId: "remote",
+      paths: ["state/last_graph_recall.json"],
+      includeContent: true,
+    });
+    assert.deepEqual(focused.files.map((file) => file.path), ["state/last_graph_recall.json"]);
+    const chunk = await readOfflineSyncFileContentChunk({
+      root,
+      path: "state/last_graph_recall.json",
+    });
+    assert.equal(chunk.content.toString("utf-8"), "graph");
 
     const oldGraph = Buffer.from("old graph");
     const pull = await applyOfflineSyncSnapshot({
@@ -125,14 +153,14 @@ test("offline sync excludes volatile retrieval debug snapshots without deleting 
       }],
     });
 
-    assert.equal(pull.deleted, 0);
+    assert.equal(pull.skipped, 5);
     assert.equal(await readUtf8(root, "state/last_graph_recall.json"), "graph");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("offline sync excludes live LCM sqlite artifacts without deleting existing local copies", async () => {
+test("offline sync includes live LCM sqlite artifacts for full-fidelity offline mode", async () => {
   const root = await tempDir("remnic-offline-lcm-sqlite");
   try {
     await write(root, "facts/a.md", "alpha");
@@ -146,17 +174,19 @@ test("offline sync excludes live LCM sqlite artifacts without deleting existing 
       includeContent: true,
     });
 
-    assert.deepEqual(snapshot.files.map((file) => file.path), ["facts/a.md"]);
-    await assert.rejects(
-      () =>
-        buildOfflineSyncSnapshotForPaths({
-          root,
-          sourceId: "remote",
-          paths: ["state/lcm.sqlite"],
-          includeContent: true,
-        }),
-      /offline sync snapshot path is excluded: state\/lcm\.sqlite/,
-    );
+    assert.deepEqual(snapshot.files.map((file) => file.path), [
+      "facts/a.md",
+      "state/lcm.sqlite",
+      "state/lcm.sqlite-shm",
+      "state/lcm.sqlite-wal",
+    ]);
+    const focused = await buildOfflineSyncSnapshotForPaths({
+      root,
+      sourceId: "remote",
+      paths: ["state/lcm.sqlite"],
+      includeContent: true,
+    });
+    assert.deepEqual(focused.files.map((file) => file.path), ["state/lcm.sqlite"]);
 
     const oldDb = Buffer.from("old live db");
     const pull = await applyOfflineSyncSnapshot({
@@ -170,14 +200,14 @@ test("offline sync excludes live LCM sqlite artifacts without deleting existing 
       }],
     });
 
-    assert.equal(pull.deleted, 0);
+    assert.equal(pull.skipped, 4);
     assert.equal(await readUtf8(root, "state/lcm.sqlite"), "live db");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("offline sync excludes runtime-derived state without deleting existing local copies", async () => {
+test("offline sync includes durable runtime state and excludes only transient sync temp files", async () => {
   const root = await tempDir("remnic-offline-runtime-state");
   try {
     await write(root, "facts/a.md", "alpha");
@@ -209,17 +239,30 @@ test("offline sync excludes runtime-derived state without deleting existing loca
     assert.deepEqual(snapshot.files.map((file) => file.path), [
       "assets/state/fact-hashes.txt",
       "facts/a.md",
+      "namespaces/generalist-project-origin-6ebeaa54/state/.memory-status-version.log",
+      "namespaces/generalist-project-origin-6ebeaa54/state/entity-mention-index.json",
+      "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json",
+      "state/.artifact-write-version.log",
+      "state/.memory-status-version.log",
+      "state/buffer-surprise-ledger.jsonl",
+      "state/buffer.json",
+      "state/embeddings.json",
+      "state/entity-mention-index.json",
+      "state/index_tags.json",
+      "state/index_time.json",
+      "state/memory-lifecycle-ledger.jsonl",
+      "state/memory-projection.sqlite",
+      "state/memory-projection.sqlite-shm",
+      "state/memory-projection.sqlite-wal",
+      "state/recall_impressions.jsonl",
     ]);
-    await assert.rejects(
-      () =>
-        buildOfflineSyncSnapshotForPaths({
-          root,
-          sourceId: "remote",
-          paths: ["state/memory-lifecycle-ledger.jsonl"],
-          includeContent: true,
-        }),
-      /offline sync snapshot path is excluded: state\/memory-lifecycle-ledger\.jsonl/,
-    );
+    const focused = await buildOfflineSyncSnapshotForPaths({
+      root,
+      sourceId: "remote",
+      paths: ["state/memory-lifecycle-ledger.jsonl"],
+      includeContent: true,
+    });
+    assert.deepEqual(focused.files.map((file) => file.path), ["state/memory-lifecycle-ledger.jsonl"]);
     await assert.rejects(
       () =>
         readOfflineSyncFileContentChunk({
@@ -228,16 +271,15 @@ test("offline sync excludes runtime-derived state without deleting existing loca
         }),
       /offline sync file content path is excluded: state\/buffer\.json\.tmp-123-456/,
     );
-    await assert.rejects(
-      () =>
-        buildOfflineSyncSnapshotForPaths({
-          root,
-          sourceId: "remote",
-          paths: ["namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json"],
-          includeContent: true,
-        }),
-      /offline sync snapshot path is excluded: namespaces\/generalist-project-origin-6ebeaa54\/state\/last_intent\.json/,
-    );
+    const namespaced = await buildOfflineSyncSnapshotForPaths({
+      root,
+      sourceId: "remote",
+      paths: ["namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json"],
+      includeContent: true,
+    });
+    assert.deepEqual(namespaced.files.map((file) => file.path), [
+      "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json",
+    ]);
 
     const oldLedger = Buffer.from("old ledger");
     const pull = await applyOfflineSyncSnapshot({
@@ -251,14 +293,14 @@ test("offline sync excludes runtime-derived state without deleting existing loca
       }],
     });
 
-    assert.equal(pull.deleted, 0);
+    assert.equal(pull.skipped, 18);
     assert.equal(await readUtf8(root, "state/memory-lifecycle-ledger.jsonl"), "ledger");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("offline sync ignores runtime-derived records from older peers", async () => {
+test("offline sync accepts durable runtime records from older peers", async () => {
   const root = await tempDir("remnic-offline-legacy-runtime-state");
   try {
     const fact = Buffer.from("alpha");
@@ -279,6 +321,13 @@ test("offline sync ignores runtime-derived records from older peers", async () =
         files: [
           {
             path: "state/buffer.json",
+            sha256: runtimeSha,
+            bytes: runtime.byteLength,
+            mtimeMs: 0,
+            contentBase64: runtime.toString("base64"),
+          },
+          {
+            path: "state/buffer.json.tmp-123-456",
             sha256: runtimeSha,
             bytes: runtime.byteLength,
             mtimeMs: 0,
@@ -309,15 +358,16 @@ test("offline sync ignores runtime-derived records from older peers", async () =
       },
     });
 
-    assert.equal(pull.upserted, 2);
+    assert.equal(pull.upserted, 4);
     assert.equal(await readUtf8(root, "facts/a.md"), "alpha");
     assert.equal(await readUtf8(root, "assets/state/fact-hashes.txt"), "durable asset");
-    await assert.rejects(
-      () => readFile(path.join(root, "state", "buffer.json")),
-      /ENOENT/,
+    assert.equal(await readUtf8(root, "state/buffer.json"), "legacy runtime");
+    assert.equal(
+      await readUtf8(root, "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json"),
+      "legacy runtime",
     );
     await assert.rejects(
-      () => readFile(path.join(root, "namespaces", "generalist-project-origin-6ebeaa54", "state", "last_intent.json")),
+      () => readFile(path.join(root, "state", "buffer.json.tmp-123-456")),
       /ENOENT/,
     );
 
@@ -337,6 +387,17 @@ test("offline sync ignores runtime-derived records from older peers", async () =
               path: "state/memory-lifecycle-ledger.jsonl",
               file: {
                 path: "state/memory-lifecycle-ledger.jsonl",
+                sha256: runtimeSha,
+                bytes: runtime.byteLength,
+                mtimeMs: 0,
+                contentBase64: runtime.toString("base64"),
+              },
+            },
+            {
+              type: "upsert",
+              path: "state/buffer.json.tmp-123-456",
+              file: {
+                path: "state/buffer.json.tmp-123-456",
                 sha256: runtimeSha,
                 bytes: runtime.byteLength,
                 mtimeMs: 0,
@@ -380,15 +441,19 @@ test("offline sync ignores runtime-derived records from older peers", async () =
         },
       });
 
-      assert.equal(push.appliedUpserts, 2);
+      assert.equal(push.appliedUpserts, 4);
       assert.equal(await readUtf8(remote, "facts/a.md"), "alpha");
       assert.equal(await readUtf8(remote, "assets/state/fact-hashes.txt"), "durable asset");
-      await assert.rejects(
-        () => readFile(path.join(remote, "state", "memory-lifecycle-ledger.jsonl")),
-        /ENOENT/,
+      assert.equal(
+        await readUtf8(remote, "state/memory-lifecycle-ledger.jsonl"),
+        "legacy runtime",
+      );
+      assert.equal(
+        await readUtf8(remote, "namespaces/generalist-project-origin-6ebeaa54/state/last_intent.json"),
+        "legacy runtime",
       );
       await assert.rejects(
-        () => readFile(path.join(remote, "namespaces", "generalist-project-origin-6ebeaa54", "state", "last_intent.json")),
+        () => readFile(path.join(remote, "state", "buffer.json.tmp-123-456")),
         /ENOENT/,
       );
     } finally {
@@ -426,6 +491,7 @@ test("offline sync reads bounded file content chunks with metadata", async () =>
   const root = await tempDir("remnic-offline-file-content");
   try {
     await write(root, "artifacts/large.txt", "alpha\nbeta\ngamma\n");
+    await write(root, "state/lcm.sqlite", "live db");
 
     const chunk = await readOfflineSyncFileContentChunk({
       root,
@@ -440,14 +506,199 @@ test("offline sync reads bounded file content chunks with metadata", async () =>
     assert.equal(chunk.content.toString("utf-8"), "beta\n");
     assert.equal(chunk.bytes, Buffer.byteLength("alpha\nbeta\ngamma\n"));
 
-    await assert.rejects(
-      () =>
-        readOfflineSyncFileContentChunk({
-          root,
-          path: "state/lcm.sqlite",
-        }),
-      /offline sync file content path is excluded: state\/lcm\.sqlite/,
-    );
+    const lcm = await readOfflineSyncFileContentChunk({
+      root,
+      path: "state/lcm.sqlite",
+    });
+    assert.equal(lcm.content.toString("utf-8"), "live db");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offline sync applies chunked file content with base conflict checks", async () => {
+  const root = await tempDir("remnic-offline-file-content-apply");
+  try {
+    await write(root, "state/lcm.sqlite", "old");
+    const oldSha = createHash("sha256").update("old").digest("hex");
+    const next = Buffer.from("new durable sqlite content");
+    const nextSha = createHash("sha256").update(next).digest("hex");
+
+    const first = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: nextSha,
+      bytes: next.byteLength,
+      mtimeMs: 123,
+      offset: 0,
+      baseSha256: oldSha,
+      content: next.subarray(0, 8),
+    });
+    assert.equal(first.done, false);
+
+    const second = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: nextSha,
+      bytes: next.byteLength,
+      mtimeMs: 123,
+      offset: 8,
+      baseSha256: oldSha,
+      content: next.subarray(8),
+    });
+    assert.equal(second.done, true);
+    assert.equal(second.applied, true);
+    assert.equal(await readUtf8(root, "state/lcm.sqlite"), "new durable sqlite content");
+
+    const conflictContent = Buffer.from("conflicting local sqlite");
+    const conflictSha = createHash("sha256").update(conflictContent).digest("hex");
+    const conflict = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: conflictSha,
+      bytes: conflictContent.byteLength,
+      mtimeMs: 456,
+      offset: 0,
+      baseSha256: oldSha,
+      content: conflictContent,
+    });
+    assert.equal(conflict.done, true);
+    assert.equal(conflict.applied, false);
+    assert.equal(conflict.conflict?.reason, "remote_changed_for_local_update");
+    assert.equal(await readUtf8(root, "state/lcm.sqlite"), "new durable sqlite content");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offline sync stages chunked uploads through storage hooks", async () => {
+  const root = await tempDir("remnic-offline-file-content-hooks");
+  const encode = (content: Buffer) => Buffer.from(`ENC:${content.toString("base64")}`);
+  const decode = (content: Buffer) => {
+    const text = content.toString("utf-8");
+    return text.startsWith("ENC:") ? Buffer.from(text.slice(4), "base64") : content;
+  };
+  const readHook = async ({ filePath }: { filePath: string }) => decode(await readFile(filePath));
+  let stagingWrites = 0;
+  let mutationWrites = 0;
+  const writeStagingHook = async ({ filePath, content }: { filePath: string; content: Buffer }) => {
+    stagingWrites += 1;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, encode(content));
+  };
+  const writeHook = async ({ filePath, content }: { filePath: string; content: Buffer }) => {
+    mutationWrites += 1;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, encode(content));
+  };
+  const writeChunksHook = async ({
+    filePath,
+    chunks,
+  }: {
+    filePath: string;
+    chunks: AsyncIterable<Buffer>;
+  }) => {
+    const content: Buffer[] = [];
+    for await (const chunk of chunks) content.push(chunk);
+    await writeHook({ filePath, content: Buffer.concat(content) });
+  };
+
+  try {
+    await write(root, "state/lcm.sqlite", "old");
+    const oldSha = createHash("sha256").update("old").digest("hex");
+    const next = Buffer.from("new durable sqlite content");
+    const nextSha = createHash("sha256").update(next).digest("hex");
+
+    const first = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: nextSha,
+      bytes: next.byteLength,
+      mtimeMs: 123,
+      offset: 0,
+      baseSha256: oldSha,
+      content: next.subarray(0, 8),
+      readFile: readHook,
+      writeFile: writeHook,
+      writeStagingFile: writeStagingHook,
+      writeFileChunks: writeChunksHook,
+    });
+    assert.equal(first.done, false);
+    assert.equal(stagingWrites, 1);
+    assert.equal(mutationWrites, 0);
+    const uploadEntries = await readdir(path.join(root, ".offline-sync", "uploads"));
+    assert.equal(uploadEntries.length, 1);
+    const uploadChunkEntries = await readdir(path.join(root, ".offline-sync", "uploads", uploadEntries[0]));
+    assert.deepEqual(uploadChunkEntries, ["00000000000000000000.part"]);
+    const rawUpload = await readFile(path.join(
+      root,
+      ".offline-sync",
+      "uploads",
+      uploadEntries[0],
+      uploadChunkEntries[0],
+    ));
+    assert.match(rawUpload.toString("utf-8"), /^ENC:/);
+    assert.equal(rawUpload.includes(next.subarray(0, 8)), false);
+
+    const second = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: nextSha,
+      bytes: next.byteLength,
+      mtimeMs: 123,
+      offset: 8,
+      baseSha256: oldSha,
+      content: next.subarray(8),
+      readFile: readHook,
+      writeFile: writeHook,
+      writeStagingFile: writeStagingHook,
+      writeFileChunks: writeChunksHook,
+    });
+    assert.equal(second.applied, true);
+    assert.equal(stagingWrites, 2);
+    assert.equal(mutationWrites, 1);
+    assert.equal((await readdir(path.join(root, ".offline-sync", "uploads"))).length, 0);
+    const rawTarget = await readFile(path.join(root, "state/lcm.sqlite"));
+    assert.match(rawTarget.toString("utf-8"), /^ENC:/);
+    assert.equal(decode(rawTarget).toString("utf-8"), "new durable sqlite content");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offline sync prunes stale staged uploads when starting a new upload", async () => {
+  const root = await tempDir("remnic-offline-file-content-prune");
+  try {
+    const staleKey = `${"a".repeat(64)}.part`;
+    const staleDir = path.join(root, ".offline-sync", "uploads", staleKey);
+    await mkdir(staleDir, { recursive: true });
+    await writeFile(path.join(staleDir, "00000000000000000000.part"), "abandoned");
+    const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    await utimes(path.join(staleDir, "00000000000000000000.part"), staleTime, staleTime);
+    await utimes(staleDir, staleTime, staleTime);
+
+    const next = Buffer.from("new durable sqlite content");
+    const nextSha = createHash("sha256").update(next).digest("hex");
+    const first = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: nextSha,
+      bytes: next.byteLength,
+      mtimeMs: 123,
+      offset: 0,
+      content: next.subarray(0, 8),
+    });
+
+    assert.equal(first.done, false);
+    const uploadEntries = await readdir(path.join(root, ".offline-sync", "uploads"));
+    assert.equal(uploadEntries.includes(staleKey), false);
+    assert.equal(uploadEntries.length, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -521,6 +772,32 @@ test("offline changeset only carries content for changed local files", async () 
       assert.equal(empty.file.contentBase64, "");
     }
     assert.equal(JSON.stringify(changeset).includes("same"), false);
+  } finally {
+    await rm(local, { recursive: true, force: true });
+  }
+});
+
+test("offline changeset can exclude directly pushed large files without reading their content", async () => {
+  const local = await tempDir("remnic-offline-changeset-exclude");
+  try {
+    await write(local, "state/lcm.sqlite", "before");
+    await write(local, "facts/small.md", "before");
+    const base = await buildOfflineSyncSnapshot({
+      root: local,
+      sourceId: "remote",
+      includeContent: false,
+    });
+
+    await write(local, "state/lcm.sqlite", "after large");
+    await write(local, "facts/small.md", "after small");
+    const changeset = await buildOfflineSyncChangeset({
+      root: local,
+      sourceId: "laptop",
+      baseFiles: base.files,
+      excludePaths: ["state/lcm.sqlite"],
+    });
+
+    assert.deepEqual(changeset.changes.map((change) => change.path), ["facts/small.md"]);
   } finally {
     await rm(local, { recursive: true, force: true });
   }
@@ -960,6 +1237,45 @@ test("offline sync applies and snapshots through secure storage hooks", async ()
       "secret fact",
     );
     assert.equal(snapshot.files[0]?.bytes, Buffer.byteLength("secret fact"));
+
+    const sqlite = Buffer.from("streamed durable sqlite content");
+    const sqliteSha = createHash("sha256").update(sqlite).digest("hex");
+    const first = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: sqliteSha,
+      bytes: sqlite.byteLength,
+      mtimeMs: 321,
+      offset: 0,
+      content: sqlite.subarray(0, 8),
+      readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+      writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
+      writeStagingFile: async ({ filePath, content }) => storage.writeOfflineSyncStagingFile(filePath, content),
+      writeFileChunks: async ({ filePath, chunks }) => storage.writeOfflineSyncFileChunks(filePath, chunks),
+    });
+    assert.equal(first.done, false);
+    const second = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: sqliteSha,
+      bytes: sqlite.byteLength,
+      mtimeMs: 321,
+      offset: 8,
+      content: sqlite.subarray(8),
+      readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+      writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
+      writeStagingFile: async ({ filePath, content }) => storage.writeOfflineSyncStagingFile(filePath, content),
+      writeFileChunks: async ({ filePath, chunks }) => storage.writeOfflineSyncFileChunks(filePath, chunks),
+    });
+    assert.equal(second.applied, true);
+    const rawSqlite = await readFile(path.join(root, "state", "lcm.sqlite"));
+    assert.equal(isEncryptedFile(rawSqlite), true);
+    assert.equal(
+      (await storage.readOfflineSyncFile(path.join(root, "state", "lcm.sqlite"))).toString("utf8"),
+      "streamed durable sqlite content",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(source, { recursive: true, force: true });
@@ -984,7 +1300,7 @@ test("offline storage writes invalidate fact hash readiness for rebuild", async 
 
     assert.equal(
       sourceChangeset.changes.some((change) => change.path.startsWith("state/fact-hashes")),
-      false,
+      true,
     );
 
     const factChangeset = {

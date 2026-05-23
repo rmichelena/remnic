@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
   stat,
   unlink,
   writeFile,
@@ -130,11 +131,37 @@ export interface OfflineSyncFileWriteTarget extends OfflineSyncFileTarget {
   content: Buffer;
 }
 
+export interface OfflineSyncFileWriteChunksTarget extends OfflineSyncFileTarget {
+  chunks: AsyncIterable<Buffer>;
+}
+
+export interface OfflineSyncFileStagingWriteTarget extends OfflineSyncFileWriteTarget {}
+
 export interface OfflineSyncFileContentChunk extends Omit<OfflineSyncFileState, "sha256"> {
   sha256?: string;
   offset: number;
   chunkBytes: number;
   content: Buffer;
+}
+
+export interface OfflineSyncApplyFileContentChunkResult {
+  path: string;
+  sha256: string;
+  bytes: number;
+  mtimeMs: number;
+  offset: number;
+  chunkBytes: number;
+  done: boolean;
+  applied: boolean;
+  skipped: boolean;
+  conflict?: OfflineSyncConflict;
+  currentFile?: OfflineSyncFileState;
+}
+
+interface OfflineUploadStaging {
+  kind: "single" | "chunks";
+  relPath: string;
+  filePath: string;
 }
 
 interface OfflineSyncFileRecordOptions {
@@ -146,33 +173,9 @@ interface OfflineSyncFileRecordOptions {
 }
 
 const SYNC_INTERNAL_DIR = ".offline-sync";
+const OFFLINE_SYNC_UPLOAD_STAGING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const EXCLUDED_FILE_NAMES = new Set([
   ".sync-state.json",
-]);
-
-const DERIVED_RUNTIME_STATE_BASENAMES = new Set([
-  ".artifact-write-version.log",
-  ".memory-status-version.log",
-  "fact-hashes.ready",
-  "fact-hashes.txt",
-  "buffer-surprise-ledger.jsonl",
-  "buffer.json",
-  "embeddings.json",
-  "entity-mention-index.json",
-  "index_tags.json",
-  "index_time.json",
-  "last_graph_recall.json",
-  "last_intent.json",
-  "last_qmd_recall.json",
-  "last_recall.json",
-  "lcm.sqlite",
-  "lcm.sqlite-shm",
-  "lcm.sqlite-wal",
-  "memory-lifecycle-ledger.jsonl",
-  "memory-projection.sqlite",
-  "memory-projection.sqlite-shm",
-  "memory-projection.sqlite-wal",
-  "recall_impressions.jsonl",
 ]);
 
 const EXCLUDED_FILE_PREFIXES = [
@@ -431,7 +434,6 @@ function shouldExcludeRelPath(relPosix: string, includeTranscripts: boolean): bo
   const parts = relPosix.split("/");
   if (parts.some((part) => DEFAULT_TRANSFER_EXCLUDE_DIRS.has(part))) return true;
   if (parts.some((part) => part === SYNC_INTERNAL_DIR)) return true;
-  if (isDerivedRuntimeStatePath(parts)) return true;
   if (!includeTranscripts && parts[0] === "transcripts") return true;
   const basename = parts[parts.length - 1] ?? "";
   if (isCanonicalRuntimeStatePath(parts) && basename.includes(".tmp-")) return true;
@@ -442,12 +444,7 @@ function shouldExcludeRelPath(relPosix: string, includeTranscripts: boolean): bo
 function shouldIgnoreIncomingRuntimePath(relPosix: string): boolean {
   const parts = relPosix.split("/");
   const basename = parts[parts.length - 1] ?? "";
-  return isDerivedRuntimeStatePath(parts) || (isCanonicalRuntimeStatePath(parts) && basename.includes(".tmp-"));
-}
-
-function isDerivedRuntimeStatePath(parts: string[]): boolean {
-  const basename = parts[parts.length - 1] ?? "";
-  return isCanonicalRuntimeStatePath(parts) && DERIVED_RUNTIME_STATE_BASENAMES.has(basename);
+  return isCanonicalRuntimeStatePath(parts) && basename.includes(".tmp-");
 }
 
 function isCanonicalRuntimeStatePath(parts: string[]): boolean {
@@ -683,11 +680,15 @@ export async function buildOfflineSyncChangeset(options: {
   root: string;
   sourceId: string;
   baseFiles?: readonly OfflineSyncFileState[];
+  excludePaths?: readonly string[];
   includeTranscripts?: boolean;
   now?: Date;
   readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
 }): Promise<OfflineSyncChangeset> {
   const includeTranscripts = options.includeTranscripts !== false;
+  const excludedPaths = new Set(
+    (options.excludePaths ?? []).map((relPath) => normalizeRelativePath(relPath, "excludePaths[]")),
+  );
   const base = byPath(filterBaseFilesForMode(
     normalizeFileStates(options.baseFiles),
     includeTranscripts,
@@ -704,6 +705,7 @@ export async function buildOfflineSyncChangeset(options: {
   const changes: OfflineSyncChange[] = [];
 
   for (const relPath of unionPaths(base, currentMap)) {
+    if (excludedPaths.has(relPath)) continue;
     const baseEntry = base.get(relPath);
     const currentEntry = currentMap.get(relPath);
     if (currentEntry && currentEntry.sha256 !== baseEntry?.sha256) {
@@ -1146,6 +1148,443 @@ async function writeSafeFile(
     await unlink(tmp).catch(() => {});
     throw error;
   }
+}
+
+export async function applyOfflineSyncFileContentChunk(options: {
+  root: string;
+  sourceId: string;
+  path: string;
+  sha256: string;
+  bytes: number;
+  mtimeMs: number;
+  offset?: number;
+  content: Buffer;
+  baseSha256?: string;
+  includeTranscripts?: boolean;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+  writeFile?: (target: OfflineSyncFileWriteTarget) => Promise<void>;
+  writeStagingFile?: (target: OfflineSyncFileStagingWriteTarget) => Promise<void>;
+  writeFileChunks?: (target: OfflineSyncFileWriteChunksTarget) => Promise<void>;
+}): Promise<OfflineSyncApplyFileContentChunkResult> {
+  const root = await ensureSyncRoot(options.root, "applyOfflineSyncFileContentChunk");
+  const sourceId = normalizeSourceId(options.sourceId, "sourceId");
+  const relPath = normalizeRelativePath(options.path, "path");
+  const includeTranscripts = options.includeTranscripts !== false;
+  if (shouldExcludeRelPath(relPath, includeTranscripts)) {
+    throw new Error(`offline sync file content path is excluded: ${relPath}`);
+  }
+  const sha256 = assertSha256(options.sha256, "sha256");
+  const bytes = assertNonNegativeInteger(options.bytes, "bytes");
+  const mtimeMs = assertNonNegativeFinite(options.mtimeMs, "mtimeMs");
+  const offset = options.offset === undefined
+    ? 0
+    : assertNonNegativeInteger(options.offset, "offset");
+  const baseSha256 = options.baseSha256 === undefined
+    ? undefined
+    : assertSha256(options.baseSha256, "baseSha256");
+  if (!Buffer.isBuffer(options.content)) {
+    throw new Error("content must be a Buffer");
+  }
+  if (options.content.length > OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES) {
+    throw new Error(
+      `content chunk must be ${OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES} bytes or fewer`,
+    );
+  }
+  if (bytes > 0 && options.content.length === 0) {
+    throw new Error("content chunk must be non-empty before EOF");
+  }
+  if (offset > bytes || offset + options.content.length > bytes) {
+    throw new Error(`content chunk range exceeds declared file size for ${relPath}`);
+  }
+  if (options.writeFile && !options.writeFileChunks) {
+    throw new Error("offline sync upload storage hooks require writeFileChunks");
+  }
+  if (options.writeFile && !options.writeStagingFile) {
+    throw new Error("offline sync upload storage hooks require writeStagingFile");
+  }
+  if (offset === 0) {
+    await pruneOfflineUploadStaging(root);
+  }
+
+  const upload = await writeOfflineUploadChunk({
+    root,
+    sourceId,
+    relPath,
+    sha256,
+    bytes,
+    offset,
+    content: options.content,
+    readFile: options.readFile,
+    writeFile: options.writeFile,
+    writeStagingFile: options.writeStagingFile,
+  });
+  const done = offset + options.content.length === bytes;
+  const baseResult = {
+    path: relPath,
+    sha256,
+    bytes,
+    mtimeMs,
+    offset,
+    chunkBytes: options.content.length,
+    done,
+  };
+  if (!done) {
+    return {
+      ...baseResult,
+      applied: false,
+      skipped: false,
+    };
+  }
+
+  const digest = await digestOfflineUploadStagingContent({
+    root,
+    upload,
+    readFile: options.readFile,
+  });
+  if (digest.sha256 !== sha256 || digest.bytes !== bytes) {
+    await cleanupOfflineUpload(upload).catch(() => {});
+    throw new Error(`offline sync upload checksum mismatch for ${relPath}`);
+  }
+
+  const currentSnapshot = await buildOfflineSyncSnapshotForPaths({
+    root: root.abs,
+    sourceId: "local",
+    paths: [relPath],
+    includeContent: false,
+    includeTranscripts,
+    readFile: options.readFile,
+  });
+  const currentFile = currentSnapshot.files[0];
+  const uploadedState: OfflineSyncFileState = {
+    path: relPath,
+    sha256,
+    bytes,
+    mtimeMs,
+  };
+
+  try {
+    if (currentFile?.sha256 === sha256) {
+      return {
+        ...baseResult,
+        applied: false,
+        skipped: true,
+        currentFile: toFileState(currentFile),
+      };
+    }
+    if (!baseSha256 && currentFile) {
+      const conflict = await recordConflict({
+        root,
+        relPath,
+        reason: "remote_exists_for_local_create",
+        localSha256: currentFile.sha256,
+        incomingSha256: sha256,
+        writeConflictCopies: false,
+        sourceId,
+        writeFile: options.writeFile,
+      });
+      return {
+        ...baseResult,
+        applied: false,
+        skipped: false,
+        conflict,
+        currentFile: toFileState(currentFile),
+      };
+    }
+    if (baseSha256 && currentFile?.sha256 !== baseSha256) {
+      const conflict = await recordConflict({
+        root,
+        relPath,
+        reason: currentFile ? "remote_changed_for_local_update" : "remote_deleted_for_local_update",
+        baseSha256,
+        localSha256: currentFile?.sha256,
+        incomingSha256: sha256,
+        writeConflictCopies: false,
+        sourceId,
+        writeFile: options.writeFile,
+      });
+      return {
+        ...baseResult,
+        applied: false,
+        skipped: false,
+        conflict,
+        ...(currentFile ? { currentFile: toFileState(currentFile) } : {}),
+      };
+    }
+
+    await writeSafeFileFromUpload(root, relPath, upload, options.readFile, options.writeFileChunks);
+    return {
+      ...baseResult,
+      applied: true,
+      skipped: false,
+      currentFile: uploadedState,
+    };
+  } finally {
+    await cleanupOfflineUpload(upload).catch(() => {});
+  }
+}
+
+function offlineUploadRelPath(options: {
+  sourceId: string;
+  relPath: string;
+  sha256: string;
+  bytes: number;
+}): string {
+  const key = hashText([
+    options.sourceId,
+    options.relPath,
+    options.sha256,
+    String(options.bytes),
+  ].join("\0"));
+  return `${SYNC_INTERNAL_DIR}/uploads/${key}.part`;
+}
+
+async function offlineUploadPath(root: SafeArchiveRoot, options: {
+  sourceId: string;
+  relPath: string;
+  sha256: string;
+  bytes: number;
+}): Promise<OfflineUploadStaging> {
+  const relPath = offlineUploadRelPath(options);
+  return {
+    kind: "single",
+    relPath,
+    filePath: await resolveSafeArchiveTarget(root, relPath),
+  };
+}
+
+async function offlineUploadChunkPath(root: SafeArchiveRoot, options: {
+  sourceId: string;
+  relPath: string;
+  sha256: string;
+  bytes: number;
+  offset: number;
+}): Promise<OfflineUploadStaging> {
+  const uploadRelPath = offlineUploadRelPath(options);
+  const relPath = `${uploadRelPath}/${String(options.offset).padStart(20, "0")}.part`;
+  return {
+    kind: "chunks",
+    relPath,
+    filePath: await resolveSafeArchiveTarget(root, relPath),
+  };
+}
+
+async function writeOfflineUploadChunk(options: {
+  root: SafeArchiveRoot;
+  sourceId: string;
+  relPath: string;
+  sha256: string;
+  bytes: number;
+  offset: number;
+  content: Buffer;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+  writeFile?: (target: OfflineSyncFileWriteTarget) => Promise<void>;
+  writeStagingFile?: (target: OfflineSyncFileStagingWriteTarget) => Promise<void>;
+}): Promise<OfflineUploadStaging> {
+  if ((options.writeFile || options.writeStagingFile) && !options.readFile) {
+    throw new Error("offline sync upload chunk storage hooks require readFile");
+  }
+  const uploadRoot = {
+    ...(await offlineUploadPath(options.root, options)),
+    kind: "chunks" as const,
+  };
+  if (options.offset === 0) {
+    await rm(uploadRoot.filePath, { recursive: true, force: true }).catch(() => {});
+  } else {
+    const existing = await stat(uploadRoot.filePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (!existing || !existing.isDirectory()) {
+      throw new Error(`offline sync upload is missing initial chunk for ${options.relPath}`);
+    }
+  }
+  const chunk = await offlineUploadChunkPath(options.root, { ...options, offset: options.offset });
+
+  const writeStagingFile = options.writeStagingFile ?? options.writeFile;
+  if (writeStagingFile) {
+    // Storage-backed services provide these hooks so secure-store deployments
+    // keep staged partial uploads encrypted at rest without mutating indexes.
+    await writeOfflineUploadContent({
+      root: options.root,
+      relPath: chunk.relPath,
+      filePath: chunk.filePath,
+      content: options.content,
+      writeFile: writeStagingFile,
+    });
+    return uploadRoot;
+  }
+
+  await mkdir(path.dirname(chunk.filePath), { recursive: true });
+  const existingChunk = await lstat(chunk.filePath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (existingChunk?.isSymbolicLink()) {
+    throw new Error(`offline sync upload chunk is a symlink: ${chunk.relPath}`);
+  }
+  await writeFile(chunk.filePath, options.content, { mode: 0o600 });
+  return uploadRoot;
+}
+
+async function pruneOfflineUploadStaging(root: SafeArchiveRoot): Promise<void> {
+  const uploadsRelPath = `${SYNC_INTERNAL_DIR}/uploads`;
+  const uploadsPath = await resolveSafeArchiveTarget(root, uploadsRelPath);
+  const entries = await readdir(uploadsPath, { withFileTypes: true }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  });
+  const now = Date.now();
+  await Promise.all(entries.map(async (entry) => {
+    if (!/^[a-f0-9]{64}\.part$/i.test(entry.name)) return;
+    const relPath = `${uploadsRelPath}/${entry.name}`;
+    const filePath = await resolveSafeArchiveTarget(root, relPath);
+    const info = await lstat(filePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (!info) return;
+    if (now - info.mtimeMs <= OFFLINE_SYNC_UPLOAD_STAGING_MAX_AGE_MS) return;
+    await rm(filePath, { recursive: true, force: true });
+  }));
+}
+
+async function* readOfflineUploadStagingChunks(options: {
+  root: SafeArchiveRoot;
+  upload: OfflineUploadStaging;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+}): AsyncGenerator<Buffer> {
+  if (options.upload.kind === "single") {
+    yield await readOfflineUploadContent({
+      root: options.root,
+      relPath: options.upload.relPath,
+      filePath: options.upload.filePath,
+      readFile: options.readFile,
+    });
+    return;
+  }
+
+  const entries = await readdir(options.upload.filePath);
+  const chunkNames = entries
+    .filter((entry) => /^\d{20}\.part$/.test(entry))
+    .sort();
+  if (chunkNames.length === 0) {
+    throw new Error(`offline sync upload is missing chunks for ${options.upload.relPath}`);
+  }
+  let expectedOffset = 0;
+  for (const chunkName of chunkNames) {
+    const offset = Number(chunkName.slice(0, 20));
+    if (!Number.isSafeInteger(offset) || offset !== expectedOffset) {
+      throw new Error(
+        `offline sync upload offset mismatch for ${options.upload.relPath}: expected ${expectedOffset}, got ${offset}`,
+      );
+    }
+    const relPath = `${options.upload.relPath}/${chunkName}`;
+    const filePath = await resolveSafeArchiveTarget(options.root, relPath);
+    const content = await readOfflineUploadContent({
+      root: options.root,
+      relPath,
+      filePath,
+      readFile: options.readFile,
+    });
+    expectedOffset += content.length;
+    yield content;
+  }
+}
+
+async function digestOfflineUploadStagingContent(options: {
+  root: SafeArchiveRoot;
+  upload: OfflineUploadStaging;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+}): Promise<{ sha256: string; bytes: number }> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of readOfflineUploadStagingChunks(options)) {
+    hash.update(chunk);
+    bytes += chunk.length;
+  }
+  return { sha256: hash.digest("hex"), bytes };
+}
+
+async function writeSafeFileFromUpload(
+  root: SafeArchiveRoot,
+  relPath: string,
+  upload: OfflineUploadStaging,
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>,
+  writeFileChunks?: (target: OfflineSyncFileWriteChunksTarget) => Promise<void>,
+): Promise<void> {
+  const target = await resolveSafeArchiveTarget(root, relPath);
+  const chunks = readOfflineUploadStagingChunks({ root, upload, readFile });
+  if (writeFileChunks) {
+    await writeFileChunks({ root: root.abs, path: relPath, filePath: target, chunks });
+    return;
+  }
+
+  await mkdir(path.dirname(target), { recursive: true });
+  const tmp = path.join(
+    path.dirname(target),
+    `.remnic-sync.${process.pid}.${randomUUID()}.tmp`,
+  );
+  const handle = await open(tmp, "w", 0o600);
+  try {
+    for await (const chunk of chunks) {
+      if (chunk.length > 0) await handle.write(chunk);
+    }
+    await handle.close();
+    const targetStat = await lstat(target).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (targetStat?.isSymbolicLink()) {
+      throw new Error(`offline sync target is a symlink: ${relPath}`);
+    }
+    await rename(tmp, target);
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+}
+
+async function cleanupOfflineUpload(upload: OfflineUploadStaging): Promise<void> {
+  if (upload.kind === "chunks") {
+    await rm(upload.filePath, { recursive: true, force: true });
+    return;
+  }
+  await unlink(upload.filePath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  });
+}
+
+async function readOfflineUploadContent(options: {
+  root: SafeArchiveRoot;
+  relPath: string;
+  filePath: string;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+}): Promise<Buffer> {
+  if (options.readFile) {
+    return options.readFile({
+      root: options.root.abs,
+      path: options.relPath,
+      filePath: options.filePath,
+    });
+  }
+  return readFile(options.filePath);
+}
+
+async function writeOfflineUploadContent(options: {
+  root: SafeArchiveRoot;
+  relPath: string;
+  filePath: string;
+  content: Buffer;
+  writeFile: (target: OfflineSyncFileWriteTarget) => Promise<void>;
+}): Promise<void> {
+  await options.writeFile({
+    root: options.root.abs,
+    path: options.relPath,
+    filePath: options.filePath,
+    content: options.content,
+  });
 }
 
 async function deleteSafeFile(
