@@ -5686,7 +5686,7 @@ interface OfflineFileContentChunk {
   content: Buffer;
 }
 
-const OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES = 16 * 1024 * 1024;
+const OFFLINE_SYNC_DIRECT_DEFAULT_MIN_BYTES = 16 * 1024 * 1024;
 const OFFLINE_SYNC_FILES_CONTENT_MAX_BATCH_BYTES = 8 * 1024 * 1024;
 export const OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES = Math.floor(OFFLINE_SYNC_APPLY_MAX_BODY_BYTES / 2);
 const OFFLINE_SYNC_DIRECT_PUSH_INLINE_MARGIN_BYTES = 256 * 1024;
@@ -5695,9 +5695,10 @@ const OFFLINE_SYNC_INLINE_CONTENT_MAX_BYTES = Math.max(
   Math.floor((OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES - OFFLINE_SYNC_DIRECT_PUSH_INLINE_MARGIN_BYTES) * 3 / 4),
 );
 export const OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES = Math.min(
-  OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES,
+  OFFLINE_SYNC_DIRECT_DEFAULT_MIN_BYTES,
   OFFLINE_SYNC_INLINE_CONTENT_MAX_BYTES,
 );
+export const OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES = OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES;
 
 function parseOfflineHeaderNumber(headers: Headers, name: string): number {
   const raw = headers.get(name);
@@ -5882,7 +5883,7 @@ function offlineSnapshotContentFilesForApply(options: {
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function shouldDirectHydrateOfflineFile(options: {
+export function shouldDirectHydrateOfflineFile(options: {
   incoming: OfflineSyncFileState;
   base?: OfflineSyncFileState;
   current?: OfflineSyncFileState;
