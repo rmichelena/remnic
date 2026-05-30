@@ -8,11 +8,13 @@ import {
 } from "@remnic/core";
 import {
   OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES,
+  OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES,
   OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_UPLOAD_CHUNK_BYTES,
   chunkOfflineChangesetApplyBatches,
   chunkOfflineFileContentBatches,
   formatOfflineLargeFilePushFailureMessage,
+  shouldDirectHydrateOfflineFile,
 } from "../packages/remnic-cli/src/index.js";
 import type { OfflineSyncChangeset, OfflineSyncFileState } from "@remnic/core";
 
@@ -118,6 +120,7 @@ test("offline sync apply changesets are split below the daemon JSON body budget"
 
 test("offline sync direct push threshold avoids an inline body-size gap", () => {
   assert.ok(OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES < 16 * 1024 * 1024);
+  assert.equal(OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES, OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES);
   const inlineBytes = OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES - 1;
   const content = Buffer.alloc(inlineBytes, 1);
   const changeset: OfflineSyncChangeset = {
@@ -149,5 +152,27 @@ test("offline sync direct push threshold avoids an inline body-size gap", () => 
       namespace: "generalist",
       changeset: batches[0],
     }), "utf-8") <= OFFLINE_SYNC_APPLY_MAX_REQUEST_BYTES,
+  );
+});
+
+test("offline sync direct hydration covers remote mid-size files", () => {
+  const incoming = file("state/remote-mid-size.bin", OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES);
+
+  assert.equal(
+    shouldDirectHydrateOfflineFile({ incoming }),
+    true,
+  );
+  assert.equal(
+    shouldDirectHydrateOfflineFile({
+      incoming,
+      current: { ...incoming },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldDirectHydrateOfflineFile({
+      incoming: file("state/inline.bin", OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES - 1),
+    }),
+    false,
   );
 });
