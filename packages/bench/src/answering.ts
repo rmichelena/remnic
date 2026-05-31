@@ -75,13 +75,17 @@ export async function answerBenchmarkQuestion(options: {
   );
   const shouldRetry =
     options.retryUnknownWithEvidence === true &&
-    answerMode === "agentic-memory" &&
     isUnknownOnlyAnswer(response.text) &&
-    hasExplicitTrajectoryEvidence(options.recalledText);
+    hasRetryableEvidenceForUnknownAnswer(options.recalledText, answerMode);
   const retryResponse = shouldRetry
     ? await options.responder
         .respond(
-          buildUnknownRetryQuestion(question, answerFormat),
+          buildUnknownRetryQuestion(question, answerFormat, {
+            evidenceLabel: getUnknownRetryEvidenceLabel(
+              options.recalledText,
+              answerMode,
+            ),
+          }),
           options.recalledText,
         )
         .catch(() => undefined)
@@ -230,13 +234,15 @@ export function buildStrictBenchmarkQuestion(
 export function buildUnknownRetryQuestion(
   question: string,
   answerFormat: BenchmarkAnswerFormat = "auto",
+  options: { evidenceLabel?: string } = {},
 ): string {
+  const evidenceLabel = options.evidenceLabel ?? "trajectory evidence";
   return [
     question,
     "",
-    "The prior answer was only \"unknown\", but the supplied Remnic context includes trajectory evidence.",
+    `The prior answer was only "unknown", but the supplied Remnic context includes ${evidenceLabel}.`,
     "Retry once by deriving the best-supported answer from that evidence.",
-    "Use \"unknown\" only if the trajectory evidence is absent, contradictory, or lacks the exact value requested.",
+    `Use "unknown" only if the ${evidenceLabel} is absent, contradictory, or lacks the exact value requested.`,
     "For causal or strategic questions, answer with the concrete action/state change and the implication it supports.",
     ...(answerFormat === "structured"
       ? ["Preserve the requested structured output format exactly."]
@@ -253,6 +259,112 @@ export function isUnknownOnlyAnswer(answer: string): boolean {
 
 export function hasExplicitTrajectoryEvidence(recalledText: string): boolean {
   return hasTrajectoryMarkerInStructuredSection(recalledText);
+}
+
+function hasRetryableEvidenceForUnknownAnswer(
+  recalledText: string,
+  answerMode: BenchmarkAnswerMode,
+): boolean {
+  if (hasExplicitTrajectoryEvidence(recalledText)) {
+    return true;
+  }
+  if (answerMode === "agentic-memory") {
+    return false;
+  }
+  return hasConcreteBenchmarkEvidence(recalledText);
+}
+
+function getUnknownRetryEvidenceLabel(
+  recalledText: string,
+  answerMode: BenchmarkAnswerMode,
+): string {
+  return answerMode === "agentic-memory" || hasExplicitTrajectoryEvidence(recalledText)
+    ? "trajectory evidence"
+    : "benchmark evidence";
+}
+
+function hasConcreteBenchmarkEvidence(recalledText: string): boolean {
+  const normalized = recalledText.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+  if (stripTrailingSentencePunctuation(normalized).toLowerCase() === "unknown") {
+    return false;
+  }
+  return hasNonEmptyBenchmarkEvidenceSection(normalized);
+}
+
+const RETRYABLE_BENCHMARK_EVIDENCE_HEADINGS = [
+  "prior completed memoryarena subtasks",
+  "remnic memory context",
+  "remnic recall pipeline",
+  "raw messages",
+  "explicit cue evidence",
+  "search evidence",
+  "webshop environment observations for current options",
+] as const;
+
+const NO_EVIDENCE_PREFIXES = [
+  "no exact",
+  "no matching",
+  "no relevant",
+  "no usable",
+  "no prior",
+  "no search",
+  "no memory",
+] as const;
+
+function hasNonEmptyBenchmarkEvidenceSection(recalledText: string): boolean {
+  let inRetryableSection = false;
+  for (const line of recalledText.split("\n")) {
+    const trimmed = line.trim();
+    const heading = parseMarkdownHeadingText(trimmed);
+    if (heading !== undefined) {
+      inRetryableSection = isRetryableBenchmarkEvidenceHeading(heading);
+      continue;
+    }
+    if (!inRetryableSection || trimmed.length === 0) {
+      continue;
+    }
+    if (isNoEvidenceLine(trimmed)) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+function parseMarkdownHeadingText(trimmedLine: string): string | undefined {
+  if (!trimmedLine.startsWith("##")) {
+    return undefined;
+  }
+  let index = 2;
+  if (trimmedLine[index] !== " " && trimmedLine[index] !== "\t") {
+    return undefined;
+  }
+  while (trimmedLine[index] === " " || trimmedLine[index] === "\t") {
+    index += 1;
+  }
+  return trimmedLine.slice(index).trim();
+}
+
+function isRetryableBenchmarkEvidenceHeading(heading: string): boolean {
+  const normalized = heading.toLowerCase();
+  return RETRYABLE_BENCHMARK_EVIDENCE_HEADINGS.some((prefix) =>
+    normalized === prefix || normalized.startsWith(`${prefix} `),
+  );
+}
+
+function isNoEvidenceLine(line: string): boolean {
+  const normalized = stripTrailingSentencePunctuation(
+    stripWrappingQuotes(line),
+  ).trim().toLowerCase();
+  if (normalized === "unknown" || normalized === "the answer is unknown") {
+    return true;
+  }
+  return NO_EVIDENCE_PREFIXES.some((prefix) =>
+    normalized === prefix || normalized.startsWith(`${prefix} `),
+  );
 }
 
 function stripWrappingQuotes(value: string): string {

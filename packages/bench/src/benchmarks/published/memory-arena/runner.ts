@@ -163,6 +163,7 @@ export async function runMemoryArenaBenchmark(
             recalledText: options.system.responder ? answerContext : recalledText,
             responder: options.system.responder,
             answerMode: "strict",
+            retryUnknownWithEvidence: true,
           });
           const domainScores = scoreMemoryArenaDomainAnswer(
             task.category,
@@ -2261,6 +2262,8 @@ const PLAN_FIELD_KEYS = [
 const PLAN_FIELD_LABEL_TOKEN_SEQUENCES = PLAN_FIELD_KEYS
   .map((key) => tokenizePlanText(key.replace(/_/g, " ")))
   .sort((a, b) => b.length - a.length);
+const MAX_PLAN_FIELD_LABEL_CONNECTOR_TOKENS = 3;
+const PLAN_MEAL_FIELD_LABEL_TOKENS = new Set(["breakfast", "lunch", "dinner"]);
 const WEEKDAY_PLAN_DAY_TOKENS = new Set([
   "monday",
   "tuesday",
@@ -2421,14 +2424,16 @@ function findPlanFieldTokenWindow(
     }
 
     const contextStart = dayContext?.startIndex ?? Math.max(0, index - 32);
-    if (
-      expectedField.fieldTokens.length > 0
-      && !tokensEqual(
-        findNearestPlanFieldLabel(predictedTokens, contextStart, index) ?? [],
-        expectedField.fieldTokens,
-      )
-    ) {
-      continue;
+    if (expectedField.fieldTokens.length > 0) {
+      const nearestFieldLabel =
+        findImmediatePlanFieldLabel(predictedTokens, contextStart, index);
+      if (nearestFieldLabel === undefined) {
+        if (expectedField.tokens.length < 2) {
+          continue;
+        }
+      } else if (!tokensEqual(nearestFieldLabel, expectedField.fieldTokens)) {
+        continue;
+      }
     }
     return index;
   }
@@ -2529,23 +2534,50 @@ function buildStandalonePlanDayContext(
   };
 }
 
-function findNearestPlanFieldLabel(
+function findImmediatePlanFieldLabel(
   tokens: string[],
   startIndex: number,
   beforeIndex: number,
 ): string[] | undefined {
-  for (let endIndex = beforeIndex - 1; endIndex >= startIndex; endIndex -= 1) {
+  const maxLabelLength = PLAN_FIELD_LABEL_TOKEN_SEQUENCES[0]?.length ?? 1;
+  const minLabelStart = Math.max(
+    startIndex,
+    beforeIndex - maxLabelLength - MAX_PLAN_FIELD_LABEL_CONNECTOR_TOKENS,
+  );
+  for (let labelStart = beforeIndex - 1; labelStart >= minLabelStart; labelStart -= 1) {
     for (const labelTokens of PLAN_FIELD_LABEL_TOKEN_SEQUENCES) {
-      const labelStart = endIndex - labelTokens.length + 1;
-      if (labelStart < startIndex) {
+      if (labelStart + labelTokens.length > beforeIndex) {
         continue;
       }
-      if (labelTokens.every((token, offset) => tokens[labelStart + offset] === token)) {
+      if (!labelTokens.every((token, offset) => tokens[labelStart + offset] === token)) {
+        continue;
+      }
+      const connectorTokens = tokens.slice(
+        labelStart + labelTokens.length,
+        beforeIndex,
+      );
+      if (!hasInterveningPlanFieldCue(labelTokens, connectorTokens)) {
         return labelTokens;
       }
     }
   }
   return undefined;
+}
+
+function hasInterveningPlanFieldCue(
+  labelTokens: string[],
+  connectorTokens: string[],
+): boolean {
+  if (connectorTokens.length === 0) {
+    return false;
+  }
+  if (
+    !labelTokens.some((token) => PLAN_MEAL_FIELD_LABEL_TOKENS.has(token))
+    && connectorTokens.includes("meal")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function extractCompactPlanDayToken(token: string): string | undefined {
