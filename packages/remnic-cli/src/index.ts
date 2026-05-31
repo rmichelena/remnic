@@ -5677,19 +5677,29 @@ async function fetchOfflineWithResponse<T>(
     if (upstreamSignal.aborted) controller.abort(upstreamSignal.reason);
     else upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
   }
+  let response: Response;
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       ...init,
       signal: controller.signal,
       headers: offlineFetchHeaders(token, init.headers, options.defaultContentType),
     });
-    return await consume(response);
   } catch (error) {
+    clearTimeout(timeout);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
     if (didTimeout) {
       throw new Error(`offline sync request timed out after ${timeoutMs}ms: ${requestContext}`);
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`offline sync request failed before response: ${requestContext} - ${message}`);
+  }
+  try {
+    return await consume(response);
+  } catch (error) {
+    if (didTimeout) {
+      throw new Error(`offline sync request timed out after ${timeoutMs}ms: ${requestContext}`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
     upstreamSignal?.removeEventListener("abort", abortFromUpstream);
@@ -6891,12 +6901,14 @@ async function runOfflineSyncOnce(options: {
     });
   }
   const baseFiles = priorState?.baseFiles ?? [];
+  const baseCapturedAt = priorState ? new Date(priorState.lastSyncedAt) : undefined;
   const storageIo = await createOfflineStorageIo(options.memoryDir);
   const localSourceId = localOfflineSourceId(options.memoryDir);
   const pendingSummary = await summarizeOfflineSyncPendingChanges({
     root: options.memoryDir,
     sourceId: localSourceId,
     baseFiles,
+    baseCapturedAt,
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
   });
@@ -6904,6 +6916,7 @@ async function runOfflineSyncOnce(options: {
     root: options.memoryDir,
     sourceId: localSourceId,
     baseFiles,
+    baseCapturedAt,
     includeContent: false,
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
@@ -6965,6 +6978,7 @@ async function runOfflineSyncOnce(options: {
     root: options.memoryDir,
     sourceId: localSourceId,
     baseFiles,
+    baseCapturedAt,
     excludePaths: [...directPushedPaths, ...directPushDeferredPaths],
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
@@ -7049,6 +7063,7 @@ async function runOfflineSyncOnce(options: {
     root: options.memoryDir,
     sourceId: localSourceId,
     baseFiles,
+    baseCapturedAt,
     includeContent: false,
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
@@ -7080,6 +7095,7 @@ async function runOfflineSyncOnce(options: {
         root: options.memoryDir,
         sourceId: localSourceId,
         baseFiles,
+        baseCapturedAt,
         includeContent: false,
         includeTranscripts: options.includeTranscripts,
         readFile: storageIo.readFile,
@@ -7390,6 +7406,7 @@ Environment fallbacks:
       root: memoryDir,
       sourceId: localOfflineSourceId(memoryDir),
       baseFiles: state?.baseFiles ?? [],
+      baseCapturedAt: state ? new Date(state.lastSyncedAt) : undefined,
       includeTranscripts,
       readFile: storageIo.readFile,
     });

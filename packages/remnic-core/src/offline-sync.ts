@@ -560,6 +560,7 @@ export async function buildOfflineSyncSnapshotFromBase(options: {
   root: string;
   sourceId: string;
   baseFiles?: readonly OfflineSyncFileState[];
+  baseCapturedAt?: Date;
   includeContent?: boolean;
   includeTranscripts?: boolean;
   now?: Date;
@@ -572,6 +573,10 @@ export async function buildOfflineSyncSnapshotFromBase(options: {
     normalizeFileStates(options.baseFiles),
     includeTranscripts,
   ));
+  const rawBaseCapturedAtMs = options.baseCapturedAt?.getTime();
+  const baseCapturedAtMs = rawBaseCapturedAtMs !== undefined && Number.isFinite(rawBaseCapturedAtMs)
+    ? rawBaseCapturedAtMs
+    : null;
   const files: OfflineSyncFileRecord[] = [];
 
   async function walk(dirAbs: string): Promise<void> {
@@ -592,8 +597,10 @@ export async function buildOfflineSyncSnapshotFromBase(options: {
       if (
         options.includeContent !== true &&
         baseEntry &&
+        baseCapturedAtMs !== null &&
         baseEntry.bytes === st.size &&
-        baseEntry.mtimeMs === st.mtimeMs
+        baseEntry.mtimeMs === st.mtimeMs &&
+        st.ctimeMs <= baseCapturedAtMs
       ) {
         files.push({ ...baseEntry });
         continue;
@@ -746,6 +753,7 @@ export async function buildOfflineSyncChangeset(options: {
   root: string;
   sourceId: string;
   baseFiles?: readonly OfflineSyncFileState[];
+  baseCapturedAt?: Date;
   excludePaths?: readonly string[];
   includeTranscripts?: boolean;
   now?: Date;
@@ -763,6 +771,7 @@ export async function buildOfflineSyncChangeset(options: {
     root: options.root,
     sourceId: options.sourceId,
     baseFiles: options.baseFiles,
+    baseCapturedAt: options.baseCapturedAt,
     includeContent: false,
     includeTranscripts,
     now: options.now,
@@ -832,6 +841,7 @@ export async function summarizeOfflineSyncPendingChanges(options: {
   root: string;
   sourceId: string;
   baseFiles?: readonly OfflineSyncFileState[];
+  baseCapturedAt?: Date;
   includeTranscripts?: boolean;
   now?: Date;
   readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
@@ -845,6 +855,7 @@ export async function summarizeOfflineSyncPendingChanges(options: {
     root: options.root,
     sourceId: options.sourceId,
     baseFiles: options.baseFiles,
+    baseCapturedAt: options.baseCapturedAt,
     includeContent: false,
     includeTranscripts,
     now: options.now,

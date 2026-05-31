@@ -310,12 +310,14 @@ test("offline snapshot from base avoids rehashing unchanged files", async () => 
       sourceId: "remote",
       includeContent: false,
     });
+    const baseCapturedAt = new Date(Date.now() + 60_000);
     let readCount = 0;
 
     const unchanged = await buildOfflineSyncSnapshotFromBase({
       root,
       sourceId: "remote",
       baseFiles: baseSnapshot.files,
+      baseCapturedAt,
       includeContent: false,
       readFile: async () => {
         readCount += 1;
@@ -331,6 +333,7 @@ test("offline snapshot from base avoids rehashing unchanged files", async () => 
       root,
       sourceId: "remote",
       baseFiles: baseSnapshot.files,
+      baseCapturedAt,
       includeContent: false,
       readFile: async ({ filePath }) => {
         readCount += 1;
@@ -340,6 +343,44 @@ test("offline snapshot from base avoids rehashing unchanged files", async () => 
 
     assert.equal(readCount, 1);
     assert.deepEqual(changed.files.map((file) => file.path), ["facts/a.md", "facts/b.md"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offline snapshot from base rehashes same-size rewrites after base capture", async () => {
+  const root = await tempDir("remnic-offline-fast-base-ctime");
+  try {
+    await write(root, "facts/a.md", "alpha");
+    const filePath = path.join(root, "facts/a.md");
+    const baseSnapshot = await buildOfflineSyncSnapshot({
+      root,
+      sourceId: "remote",
+      includeContent: false,
+    });
+    const baseFile = baseSnapshot.files[0];
+    assert.ok(baseFile);
+    const baseCapturedAt = new Date();
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await write(root, "facts/a.md", "bravo");
+    await utimes(filePath, baseFile.mtimeMs / 1000, baseFile.mtimeMs / 1000);
+
+    let readCount = 0;
+    const snapshot = await buildOfflineSyncSnapshotFromBase({
+      root,
+      sourceId: "remote",
+      baseFiles: baseSnapshot.files,
+      baseCapturedAt,
+      includeContent: false,
+      readFile: async ({ filePath }) => {
+        readCount += 1;
+        return readFile(filePath);
+      },
+    });
+
+    assert.equal(readCount, 1);
+    assert.equal(snapshot.files[0]?.path, "facts/a.md");
+    assert.notEqual(snapshot.files[0]?.sha256, baseFile.sha256);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
