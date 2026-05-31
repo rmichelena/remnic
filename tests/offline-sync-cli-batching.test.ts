@@ -326,3 +326,45 @@ test("offline sync can advance pushed-path baselines when pull is deferred", () 
     ],
   );
 });
+
+test("offline sync partial checkpoints preserve directly hydrated files", () => {
+  const base = [
+    file("facts/local.md", 100, "a"),
+  ];
+  const current = [
+    file("facts/local.md", 110, "b"),
+  ];
+  const hydrated = file("state/remote-large.bin", OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES, "c");
+
+  const next = advanceOfflineBaseFilesForSuccessfulPush({
+    baseFiles: base,
+    currentFiles: current,
+    hydratedFiles: [hydrated],
+    changeset: {
+      format: "remnic.offline-sync.changeset.v1",
+      schemaVersion: 1,
+      createdAt: "2026-05-31T00:00:00.000Z",
+      sourceId: "laptop",
+      includeTranscripts: true,
+      changes: [
+        {
+          type: "upsert",
+          path: "facts/local.md",
+          baseSha256: base[0]!.sha256,
+          file: {
+            ...current[0]!,
+            contentBase64: Buffer.from("updated").toString("base64"),
+          },
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(
+    next.map((entry) => [entry.path, entry.sha256]),
+    [
+      ["facts/local.md", "b".repeat(64)],
+      ["state/remote-large.bin", "c".repeat(64)],
+    ],
+  );
+});

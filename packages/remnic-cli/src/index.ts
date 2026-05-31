@@ -6828,6 +6828,7 @@ export function advanceOfflineBaseFilesForSuccessfulPush(options: {
   baseFiles: readonly OfflineSyncFileState[];
   currentFiles: readonly OfflineSyncFileState[];
   directPushedPaths?: readonly string[];
+  hydratedFiles?: readonly OfflineSyncFileState[];
   changeset: Awaited<ReturnType<typeof buildOfflineSyncChangeset>>;
   conflicts?: readonly { path: string }[];
 }): OfflineSyncFileState[] {
@@ -6851,6 +6852,15 @@ export function advanceOfflineBaseFilesForSuccessfulPush(options: {
         mtimeMs: change.file.mtimeMs,
       });
     }
+  }
+  for (const file of options.hydratedFiles ?? []) {
+    if (conflictPaths.has(file.path)) continue;
+    next.set(file.path, {
+      path: file.path,
+      sha256: file.sha256,
+      bytes: file.bytes,
+      mtimeMs: file.mtimeMs,
+    });
   }
   return [...next.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
@@ -7007,13 +7017,20 @@ async function runOfflineSyncOnce(options: {
     resolvedNamespace,
     explicitStatePath: options.statePathExplicit ? activeStatePath : undefined,
   });
-  const writePartialPushState = async (error: unknown): Promise<OfflineSyncRunResult> => {
+  const writePartialPushState = async (
+    error: unknown,
+    partial?: {
+      hydratedFiles?: readonly OfflineSyncFileState[];
+      remoteDeferredPaths?: readonly string[];
+    },
+  ): Promise<OfflineSyncRunResult> => {
     const resolvedNamespace = pushed?.namespace || syncNamespace;
     const stateWritePaths = stateWritePathsFor(resolvedNamespace);
     const nextBaseFiles = advanceOfflineBaseFilesForSuccessfulPush({
       baseFiles,
       currentFiles: currentSnapshotForPush.files,
       directPushedPaths: [...directPushedPaths],
+      hydratedFiles: partial?.hydratedFiles,
       changeset,
       conflicts: pushed?.conflicts ?? directPushConflicts,
     });
@@ -7043,8 +7060,8 @@ async function runOfflineSyncOnce(options: {
       remoteFileCount: null,
       deferred: {
         localChangedDuringPush: [...directPushDeferredPaths].sort(),
-        remoteChangedDuringHydrate: [],
-        total: directPushDeferredPaths.size,
+        remoteChangedDuringHydrate: [...(partial?.remoteDeferredPaths ?? [])].sort(),
+        total: directPushDeferredPaths.size + (partial?.remoteDeferredPaths?.length ?? 0),
       },
     };
   };
@@ -7092,6 +7109,11 @@ async function runOfflineSyncOnce(options: {
   }
   const directHydratedPaths = directHydration.hydratedPaths;
   const remoteDeferredPaths = directHydration.deferredPaths;
+  const partialHydratedFiles = remoteSnapshotMetadata.files.filter((file) => directHydratedPaths.has(file.path));
+  const partialHydration = {
+    hydratedFiles: partialHydratedFiles,
+    remoteDeferredPaths: [...remoteDeferredPaths],
+  };
   const applyCurrentSnapshot = directHydratedPaths.size > 0
     ? await buildOfflineSyncSnapshotFromBase({
         root: options.memoryDir,
@@ -7116,7 +7138,7 @@ async function runOfflineSyncOnce(options: {
       deferredPaths: [...remoteDeferredPaths],
     });
   } catch (error) {
-    if (pushed) return writePartialPushState(error);
+    if (pushed) return writePartialPushState(error, partialHydration);
     throw error;
   }
   const resolvedNamespace = resolvedOfflineSnapshotNamespace(remoteSnapshot, syncNamespace);
@@ -7134,7 +7156,7 @@ async function runOfflineSyncOnce(options: {
     });
   } catch (error) {
     if (!isMissingOfflineContentError(error)) {
-      if (pushed) return writePartialPushState(error);
+      if (pushed) return writePartialPushState(error, partialHydration);
       throw error;
     }
     let retrySnapshot: Awaited<ReturnType<typeof hydrateOfflineSnapshotContent>>;
@@ -7150,7 +7172,7 @@ async function runOfflineSyncOnce(options: {
         deferredPaths: [...remoteDeferredPaths],
       });
     } catch (retryError) {
-      if (pushed) return writePartialPushState(retryError);
+      if (pushed) return writePartialPushState(retryError, partialHydration);
       throw retryError;
     }
     try {
@@ -7165,7 +7187,7 @@ async function runOfflineSyncOnce(options: {
         deleteFile: storageIo.deleteFile,
       });
     } catch (retryApplyError) {
-      if (pushed) return writePartialPushState(retryApplyError);
+      if (pushed) return writePartialPushState(retryApplyError, partialHydration);
       throw retryApplyError;
     }
   }
