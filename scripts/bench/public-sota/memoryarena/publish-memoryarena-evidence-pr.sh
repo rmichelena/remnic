@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
+export PATH="/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}"
@@ -143,7 +143,7 @@ The PR includes:
 node scripts/bench/verify-public-memoryarena-sota-evidence.mjs \
   __RESULTS_REL__
 
-PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH npx tsx scripts/bench/verify-public-matrix.ts \
+PATH=/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH npx tsx scripts/bench/verify-public-matrix.ts \
   --results-dir __RESULTS_REL__ \
   --manifest __MANIFEST_REL__ \
   --benchmarks memory-arena \

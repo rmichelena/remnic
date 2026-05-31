@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
+export PATH="/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_DEFAULT="$(git -C "${SCRIPT_DIR}/../../.." rev-parse --show-toplevel 2>/dev/null || (cd "${SCRIPT_DIR}/../../.." && pwd))"
@@ -152,7 +152,7 @@ node "${DOC_GENERATOR}" \
 (
   cd "${WORKTREE}"
   node "${VERIFY_SCRIPT_REL}" "${RESULTS_REL}" "${benchmark}"
-  PATH=/opt/homebrew/bin:/opt/homebrew/sbin:${PATH} npx tsx scripts/bench/verify-public-matrix.ts \
+  PATH=/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH} npx tsx scripts/bench/verify-public-matrix.ts \
     --results-dir "${RESULTS_REL}" \
     --manifest "${RESULTS_REL}/MANIFEST.${benchmark}.json" \
     --benchmarks "${benchmark}" \

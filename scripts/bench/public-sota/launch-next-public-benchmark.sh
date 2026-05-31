@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
+export PATH="/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_DEFAULT="$(git -C "${SCRIPT_DIR}/../../.." rev-parse --show-toplevel 2>/dev/null || (cd "${SCRIPT_DIR}/../../.." && pwd))"
@@ -167,7 +167,7 @@ if [[ "${benchmark}" == "memory-arena" ]]; then
 fi
 session="${run_id}"
 tmux new-session -d -s "${session}" -c "${LAUNCH_REPO_ROOT}" \
-  "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:\$PATH; export REMNIC_BENCH_RUN_ID=${run_id_quoted};${webshop_export} cd ${repo_quoted}; (${cmd_quoted}) >> ${log_quoted} 2>&1; rc=\$?; if [ \$rc -eq 0 ]; then printf '%s\tsuccess\t%s\n' ${benchmark_quoted} \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; else printf '%s\tfail:%s\t%s\n' ${benchmark_quoted} \"\$rc\" \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; fi; exit \$rc"
+  "PATH=/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:\$PATH; export REMNIC_BENCH_RUN_ID=${run_id_quoted};${webshop_export} cd ${repo_quoted}; (${cmd_quoted}) >> ${log_quoted} 2>&1; rc=\$?; if [ \$rc -eq 0 ]; then printf '%s\tsuccess\t%s\n' ${benchmark_quoted} \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; else printf '%s\tfail:%s\t%s\n' ${benchmark_quoted} \"\$rc\" \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> ${status_quoted}; fi; exit \$rc"
 
 cat <<EOF
 launched=${session}
