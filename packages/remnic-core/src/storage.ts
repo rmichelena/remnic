@@ -1,5 +1,5 @@
-import { access, readdir, readFile, stat, writeFile, mkdir, unlink, rename, appendFile } from "node:fs/promises";
-import { appendFileSync, mkdirSync, statSync } from "node:fs";
+import { access, readdir, readFile, stat, writeFile, mkdir, unlink, rename, appendFile, open } from "node:fs/promises";
+import { appendFileSync, createReadStream, mkdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { log } from "./logger.js";
@@ -10,6 +10,7 @@ import { sanitizeMemoryContent } from "./sanitize.js";
 import { createVersion as createPageVersion, type VersioningConfig, type VersionTrigger } from "./page-versioning.js";
 import {
   SecureStoreLockedError,
+  MAGIC_HEADER_SIZE,
   isEncryptedFile,
   readMaybeEncryptedFileBuffer,
   readMaybeEncryptedFile,
@@ -2502,6 +2503,39 @@ export class StorageManager {
   async readOfflineSyncFile(filePath: string): Promise<Buffer> {
     const target = this.assertManagedStoragePath(filePath, "storage.readOfflineSyncFile");
     return readMaybeEncryptedFileBuffer(target, this._secureStoreKey, this.baseDir);
+  }
+
+  async digestOfflineSyncFile(filePath: string): Promise<{ sha256: string; bytes: number }> {
+    const target = this.assertManagedStoragePath(filePath, "storage.digestOfflineSyncFile");
+    if (await this.offlineSyncFileIsEncrypted(target)) {
+      const content = await readMaybeEncryptedFileBuffer(target, this._secureStoreKey, this.baseDir);
+      return {
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: content.byteLength,
+      };
+    }
+    const hash = createHash("sha256");
+    let bytes = 0;
+    for await (const rawChunk of createReadStream(target)) {
+      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      hash.update(chunk);
+      bytes += chunk.length;
+    }
+    return {
+      sha256: hash.digest("hex"),
+      bytes,
+    };
+  }
+
+  private async offlineSyncFileIsEncrypted(filePath: string): Promise<boolean> {
+    const handle = await open(filePath, "r");
+    try {
+      const header = Buffer.alloc(MAGIC_HEADER_SIZE);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      return bytesRead >= MAGIC_HEADER_SIZE && isEncryptedFile(header);
+    } finally {
+      await handle.close();
+    }
   }
 
   async writeOfflineSyncFile(filePath: string, content: Buffer): Promise<void> {

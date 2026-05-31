@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { EngramAccessInputError, EngramAccessService } from "./access-service.js";
+import { OFFLINE_SYNC_MAX_MTIME_MS } from "./offline-sync.js";
 
 function createOfflineService(): EngramAccessService {
   return new EngramAccessService({
@@ -33,5 +34,21 @@ test("offline apply-file-content reports invalid metadata as input errors", asyn
     (error) =>
       error instanceof EngramAccessInputError &&
       /sha256 must be a 64-character sha256/.test(error.message),
+  );
+
+  await assert.rejects(
+    () => service.offlineSyncApplyFileContent({
+      includeTranscripts: true,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: "a".repeat(64),
+      bytes: 0,
+      mtimeMs: OFFLINE_SYNC_MAX_MTIME_MS + 1,
+      offset: 0,
+      content: Buffer.alloc(0),
+    }),
+    (error) =>
+      error instanceof EngramAccessInputError &&
+      /mtimeMs must be within JavaScript Date range/.test(error.message),
   );
 });

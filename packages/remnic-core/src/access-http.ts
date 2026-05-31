@@ -753,6 +753,7 @@ export class EngramAccessHttpServer {
         namespace: this.resolveNamespace(req, body.namespace),
         principal: this.resolveRequestPrincipal(req),
         changeset: body.changeset,
+        returnCurrentFiles: body.returnCurrentFiles,
       });
       this.respondJson(res, 200, result);
       return;

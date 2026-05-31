@@ -9,8 +9,12 @@ import {
   ACTION_CONFIDENCE_RULE_KINDS,
 } from "./action-confidence.js";
 import { isValidCapsuleSince } from "./transfer/capsule-export.js";
+import { validateArchiveRelativePath } from "./transfer/fs-utils.js";
 import { CAPSULE_ID_PATTERN } from "./transfer/types.js";
-import { OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES } from "./offline-sync.js";
+import {
+  OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+  OFFLINE_SYNC_MAX_MTIME_MS,
+} from "./offline-sync.js";
 
 // ---------------------------------------------------------------------------
 // Error formatting
@@ -369,11 +373,30 @@ export const capsuleListRequestSchema = z
 // Offline sync
 // ---------------------------------------------------------------------------
 
+function isValidOfflineSyncPath(value: string): boolean {
+  try {
+    validateArchiveRelativePath(value, "path");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const offlineSyncPathSchema = z
+  .string()
+  .trim()
+  .min(1, "path must be non-empty")
+  .max(4096)
+  .refine(
+    isValidOfflineSyncPath,
+    "path must be a POSIX relative path without unsafe segments",
+  );
+
 const offlineSyncFileStateSchema = z.object({
-  path: z.string().trim().min(1, "path must be non-empty").max(4096),
+  path: offlineSyncPathSchema,
   sha256: z.string().regex(/^[a-f0-9]{64}$/i, "sha256 must be a 64-character hex digest"),
   bytes: z.number().int().min(0),
-  mtimeMs: z.number().finite().min(0),
+  mtimeMs: z.number().finite().min(0).max(OFFLINE_SYNC_MAX_MTIME_MS),
 });
 
 const offlineSyncBaseCapturedAtSchema = z
@@ -400,6 +423,7 @@ export const offlineSyncApplyRequestSchema = z
   .object({
     namespace: namespaceSchema,
     changeset: z.unknown(),
+    returnCurrentFiles: z.boolean().optional(),
   })
   .refine((value) => value.changeset !== undefined && value.changeset !== null, {
     message: "changeset is required",
@@ -410,14 +434,14 @@ export const offlineSyncFilesRequestSchema = z.object({
   namespace: namespaceSchema,
   includeTranscripts: z.boolean().optional(),
   paths: z
-    .array(z.string().trim().min(1, "path must be non-empty").max(4096))
+    .array(offlineSyncPathSchema)
     .max(5000, "paths must contain 5000 or fewer entries"),
 });
 
 export const offlineSyncFileContentRequestSchema = z.object({
   namespace: namespaceSchema,
   includeTranscripts: z.boolean().optional(),
-  path: z.string().trim().min(1, "path must be non-empty").max(4096),
+  path: offlineSyncPathSchema,
   offset: z.number().int().min(0).optional(),
   length: z.number().int().min(1).max(OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES).optional(),
 });

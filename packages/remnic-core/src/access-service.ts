@@ -659,6 +659,7 @@ export interface EngramAccessOfflineSyncApplyRequest {
   namespace?: string;
   principal?: string;
   changeset: unknown;
+  returnCurrentFiles?: boolean;
 }
 
 export interface EngramAccessOfflineSyncSnapshotResponse extends OfflineSyncSnapshot {
@@ -5613,10 +5614,12 @@ export class EngramAccessService {
       root: storage.dir,
       sourceId: `remnic:${resolvedNamespace}:${storageHash}`,
       ...(options.baseFiles && options.baseFiles.length > 0 ? { baseFiles: options.baseFiles } : {}),
-      ...(options.baseCapturedAt ? { baseCapturedAt: options.baseCapturedAt } : {}),
+      // Client clocks are not authoritative for server-side ctime reuse. A
+      // future client timestamp can hide same-size, preserved-mtime rewrites.
       includeContent: options.includeContent !== false,
       includeTranscripts: options.includeTranscripts !== false,
       readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+      readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
     });
     return {
       namespace: resolvedNamespace,
@@ -5711,6 +5714,7 @@ export class EngramAccessService {
         content: options.content,
         includeTranscripts: options.includeTranscripts !== false,
         readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+        readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
         writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
         writeStagingFile: async ({ filePath, content }) => storage.writeOfflineSyncStagingFile(filePath, content),
         writeFileChunks: async ({ filePath, chunks }) => storage.writeOfflineSyncFileChunks(filePath, chunks),
@@ -5752,7 +5756,9 @@ export class EngramAccessService {
       const result = await applyOfflineSyncChangeset({
         root: storage.dir,
         changeset: options.changeset,
+        returnCurrentFiles: options.returnCurrentFiles,
         readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+        readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
         writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
         deleteFile: async ({ filePath }) => storage.deleteOfflineSyncFile(filePath),
       });

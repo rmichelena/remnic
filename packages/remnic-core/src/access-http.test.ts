@@ -8,6 +8,7 @@ import { EngramAccessHttpServer } from "./access-http.js";
 import { EngramAccessInputError, type EngramAccessService } from "./access-service.js";
 import { parseConfig } from "./config.js";
 import { readPair, writePair } from "./contradiction/contradiction-review.js";
+import { OFFLINE_SYNC_MAX_MTIME_MS } from "./offline-sync.js";
 import type { StorageManager } from "./storage.js";
 
 test("HTTP server rejects invalid constructor ports", () => {
@@ -707,6 +708,102 @@ test("HTTP offline snapshot accepts baseline metadata for fast sync", async () =
       baseCapturedAt: "2026-05-31T17:30:08.350Z",
       baseFileCount: 1,
     }]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP offline snapshot rejects unsafe baseline paths as validation errors", async () => {
+  let calls = 0;
+  const service = {
+    offlineSyncSnapshot: async () => {
+      calls += 1;
+      return {};
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    principal: "reader",
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${status.port}/remnic/v1/offline-sync/snapshot`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          baseFiles: [{
+            path: "../outside.md",
+            sha256: "a".repeat(64),
+            bytes: 12,
+            mtimeMs: 1234,
+          }],
+        }),
+      },
+    );
+    const body = await response.json() as { code?: string; details?: Array<{ field?: string; message?: string }> };
+
+    assert.equal(response.status, 400);
+    assert.equal(body.code, "validation_error");
+    assert.equal(body.details?.[0]?.field, "baseFiles.0.path");
+    assert.match(body.details?.[0]?.message ?? "", /POSIX relative path/);
+    assert.equal(calls, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP offline snapshot rejects out-of-range baseline mtimes as validation errors", async () => {
+  let calls = 0;
+  const service = {
+    offlineSyncSnapshot: async () => {
+      calls += 1;
+      return {};
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    principal: "reader",
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${status.port}/remnic/v1/offline-sync/snapshot`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          baseFiles: [{
+            path: "facts/a.md",
+            sha256: "a".repeat(64),
+            bytes: 12,
+            mtimeMs: OFFLINE_SYNC_MAX_MTIME_MS + 1,
+          }],
+        }),
+      },
+    );
+    const body = await response.json() as { code?: string; details?: Array<{ field?: string; message?: string }> };
+
+    assert.equal(response.status, 400);
+    assert.equal(body.code, "validation_error");
+    assert.equal(body.details?.[0]?.field, "baseFiles.0.mtimeMs");
+    assert.match(body.details?.[0]?.message ?? "", /less than or equal/);
+    assert.equal(calls, 0);
   } finally {
     await server.stop();
   }
