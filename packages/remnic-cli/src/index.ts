@@ -7022,7 +7022,9 @@ async function runOfflineSyncOnce(options: {
       remoteId: options.remoteUrl,
       ...(resolvedNamespace ? { namespace: resolvedNamespace } : {}),
       includeTranscripts: options.includeTranscripts,
-      lastSyncedAt: new Date().toISOString(),
+      // Partial checkpoints do not recapture conflicted/deferred paths, so keep
+      // the original capture time for safe fast-base reuse on the next run.
+      lastSyncedAt: priorState?.lastSyncedAt ?? new Date().toISOString(),
       baseFiles: nextBaseFiles,
     };
     for (const statePath of stateWritePaths) {
