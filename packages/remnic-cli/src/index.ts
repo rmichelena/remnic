@@ -7151,6 +7151,7 @@ async function runOfflineSyncOnce(options: {
       if (pushed) return writePartialPushState(retryError);
       throw retryError;
     }
+    try {
       pull = await applyOfflineSyncSnapshot({
         root: options.memoryDir,
         snapshot: retrySnapshot,
@@ -7160,7 +7161,11 @@ async function runOfflineSyncOnce(options: {
         readFile: storageIo.readFile,
         writeFile: storageIo.writeFile,
         deleteFile: storageIo.deleteFile,
-    });
+      });
+    } catch (retryApplyError) {
+      if (pushed) return writePartialPushState(retryApplyError);
+      throw retryApplyError;
+    }
   }
   const state = offlineSyncStateFromSnapshot({
     remoteId: options.remoteUrl,
