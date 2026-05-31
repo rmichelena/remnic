@@ -46,29 +46,36 @@ publish_or_update_pr() {
   node "${SCRIPT_DIR}/../verify-pr-clean.mjs" --repo "${REPO}" --pr "${pr_number}" --wait-seconds 1800
 }
 
+git_with_github_auth() {
+  git \
+    -c credential.https://github.com.helper= \
+    -c 'credential.https://github.com.helper=!gh auth git-credential' \
+    "$@"
+}
+
 push_evidence_branch() {
   (
     cd "${WORKTREE}"
 
     local_head="$(git rev-parse HEAD)"
-    remote_head="$(git ls-remote --heads origin "${BRANCH}" | awk 'NR == 1 { print $1 }')"
+    remote_head="$(git_with_github_auth ls-remote --heads origin "${BRANCH}" | awk 'NR == 1 { print $1 }')"
 
     if [[ -z "${remote_head}" ]]; then
-      git push -u origin "HEAD:refs/heads/${BRANCH}"
+      git_with_github_auth push -u origin "HEAD:refs/heads/${BRANCH}"
       return
     fi
 
     if [[ "${remote_head}" == "${local_head}" ]]; then
-      git push -u origin "HEAD:refs/heads/${BRANCH}"
+      git_with_github_auth push -u origin "HEAD:refs/heads/${BRANCH}"
       return
     fi
 
-    git fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+    git_with_github_auth fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
     if git merge-base --is-ancestor "origin/${BRANCH}" HEAD; then
-      git push -u origin "HEAD:refs/heads/${BRANCH}"
+      git_with_github_auth push -u origin "HEAD:refs/heads/${BRANCH}"
     else
       echo "remote ${BRANCH} is not an ancestor of local evidence commit; updating with --force-with-lease" >&2
-      git push -u --force-with-lease="refs/heads/${BRANCH}:${remote_head}" origin "HEAD:refs/heads/${BRANCH}"
+      git_with_github_auth push -u --force-with-lease="refs/heads/${BRANCH}:${remote_head}" origin "HEAD:refs/heads/${BRANCH}"
     fi
   )
 }
