@@ -5748,7 +5748,29 @@ async function fetchOfflineSnapshot(args: {
   namespace?: string;
   includeTranscripts: boolean;
   includeContent?: boolean;
+  baseFiles?: readonly OfflineSyncFileState[];
+  baseCapturedAt?: Date;
 }): Promise<OfflineSyncSnapshot & { namespace?: string }> {
+  if (args.includeContent === false && args.baseFiles && args.baseFiles.length > 0) {
+    try {
+      return await fetchOfflineJson(
+        offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/snapshot"),
+        args.token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            namespace: args.namespace,
+            includeTranscripts: args.includeTranscripts,
+            includeContent: false,
+            baseFiles: args.baseFiles,
+            ...(args.baseCapturedAt ? { baseCapturedAt: args.baseCapturedAt.toISOString() } : {}),
+          }),
+        },
+      );
+    } catch (error) {
+      if (!isOfflineSnapshotPostUnsupportedError(error)) throw error;
+    }
+  }
   return fetchOfflineJson(
     offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/snapshot", {
       namespace: args.namespace,
@@ -5757,6 +5779,11 @@ async function fetchOfflineSnapshot(args: {
     }),
     args.token,
   );
+}
+
+function isOfflineSnapshotPostUnsupportedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /offline-sync\/snapshot\b.* returned (404|405)\b/.test(message);
 }
 
 async function fetchOfflineFiles(args: {
@@ -7073,6 +7100,8 @@ async function runOfflineSyncOnce(options: {
       namespace: syncNamespace,
       includeTranscripts: options.includeTranscripts,
       includeContent: false,
+      baseFiles,
+      baseCapturedAt,
     });
   } catch (error) {
     if (pushed) return writePartialPushState(error);

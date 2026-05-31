@@ -139,11 +139,13 @@ import {
   applyOfflineSyncFileContentChunk,
   applyOfflineSyncChangeset,
   buildOfflineSyncSnapshot,
+  buildOfflineSyncSnapshotFromBase,
   buildOfflineSyncSnapshotForPaths,
   readOfflineSyncFileContentChunk,
   type OfflineSyncApplyFileContentChunkResult,
   type OfflineSyncApplyChangesetResult,
   type OfflineSyncFileContentChunk,
+  type OfflineSyncFileState,
   type OfflineSyncSnapshot,
 } from "./offline-sync.js";
 import {
@@ -619,6 +621,8 @@ export interface EngramAccessOfflineSyncSnapshotRequest {
   principal?: string;
   includeTranscripts?: boolean;
   includeContent?: boolean;
+  baseCapturedAt?: Date;
+  baseFiles?: OfflineSyncFileState[];
 }
 
 export interface EngramAccessOfflineSyncFilesRequest {
@@ -5602,9 +5606,14 @@ export class EngramAccessService {
     const resolvedNamespace = this.resolveReadableNamespace(options.namespace, options.principal);
     const storage = await this.orchestrator.getStorage(resolvedNamespace);
     const storageHash = createHash("sha256").update(storage.dir).digest("hex").slice(0, 16);
-    const snapshot = await buildOfflineSyncSnapshot({
+    const snapshotBuilder = options.includeContent === false && options.baseFiles && options.baseFiles.length > 0
+      ? buildOfflineSyncSnapshotFromBase
+      : buildOfflineSyncSnapshot;
+    const snapshot = await snapshotBuilder({
       root: storage.dir,
       sourceId: `remnic:${resolvedNamespace}:${storageHash}`,
+      ...(options.baseFiles && options.baseFiles.length > 0 ? { baseFiles: options.baseFiles } : {}),
+      ...(options.baseCapturedAt ? { baseCapturedAt: options.baseCapturedAt } : {}),
       includeContent: options.includeContent !== false,
       includeTranscripts: options.includeTranscripts !== false,
       readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),

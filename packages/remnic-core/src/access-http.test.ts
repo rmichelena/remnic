@@ -625,6 +625,93 @@ test("HTTP offline apply-file-content allows bulk sync chunks outside the generi
   }
 });
 
+test("HTTP offline snapshot accepts baseline metadata for fast sync", async () => {
+  const calls: Array<{
+    namespace: string | undefined;
+    principal: string | undefined;
+    includeTranscripts: boolean | undefined;
+    includeContent: boolean | undefined;
+    baseCapturedAt: string | undefined;
+    baseFileCount: number;
+  }> = [];
+  const service = {
+    offlineSyncSnapshot: async (options: {
+      namespace?: string;
+      principal?: string;
+      includeTranscripts?: boolean;
+      includeContent?: boolean;
+      baseCapturedAt?: Date;
+      baseFiles?: Array<{ path: string; sha256: string; bytes: number; mtimeMs: number }>;
+    }) => {
+      calls.push({
+        namespace: options.namespace,
+        principal: options.principal,
+        includeTranscripts: options.includeTranscripts,
+        includeContent: options.includeContent,
+        baseCapturedAt: options.baseCapturedAt?.toISOString(),
+        baseFileCount: options.baseFiles?.length ?? 0,
+      });
+      return {
+        namespace: options.namespace ?? "default",
+        format: "remnic.offline-sync.snapshot.v1",
+        schemaVersion: 1,
+        createdAt: new Date("2026-05-21T00:00:00Z").toISOString(),
+        sourceId: "remote:test",
+        includeTranscripts: options.includeTranscripts !== false,
+        files: options.baseFiles ?? [],
+      };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    principal: "reader",
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${status.port}/remnic/v1/offline-sync/snapshot`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          namespace: "team",
+          includeTranscripts: false,
+          includeContent: false,
+          baseCapturedAt: "2026-05-31T17:30:08.350Z",
+          baseFiles: [{
+            path: "facts/a.md",
+            sha256: "a".repeat(64),
+            bytes: 12,
+            mtimeMs: 1234,
+          }],
+        }),
+      },
+    );
+    const body = await response.json() as { namespace?: string; files?: unknown[] };
+
+    assert.equal(response.status, 200);
+    assert.equal(body.namespace, "team");
+    assert.equal(body.files?.length, 1);
+    assert.deepEqual(calls, [{
+      namespace: "team",
+      principal: "reader",
+      includeTranscripts: false,
+      includeContent: false,
+      baseCapturedAt: "2026-05-31T17:30:08.350Z",
+      baseFileCount: 1,
+    }]);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("HTTP offline snapshot rejects invalid boolean query values", async () => {
   let calls = 0;
   const service = {

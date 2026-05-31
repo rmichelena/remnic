@@ -12,6 +12,7 @@ import { validateRequest, type SchemaName, type SchemaTypeFor } from "./access-s
 import {
   OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+  OFFLINE_SYNC_SNAPSHOT_BASE_MAX_BODY_BYTES,
 } from "./offline-sync.js";
 import type { RecallDisclosure, RecallPlanMode } from "./types.js";
 import { isRecallDisclosure } from "./types.js";
@@ -639,6 +640,27 @@ export class EngramAccessHttpServer {
         principal: this.resolveRequestPrincipal(req),
         includeTranscripts: includeTranscriptsRaw !== "false",
         includeContent: includeContentRaw !== "false",
+      });
+      this.respondJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      (pathname === "/engram/v1/offline-sync/snapshot" || pathname === "/remnic/v1/offline-sync/snapshot")
+    ) {
+      const body = await this.readValidatedBody(
+        req,
+        "offlineSyncSnapshot",
+        OFFLINE_SYNC_SNAPSHOT_BASE_MAX_BODY_BYTES,
+      );
+      const result = await this.service.offlineSyncSnapshot({
+        namespace: this.resolveNamespace(req, body.namespace),
+        principal: this.resolveRequestPrincipal(req),
+        includeTranscripts: body.includeTranscripts,
+        includeContent: body.includeContent,
+        baseFiles: body.baseFiles,
+        ...(body.baseCapturedAt ? { baseCapturedAt: new Date(body.baseCapturedAt) } : {}),
       });
       this.respondJson(res, 200, result);
       return;
