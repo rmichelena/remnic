@@ -37,19 +37,44 @@ export function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
+const AMEMGYM_FAILURE_SENTINEL_METRICS = new Set([
+  'contains_answer',
+  'f1',
+  'llm_judge',
+  'normalized_memory_score',
+  'qa_accuracy',
+]);
+
+function acceptsFailureSentinel(benchmark, metric) {
+  return benchmark === 'amemgym' && AMEMGYM_FAILURE_SENTINEL_METRICS.has(metric);
+}
+
+export function isPublicScoreValue(value, benchmark, metric) {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    (value >= 0 || (value === -1 && acceptsFailureSentinel(benchmark, metric)));
+}
+
+export function isPublicAggregateMeanValue(value, benchmark, metric) {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    (value >= 0 || (value >= -1 && acceptsFailureSentinel(benchmark, metric)));
+}
+
 export function assertNoInvalidRawScores(result) {
+  const benchmark = result.meta?.benchmark ?? result.benchmarkId;
   for (const [metric, aggregate] of Object.entries(result.results?.aggregates ?? {})) {
     const value = aggregate?.mean;
     assert(
-      typeof value !== 'number' || (Number.isFinite(value) && value >= 0),
-      `raw aggregate ${metric}.mean must be non-negative finite`,
+      typeof value !== 'number' || isPublicAggregateMeanValue(value, benchmark, metric),
+      `raw aggregate ${metric}.mean must be finite, non-negative, or an accepted failure sentinel aggregate`,
     );
   }
   for (const task of result.results?.tasks ?? []) {
     for (const [metric, score] of Object.entries(task.scores ?? {})) {
       assert(
-        typeof score !== 'number' || (Number.isFinite(score) && score >= 0),
-        `raw task ${task.taskId ?? '<unknown>'} score ${metric} must be non-negative finite`,
+        typeof score !== 'number' || isPublicScoreValue(score, benchmark, metric),
+        `raw task ${task.taskId ?? '<unknown>'} score ${metric} must be finite, non-negative, or an accepted failure sentinel`,
       );
     }
   }

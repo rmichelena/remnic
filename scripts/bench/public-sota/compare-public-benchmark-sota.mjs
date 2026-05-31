@@ -78,23 +78,35 @@ function compareAmaBench(result, targets) {
   return [metricResult('ama_bench_leaderboard_average', finiteScore(actual, 'AMA leaderboard average'), finiteScore(target, 'AMA target'))];
 }
 
+function amemGymActualMetric(result) {
+  const [sourceMetric, actual] = [
+    ['normalized_memory_score', result.results?.aggregates?.normalized_memory_score?.mean],
+    ['memory_score', result.results?.aggregates?.memory_score?.mean],
+    ['qa_accuracy', result.results?.aggregates?.qa_accuracy?.mean],
+  ].find(([, value]) => typeof value === 'number' && Number.isFinite(value)) ?? [];
+  assert(sourceMetric, 'AMemGym result missing normalized_memory_score, memory_score, and qa_accuracy aggregates');
+  return {
+    sourceMetric,
+    actual: finiteScore(actual, `AMemGym ${sourceMetric}`),
+  };
+}
+
 function compareAMemGym(result, targets) {
-  const actual = result.results?.aggregates?.normalized_memory_score?.mean
-    ?? result.results?.aggregates?.memory_score?.mean
-    ?? result.results?.aggregates?.qa_accuracy?.mean;
+  const { actual, sourceMetric } = amemGymActualMetric(result);
   return [
     metricResult(
       'amemgym_memory_agent_score',
-      finiteScore(actual, 'AMemGym score'),
+      actual,
       finiteScore(targets.memoryAgent?.score, 'AMemGym memory-agent target'),
-      { comparisonClass: 'memory-agent' },
+      { comparisonClass: 'memory-agent', sourceMetric },
     ),
     metricResult(
       'amemgym_native_llm_score_reference',
-      finiteScore(actual, 'AMemGym score'),
+      actual,
       finiteScore(targets.nativeLlm?.score, 'AMemGym native target'),
       {
         comparisonClass: 'native-llm-reference',
+        sourceMetric,
         publishAsSota: false,
         note: 'Reference only; Remnic memory-system SOTA should be judged against the memory-agent class unless making a model-only claim.',
       },

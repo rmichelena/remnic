@@ -113,6 +113,8 @@ test("AMemGym batches tiny session messages before storing profile context", asy
 
     assert.equal(result.results.tasks.length, 1);
     assert.equal(result.results.tasks[0]?.scores.qa_accuracy, 1);
+    assert.equal(result.results.tasks[0]?.scores.normalized_memory_score, 1);
+    assert.equal(result.results.aggregates.normalized_memory_score?.mean, 1);
     assert.deepEqual(
       storeBatches.map((batch) => batch.length),
       [20, 7],
@@ -122,6 +124,79 @@ test("AMemGym batches tiny session messages before storing profile context", asy
       storeBatches[1]?.at(-1)?.content ?? "",
       /^\[Current user state\]: city: Chicago \(city: Chicago\)$/,
     );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("AMemGym includes failed tasks in normalized memory score", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-amemgym-"));
+
+  try {
+    await writeFile(
+      path.join(tempDir, "amemgym-v1-base.json"),
+      JSON.stringify([
+        {
+          id: "failed-profile",
+          start_time: "2025-01-01T00:00:00Z",
+          user_profile: {
+            uuid: "user-2",
+            name: "Nora",
+            age: 31,
+            gender: "female",
+          },
+          state_schema: { city: { type: "string" } },
+          periods: [
+            {
+              period_start: "2025-01-01T00:00:00Z",
+              period_end: "2025-01-31T23:59:59Z",
+              period_summary: "Nora updated her city.",
+              sessions: [],
+              state: { city: "Denver" },
+              updates: { city: "Denver" },
+              update_cnts: { city: 1 },
+            },
+          ],
+          qas: [
+            {
+              query: "What city does Nora live in now?",
+              required_info: ["city"],
+              answer_choices: [
+                { state: ["Denver"], answer: "Denver" },
+                { state: ["Austin"], answer: "Austin" },
+              ],
+            },
+          ],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runAMemGymBenchmark({
+      benchmark: amemGymDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          throw new Error("recall unavailable");
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+      },
+    });
+
+    assert.equal(result.results.tasks.length, 1);
+    assert.equal(result.results.tasks[0]?.scores.qa_accuracy, -1);
+    assert.equal(result.results.tasks[0]?.scores.normalized_memory_score, -1);
+    assert.equal(result.results.aggregates.normalized_memory_score?.mean, -1);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

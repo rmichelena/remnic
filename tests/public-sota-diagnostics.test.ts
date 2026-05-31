@@ -11,7 +11,11 @@ import {
   roundedJsonNumberReplacer,
 } from "../scripts/bench/public-sota/compare-public-benchmark-sota.mjs";
 import { manifestArtifactHashIdentity } from "../scripts/bench/public-sota/evidence-integrity.mjs";
-import { buildDiagnosticsSummary, statusTimes } from "../scripts/bench/public-sota/evidence-run-utils.mjs";
+import {
+  assertNoInvalidRawScores,
+  buildDiagnosticsSummary,
+  statusTimes,
+} from "../scripts/bench/public-sota/evidence-run-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -413,7 +417,14 @@ async function assertRejectsRawResultDrift(
   );
 }
 
-async function writeAmemGymResult(resultPath: string, taskCount = 1): Promise<void> {
+async function writeAmemGymResult(
+  resultPath: string,
+  taskCountOrScores: number | number[] = 1,
+): Promise<void> {
+  const scores = Array.isArray(taskCountOrScores)
+    ? taskCountOrScores
+    : Array.from({ length: taskCountOrScores }, () => 1);
+  const meanScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
   await writeJson(resultPath, {
     meta: {
       id: "amemgym-test-result",
@@ -439,12 +450,12 @@ async function writeAmemGymResult(resultPath: string, taskCount = 1): Promise<vo
     },
     results: {
       aggregates: {
-        normalized_memory_score: { mean: 1 },
+        normalized_memory_score: { mean: meanScore },
       },
-      tasks: Array.from({ length: taskCount }, (_, index) => ({
+      tasks: scores.map((score, index) => ({
         taskId: `profile-q${index + 1}`,
         details: { profileId: "profile", questionIndex: index + 1 },
-        scores: { normalized_memory_score: 1 },
+        scores: { normalized_memory_score: score },
       })),
     },
   });
@@ -488,6 +499,45 @@ async function writeMemoryArenaResult(resultPath: string): Promise<void> {
     },
   });
 }
+
+test("public raw score validation scopes failure sentinels to AMemGym", () => {
+  assertNoInvalidRawScores({
+    meta: { benchmark: "amemgym" },
+    results: {
+      aggregates: {
+        normalized_memory_score: { mean: -0.5 },
+      },
+      tasks: [
+        {
+          taskId: "amemgym-failed-task",
+          scores: {
+            normalized_memory_score: -1,
+          },
+        },
+      ],
+    },
+  });
+
+  assert.throws(
+    () => assertNoInvalidRawScores({
+      meta: { benchmark: "personamem" },
+      results: {
+        aggregates: {
+          llm_judge: { mean: -1 },
+        },
+        tasks: [
+          {
+            taskId: "personamem-failed-task",
+            scores: {
+              llm_judge: -1,
+            },
+          },
+        ],
+      },
+    }),
+    /raw aggregate llm_judge\.mean must be finite, non-negative, or an accepted failure sentinel aggregate/,
+  );
+});
 
 test("generic public SOTA packager rejects diagnostics with invalid timestamps", async () => {
   const dirs = await createRunDirs("remnic-public-sota-generic-");
@@ -567,6 +617,82 @@ test("generic public SOTA packager rejects diagnostics that do not cover publish
         "--repo-root", process.cwd(),
         "--out-dir", dirs.outDir,
       ],
+    );
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("generic public SOTA packager preserves AMemGym failure sentinels", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-amemgym-failure-sentinel-");
+  try {
+    await writeValidDiagnostics(dirs.diagnosticsDir, 2);
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\namemgym\tstart\t${STARTED_AT}\namemgym\tsuccess\t${FINISHED_AT}\n`,
+      "utf8",
+    );
+    const resultPath = path.join(dirs.resultsDir, "amemgym-result.json");
+    await writeAmemGymResult(resultPath, [0, -1]);
+    await writeBaseManifest(dirs.resultsDir, "amemgym", resultPath);
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.join("scripts", "bench", "public-sota", "package-public-benchmark-evidence.mjs"),
+        "--result", resultPath,
+        "--results-dir", dirs.resultsDir,
+        "--dataset-dir", dirs.datasetDir,
+        "--repo-root", process.cwd(),
+        "--out-dir", dirs.outDir,
+      ],
+      { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+    );
+
+    const manifest = JSON.parse(await readFile(path.join(dirs.outDir, "MANIFEST.amemgym.json"), "utf8"));
+    const artifact = JSON.parse(await readFile(path.join(dirs.outDir, manifest.publicArtifacts[0].path), "utf8"));
+    assert.equal(artifact.metrics.normalized_memory_score, -0.5);
+    assert.deepEqual(
+      artifact.perTaskScores.map((task: { scores: { normalized_memory_score: number } }) => task.scores.normalized_memory_score),
+      [0, -1],
+    );
+  } finally {
+    await rm(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("generic public SOTA packager rejects non-sentinel negative scores", async () => {
+  const dirs = await createRunDirs("remnic-public-sota-negative-score-");
+  try {
+    await writeValidDiagnostics(dirs.diagnosticsDir, 2);
+    await writeFile(
+      path.join(dirs.resultsDir, "status.tsv"),
+      `benchmark\tstatus\ttimestamp\namemgym\tstart\t${STARTED_AT}\namemgym\tsuccess\t${FINISHED_AT}\n`,
+      "utf8",
+    );
+    const resultPath = path.join(dirs.resultsDir, "amemgym-result.json");
+    await writeAmemGymResult(resultPath, [1, -0.5]);
+    await writeBaseManifest(dirs.resultsDir, "amemgym", resultPath);
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          path.join("scripts", "bench", "public-sota", "package-public-benchmark-evidence.mjs"),
+          "--result", resultPath,
+          "--results-dir", dirs.resultsDir,
+          "--dataset-dir", dirs.datasetDir,
+          "--repo-root", process.cwd(),
+          "--out-dir", dirs.outDir,
+        ],
+        { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+      ),
+      (error: unknown) => {
+        assert(error && typeof error === "object");
+        const output = `${(error as { stdout?: string }).stdout ?? ""}\n${(error as { stderr?: string }).stderr ?? ""}`;
+        assert.match(output, /score normalized_memory_score must be finite, non-negative, or an accepted failure sentinel/);
+        return true;
+      },
     );
   } finally {
     await rm(dirs.root, { recursive: true, force: true });

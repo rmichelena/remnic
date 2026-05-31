@@ -137,14 +137,16 @@ export async function runAMemGymBenchmark(
         });
         const selectedChoice = parseAMemGymChoice(answered.finalAnswer, qa);
         const answerForScoring = selectedChoice?.choice.answer ?? answered.finalAnswer;
+        const qaAccuracy =
+          selectedChoice && expectedChoice && selectedChoice.index === expectedChoice.index
+            ? 1
+            : 0;
 
         const scores: Record<string, number> = {
           f1: f1Score(answerForScoring, expectedAnswer),
           contains_answer: containsAnswer(answerForScoring, expectedAnswer),
-          qa_accuracy:
-            selectedChoice && expectedChoice && selectedChoice.index === expectedChoice.index
-              ? 1
-              : 0,
+          qa_accuracy: qaAccuracy,
+          normalized_memory_score: qaAccuracy,
         };
         const judgeResult = await llmJudgeScoreDetailed(
           options.system.judge,
@@ -197,7 +199,13 @@ export async function runAMemGymBenchmark(
           question: benchmarkQuestion,
           expected: expectedAnswer,
           actual: `(error: ${message})`,
-          scores: { f1: -1, contains_answer: -1, qa_accuracy: -1, llm_judge: -1 },
+          scores: {
+            f1: -1,
+            contains_answer: -1,
+            qa_accuracy: -1,
+            normalized_memory_score: -1,
+            llm_judge: -1,
+          },
           latencyMs: 0,
           tokens: { input: 0, output: 0 },
           details: { error: message },
