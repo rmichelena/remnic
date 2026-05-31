@@ -21,6 +21,8 @@ import {
   assertResultMatchesRunManifest,
   buildDiagnosticsSummary,
   gitInfo,
+  isPublicAggregateMeanValue,
+  isPublicScoreValue,
   parseArgs,
   pathReplacements,
   readJson,
@@ -35,18 +37,19 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TARGET_MAP = path.join(scriptDir, 'current-target-map.json');
 
 function aggregateMeans(result) {
+  const benchmark = result.meta?.benchmark ?? result.benchmarkId;
   return Object.fromEntries(
     Object.entries(result.results?.aggregates ?? {})
-      .filter(([, aggregate]) => aggregate && typeof aggregate.mean === 'number' && Number.isFinite(aggregate.mean) && aggregate.mean >= 0)
+      .filter(([metric, aggregate]) => aggregate && isPublicAggregateMeanValue(aggregate.mean, benchmark, metric))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([metric, aggregate]) => [metric, aggregate.mean]),
   );
 }
 
-function cleanedScores(scores) {
+function cleanedScores(scores, benchmark) {
   return Object.fromEntries(
     Object.entries(scores ?? {})
-      .filter(([, score]) => typeof score === 'number' && Number.isFinite(score) && score >= 0)
+      .filter(([metric, score]) => isPublicScoreValue(score, benchmark, metric))
       .sort(([left], [right]) => left.localeCompare(right)),
   );
 }
@@ -156,7 +159,7 @@ function buildArtifact(result, dataset, comparison, startedAt) {
     perTaskScores: result.results.tasks.map((task) => ({
       taskId: task.taskId,
       category: publicTaskCategory(benchmark, task),
-      scores: cleanedScores(task.scores),
+      scores: cleanedScores(task.scores, benchmark),
       details: publicTaskDetails(benchmark, task),
     })),
     startedAt,
