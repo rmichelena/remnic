@@ -1294,8 +1294,67 @@ export async function applyOfflineSyncFileContentChunk(options: {
   if (options.writeFile && !options.writeStagingFile) {
     throw new Error("offline sync upload storage hooks require writeStagingFile");
   }
+  const baseResult = {
+    path: relPath,
+    sha256,
+    bytes,
+    mtimeMs,
+    offset,
+    chunkBytes: options.content.length,
+    done: offset + options.content.length === bytes,
+  };
   if (offset === 0) {
     await pruneOfflineUploadStaging(root);
+    const currentSnapshot = await buildOfflineSyncSnapshotForPaths({
+      root: root.abs,
+      sourceId: "local",
+      paths: [relPath],
+      includeContent: false,
+      includeTranscripts,
+      readFile: options.readFile,
+    });
+    const currentFile = currentSnapshot.files[0];
+    if (!baseSha256 && currentFile) {
+      const conflict = await recordConflict({
+        root,
+        relPath,
+        reason: "remote_exists_for_local_create",
+        localSha256: currentFile.sha256,
+        incomingSha256: sha256,
+        writeConflictCopies: false,
+        sourceId,
+        writeFile: options.writeFile,
+      });
+      return {
+        ...baseResult,
+        chunkBytes: 0,
+        applied: false,
+        skipped: false,
+        conflict,
+        currentFile: toFileState(currentFile),
+      };
+    }
+    if (baseSha256 && currentFile?.sha256 !== baseSha256) {
+      const conflict = await recordConflict({
+        root,
+        relPath,
+        reason: currentFile ? "remote_changed_for_local_update" : "remote_deleted_for_local_update",
+        baseSha256,
+        localSha256: currentFile?.sha256,
+        incomingSha256: sha256,
+        writeConflictCopies: false,
+        sourceId,
+        writeFile: options.writeFile,
+      });
+      return {
+        ...baseResult,
+        chunkBytes: 0,
+        applied: false,
+        skipped: false,
+        conflict,
+        ...(currentFile ? { currentFile: toFileState(currentFile) } : {}),
+      };
+    }
   }
 
   const upload = await writeOfflineUploadChunk({
@@ -1310,16 +1369,7 @@ export async function applyOfflineSyncFileContentChunk(options: {
     writeFile: options.writeFile,
     writeStagingFile: options.writeStagingFile,
   });
-  const done = offset + options.content.length === bytes;
-  const baseResult = {
-    path: relPath,
-    sha256,
-    bytes,
-    mtimeMs,
-    offset,
-    chunkBytes: options.content.length,
-    done,
-  };
+  const done = baseResult.done;
   if (!done) {
     return {
       ...baseResult,

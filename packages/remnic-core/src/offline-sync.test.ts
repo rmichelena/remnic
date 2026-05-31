@@ -652,8 +652,28 @@ test("offline sync applies chunked file content with base conflict checks", asyn
       content: conflictContent,
     });
     assert.equal(conflict.done, true);
+    assert.equal(conflict.chunkBytes, 0);
     assert.equal(conflict.applied, false);
     assert.equal(conflict.conflict?.reason, "remote_changed_for_local_update");
+    assert.equal(await readUtf8(root, "state/lcm.sqlite"), "new durable sqlite content");
+
+    const partialConflictContent = Buffer.from("another conflicting sqlite payload");
+    const partialConflictSha = createHash("sha256").update(partialConflictContent).digest("hex");
+    const partialConflict = await applyOfflineSyncFileContentChunk({
+      root,
+      sourceId: "laptop",
+      path: "state/lcm.sqlite",
+      sha256: partialConflictSha,
+      bytes: partialConflictContent.byteLength,
+      mtimeMs: 789,
+      offset: 0,
+      baseSha256: oldSha,
+      content: partialConflictContent.subarray(0, 8),
+    });
+    assert.equal(partialConflict.done, false);
+    assert.equal(partialConflict.chunkBytes, 0);
+    assert.equal(partialConflict.applied, false);
+    assert.equal(partialConflict.conflict?.reason, "remote_changed_for_local_update");
     assert.equal(await readUtf8(root, "state/lcm.sqlite"), "new durable sqlite content");
   } finally {
     await rm(root, { recursive: true, force: true });
