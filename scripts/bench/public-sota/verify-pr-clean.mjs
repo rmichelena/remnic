@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const args = process.argv.slice(2);
 let repo = process.env.REPO;
@@ -37,6 +39,53 @@ const [owner, name] = repo.split('/');
 if (!owner || !name) {
   throw new Error(`Invalid repo: ${repo}`);
 }
+
+function isExecutable(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pathGhCandidates() {
+  return (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((entry) => path.join(entry, 'gh'));
+}
+
+function isWorkingGh(candidate) {
+  try {
+    execFileSync(candidate, ['--version'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveGhBin() {
+  const candidates = [
+    process.env.GH_BIN,
+    '/opt/homebrew/opt/gh/bin/gh',
+    ...pathGhCandidates(),
+    '/opt/homebrew/bin/gh',
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    if (isExecutable(candidate) && isWorkingGh(candidate)) {
+      return candidate;
+    }
+  }
+  return 'gh';
+}
+
+const ghBin = resolveGhBin();
 
 const query = `
 query($owner:String!,$name:String!,$number:Int!){
@@ -84,7 +133,7 @@ query($owner:String!,$name:String!,$number:Int!,$after:String){
 }`;
 
 function fetchPr() {
-  const raw = execFileSync('gh', [
+  const raw = execFileSync(ghBin, [
     'api',
     'graphql',
     '-f', `owner=${owner}`,
@@ -120,7 +169,7 @@ function fetchReviewThreads() {
     if (after) {
       command.push('-f', `after=${after}`);
     }
-    const raw = execFileSync('gh', command, { encoding: 'utf8' });
+    const raw = execFileSync(ghBin, command, { encoding: 'utf8' });
     const payload = JSON.parse(raw);
     const page = payload.data?.repository?.pullRequest?.reviewThreads;
     if (!page) {

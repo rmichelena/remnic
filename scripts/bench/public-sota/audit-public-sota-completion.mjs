@@ -23,6 +23,53 @@ const branchRef = process.env.BRANCH_REF ?? 'origin/bench/public-matrix-codex';
 const auditWorktree = process.env.AUDIT_WORKTREE ?? path.join(os.tmpdir(), 'remnic-public-sota-completion-audit');
 const targetMapPath = process.env.TARGET_MAP ?? path.join(os.tmpdir(), 'remnic-public-sota-audit-target-map.json');
 
+function isExecutable(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pathGhCandidates() {
+  return (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((entry) => path.join(entry, 'gh'));
+}
+
+function isWorkingGh(candidate) {
+  try {
+    execFileSync(candidate, ['--version'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveGhBin() {
+  const candidates = [
+    process.env.GH_BIN,
+    '/opt/homebrew/opt/gh/bin/gh',
+    ...pathGhCandidates(),
+    '/opt/homebrew/bin/gh',
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    if (isExecutable(candidate) && isWorkingGh(candidate)) {
+      return candidate;
+    }
+  }
+  return 'gh';
+}
+
+const ghBin = resolveGhBin();
+
 function fetchBranchRef() {
   if (!branchRef.startsWith('origin/')) {
     return;
@@ -86,7 +133,7 @@ function findManifest(manifestName) {
 
 function ghJson(args) {
   try {
-    return JSON.parse(execFileSync('gh', args, { encoding: 'utf8' }));
+    return JSON.parse(execFileSync(ghBin, args, { encoding: 'utf8' }));
   } catch {
     return undefined;
   }
@@ -345,7 +392,7 @@ function runPublicMatrixVerifier(row, item) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        PATH: `/opt/homebrew/bin:/opt/homebrew/sbin:${process.env.PATH ?? ''}`,
+        PATH: `/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${process.env.PATH ?? ''}`,
       },
     });
     const report = JSON.parse(output);

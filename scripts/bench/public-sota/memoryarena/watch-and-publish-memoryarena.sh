@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
+export PATH="/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}"

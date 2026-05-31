@@ -107,7 +107,7 @@ ${comparisonRows(comparison.checks)}
 Run the benchmark from the publication branch:
 
 \`\`\`bash
-PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH \\
+PATH=/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH \\
 node packages/remnic-cli/bin/remnic.cjs bench published \\
   --name memory-arena \\
   --dataset evals/datasets/memory-arena \\

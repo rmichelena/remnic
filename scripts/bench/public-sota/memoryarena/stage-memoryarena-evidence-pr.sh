@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
+export PATH="/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUBLIC_SOTA_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -117,7 +117,7 @@ node "${DOC_GENERATOR}" \
 (
   cd "${WORKTREE}"
   node "${VERIFY_SCRIPT_REL}" "${RESULTS_REL}"
-  PATH=/opt/homebrew/bin:/opt/homebrew/sbin:${PATH} npx tsx scripts/bench/verify-public-matrix.ts \
+  PATH=/opt/homebrew/opt/gh/bin:/opt/homebrew/bin:/opt/homebrew/sbin:${PATH} npx tsx scripts/bench/verify-public-matrix.ts \
     --results-dir "${RESULTS_REL}" \
     --manifest "${RESULTS_REL}/MANIFEST.memory-arena.json" \
     --benchmarks memory-arena \
