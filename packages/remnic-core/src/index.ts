@@ -690,6 +690,7 @@ export {
   applyOfflineSyncSnapshot,
   buildOfflineSyncChangeset,
   buildOfflineSyncSnapshot,
+  buildOfflineSyncSnapshotFromBase,
   buildOfflineSyncSnapshotForPaths,
   defaultOfflineSyncStatePath,
   fileStatesFromSnapshot,

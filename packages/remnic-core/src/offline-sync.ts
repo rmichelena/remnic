@@ -556,6 +556,70 @@ export async function buildOfflineSyncSnapshot(options: {
   };
 }
 
+export async function buildOfflineSyncSnapshotFromBase(options: {
+  root: string;
+  sourceId: string;
+  baseFiles?: readonly OfflineSyncFileState[];
+  includeContent?: boolean;
+  includeTranscripts?: boolean;
+  now?: Date;
+  readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
+}): Promise<OfflineSyncSnapshot> {
+  const rootAbs = path.resolve(options.root);
+  const root = await prepareSafeArchiveRoot(rootAbs, "buildOfflineSyncSnapshotFromBase", "root");
+  const includeTranscripts = options.includeTranscripts !== false;
+  const base = byPath(filterBaseFilesForMode(
+    normalizeFileStates(options.baseFiles),
+    includeTranscripts,
+  ));
+  const files: OfflineSyncFileRecord[] = [];
+
+  async function walk(dirAbs: string): Promise<void> {
+    let entries = await readdir(dirAbs, { withFileTypes: true });
+    entries = entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const abs = path.join(dirAbs, entry.name);
+      const relPosix = path.relative(root.abs, abs).split(path.sep).join("/");
+      if (shouldExcludeRelPath(relPosix, includeTranscripts)) continue;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        await walk(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const st = await stat(abs);
+      const baseEntry = base.get(relPosix);
+      if (
+        options.includeContent !== true &&
+        baseEntry &&
+        baseEntry.bytes === st.size &&
+        baseEntry.mtimeMs === st.mtimeMs
+      ) {
+        files.push({ ...baseEntry });
+        continue;
+      }
+      files.push(await readOfflineSyncFileRecord({
+        root,
+        relPath: relPosix,
+        filePath: abs,
+        includeContent: options.includeContent === true,
+        readFile: options.readFile,
+      }));
+    }
+  }
+
+  await walk(root.abs);
+
+  return {
+    format: OFFLINE_SYNC_SNAPSHOT_FORMAT,
+    schemaVersion: 1,
+    createdAt: (options.now ?? new Date()).toISOString(),
+    sourceId: normalizeSourceId(options.sourceId, "sourceId"),
+    includeTranscripts,
+    files: files.sort(compareByPath),
+  };
+}
+
 export async function buildOfflineSyncSnapshotForPaths(options: {
   root: string;
   sourceId: string;
@@ -695,9 +759,10 @@ export async function buildOfflineSyncChangeset(options: {
     normalizeFileStates(options.baseFiles),
     includeTranscripts,
   ));
-  const current = await buildOfflineSyncSnapshot({
+  const current = await buildOfflineSyncSnapshotFromBase({
     root: options.root,
     sourceId: options.sourceId,
+    baseFiles: options.baseFiles,
     includeContent: false,
     includeTranscripts,
     now: options.now,
@@ -776,9 +841,10 @@ export async function summarizeOfflineSyncPendingChanges(options: {
     normalizeFileStates(options.baseFiles),
     includeTranscripts,
   ));
-  const current = await buildOfflineSyncSnapshot({
+  const current = await buildOfflineSyncSnapshotFromBase({
     root: options.root,
     sourceId: options.sourceId,
+    baseFiles: options.baseFiles,
     includeContent: false,
     includeTranscripts,
     now: options.now,
@@ -811,6 +877,8 @@ export async function applyOfflineSyncSnapshot(options: {
   root: string;
   snapshot: unknown;
   baseFiles?: readonly OfflineSyncFileState[];
+  deferredPaths?: readonly string[];
+  allowMissingConflictContent?: boolean;
   writeConflictCopies?: boolean;
   readFile?: (target: OfflineSyncFileTarget) => Promise<Buffer>;
   writeFile?: (target: OfflineSyncFileWriteTarget) => Promise<void>;
@@ -834,17 +902,31 @@ export async function applyOfflineSyncSnapshot(options: {
     readFile: options.readFile,
   });
   const currentMap = byPath(current.files);
+  const deferredPaths = new Set(options.deferredPaths ?? []);
   const nextBase = new Map(baseMap);
   const conflicts: OfflineSyncConflict[] = [];
   let upserted = 0;
   let deleted = 0;
   let skipped = 0;
   let pendingLocal = 0;
+  const conflictIncomingBuffer = (relPath: string): Buffer | undefined => {
+    if (options.writeConflictCopies === false) return undefined;
+    const buffer = incomingBuffers.get(relPath);
+    if (buffer || options.allowMissingConflictContent === true) return buffer;
+    return requiredBuffer(incomingBuffers, relPath);
+  };
 
   for (const relPath of unionPaths(baseMap, incomingMap, currentMap)) {
     const base = baseMap.get(relPath);
     const incoming = incomingMap.get(relPath);
     const currentEntry = currentMap.get(relPath);
+
+    if (deferredPaths.has(relPath)) {
+      if (base) nextBase.set(relPath, base);
+      else nextBase.delete(relPath);
+      skipped += 1;
+      continue;
+    }
 
     if (incoming) {
       if (currentEntry?.sha256 === incoming.sha256) {
@@ -865,9 +947,7 @@ export async function applyOfflineSyncSnapshot(options: {
           reason: "local_deleted_remote_modified",
           baseSha256: base.sha256,
           incomingSha256: incoming.sha256,
-          incomingBuffer: options.writeConflictCopies === false
-            ? incomingBuffers.get(relPath)
-            : requiredBuffer(incomingBuffers, relPath),
+          incomingBuffer: conflictIncomingBuffer(relPath),
           writeConflictCopies: options.writeConflictCopies !== false,
           sourceId: snapshot.sourceId,
           writeFile: options.writeFile,
@@ -900,9 +980,7 @@ export async function applyOfflineSyncSnapshot(options: {
         baseSha256: base?.sha256,
         localSha256: currentEntry?.sha256,
         incomingSha256: incoming.sha256,
-        incomingBuffer: options.writeConflictCopies === false
-          ? incomingBuffers.get(relPath)
-          : requiredBuffer(incomingBuffers, relPath),
+        incomingBuffer: conflictIncomingBuffer(relPath),
         writeConflictCopies: options.writeConflictCopies !== false,
         sourceId: snapshot.sourceId,
         writeFile: options.writeFile,

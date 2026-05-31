@@ -128,9 +128,10 @@ import {
   OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_TRANSFER_CHUNK_BYTES,
+  applyOfflineSyncFileContentChunk,
   applyOfflineSyncSnapshot,
   buildOfflineSyncChangeset,
-  buildOfflineSyncSnapshot,
+  buildOfflineSyncSnapshotFromBase,
   defaultOfflineSyncStatePath,
   normalizeOfflineSyncSnapshot,
   offlineSyncStateFromSnapshot,
@@ -5611,31 +5612,124 @@ function offlineEndpoint(
   return url.toString();
 }
 
+export const OFFLINE_SYNC_REQUEST_TIMEOUT_DEFAULT_MS = 5 * 60_000;
+
+export function parseOfflineSyncRequestTimeoutMs(
+  raw: string | undefined,
+  fallback = OFFLINE_SYNC_REQUEST_TIMEOUT_DEFAULT_MS,
+): number {
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1_000) {
+    throw new Error("REMNIC_OFFLINE_REQUEST_TIMEOUT_MS must be an integer >= 1000");
+  }
+  return parsed;
+}
+
+export function formatOfflineRequestForError(url: string, init: RequestInit = {}): string {
+  const method = (init.method ?? "GET").toString().toUpperCase();
+  try {
+    const parsed = new URL(url);
+    return `${method} ${parsed.pathname}${parsed.search}`;
+  } catch {
+    return `${method} ${url}`;
+  }
+}
+
+function offlineRequestTimeoutMs(): number {
+  return parseOfflineSyncRequestTimeoutMs(
+    process.env.REMNIC_OFFLINE_REQUEST_TIMEOUT_MS ??
+      process.env.ENGRAM_OFFLINE_REQUEST_TIMEOUT_MS,
+  );
+}
+
+function offlineFetchHeaders(
+  token: string,
+  initHeaders: RequestInit["headers"] | undefined,
+  defaultContentType?: string,
+): Headers {
+  const headers = new Headers(initHeaders);
+  headers.set("authorization", `Bearer ${token}`);
+  if (defaultContentType && !headers.has("content-type")) {
+    headers.set("content-type", defaultContentType);
+  }
+  return headers;
+}
+
+async function fetchOfflineWithResponse<T>(
+  url: string,
+  token: string,
+  init: RequestInit = {},
+  options: { defaultContentType?: string } = {},
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
+  const timeoutMs = offlineRequestTimeoutMs();
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  const requestContext = formatOfflineRequestForError(url, init);
+  let didTimeout = false;
+  const timeout = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+  const abortFromUpstream = () => controller.abort(upstreamSignal?.reason);
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) controller.abort(upstreamSignal.reason);
+    else upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+  }
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: offlineFetchHeaders(token, init.headers, options.defaultContentType),
+    });
+    return await consume(response);
+  } catch (error) {
+    if (didTimeout) {
+      throw new Error(`offline sync request timed out after ${timeoutMs}ms: ${requestContext}`);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`offline sync request failed before response: ${requestContext} - ${message}`);
+  } finally {
+    clearTimeout(timeout);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
+}
+
+async function throwOfflineResponseError(
+  response: Response,
+  url: string,
+  init: RequestInit,
+  label = "offline sync request",
+): Promise<never> {
+  let detail = "";
+  try {
+    detail = await response.text();
+  } catch {
+    detail = "";
+  }
+  throw new Error(
+    `${label} failed: ${formatOfflineRequestForError(url, init)} returned ${response.status} ${response.statusText}${detail ? ` - ${detail.slice(0, 500)}` : ""}`,
+  );
+}
+
 async function fetchOfflineJson<T>(
   url: string,
   token: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
-      ...(init.headers ?? {}),
+  return fetchOfflineWithResponse(
+    url,
+    token,
+    init,
+    { defaultContentType: init.body !== undefined ? "application/json" : undefined },
+    async (response) => {
+      if (!response.ok) {
+        await throwOfflineResponseError(response, url, init);
+      }
+      return await response.json() as T;
     },
-  });
-  if (!response.ok) {
-    let detail = "";
-    try {
-      detail = await response.text();
-    } catch {
-      detail = "";
-    }
-    throw new Error(
-      `offline sync request failed: ${response.status} ${response.statusText}${detail ? ` - ${detail.slice(0, 500)}` : ""}`,
-    );
-  }
-  return await response.json() as T;
+  );
 }
 
 async function fetchOfflineSnapshot(args: {
@@ -5700,6 +5794,25 @@ export const OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES = Math.min(
 );
 export const OFFLINE_SYNC_DIRECT_HYDRATE_MIN_BYTES = OFFLINE_SYNC_DIRECT_PUSH_MIN_BYTES;
 
+class OfflineRemoteFileChangedError extends Error {
+  readonly path: string;
+
+  constructor(path: string) {
+    super(`remote file changed while fetching offline content: ${path}`);
+    this.name = "OfflineRemoteFileChangedError";
+    this.path = path;
+  }
+}
+
+function isOfflineRemoteFileChangedError(error: unknown): error is OfflineRemoteFileChangedError {
+  return error instanceof OfflineRemoteFileChangedError ||
+    (error instanceof Error && error.message.startsWith("remote file changed while fetching offline content: "));
+}
+
+function isOfflineLocalFileChangedError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("local file changed while pushing offline content: ");
+}
+
 function parseOfflineHeaderNumber(headers: Headers, name: string): number {
   const raw = headers.get(name);
   if (raw === null) throw new Error(`offline file content response omitted ${name}`);
@@ -5719,51 +5832,45 @@ async function fetchOfflineFileContentChunk(args: {
   offset: number;
   length: number;
 }): Promise<OfflineFileContentChunk> {
-  const response = await fetch(
-    offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/file-content"),
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${args.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        namespace: args.namespace,
-        includeTranscripts: args.includeTranscripts,
-        path: args.path,
-        offset: args.offset,
-        length: args.length,
-      }),
+  const url = offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/file-content");
+  const init: RequestInit = {
+    method: "POST",
+    body: JSON.stringify({
+      namespace: args.namespace,
+      includeTranscripts: args.includeTranscripts,
+      path: args.path,
+      offset: args.offset,
+      length: args.length,
+    }),
+  };
+  return fetchOfflineWithResponse(
+    url,
+    args.token,
+    init,
+    { defaultContentType: "application/json" },
+    async (response) => {
+      if (!response.ok) {
+        await throwOfflineResponseError(response, url, init, "offline sync file-content request");
+      }
+      const encodedPath = response.headers.get("x-remnic-file-path");
+      const relPath = encodedPath ? decodeURIComponent(encodedPath) : args.path;
+      const content = Buffer.from(await response.arrayBuffer());
+      const chunkBytes = parseOfflineHeaderNumber(response.headers, "x-remnic-chunk-bytes");
+      const sha256 = response.headers.get("x-remnic-file-sha256") ?? undefined;
+      if (content.length !== chunkBytes) {
+        throw new Error(`offline file content response length mismatch for ${relPath}`);
+      }
+      return {
+        path: relPath,
+        ...(sha256 ? { sha256 } : {}),
+        bytes: parseOfflineHeaderNumber(response.headers, "x-remnic-file-bytes"),
+        mtimeMs: parseOfflineHeaderNumber(response.headers, "x-remnic-file-mtime-ms"),
+        offset: parseOfflineHeaderNumber(response.headers, "x-remnic-chunk-offset"),
+        chunkBytes,
+        content,
+      };
     },
   );
-  if (!response.ok) {
-    let detail = "";
-    try {
-      detail = await response.text();
-    } catch {
-      detail = "";
-    }
-    throw new Error(
-      `offline sync file-content request failed: ${response.status} ${response.statusText}${detail ? ` - ${detail.slice(0, 500)}` : ""}`,
-    );
-  }
-  const encodedPath = response.headers.get("x-remnic-file-path");
-  const relPath = encodedPath ? decodeURIComponent(encodedPath) : args.path;
-  const content = Buffer.from(await response.arrayBuffer());
-  const chunkBytes = parseOfflineHeaderNumber(response.headers, "x-remnic-chunk-bytes");
-  const sha256 = response.headers.get("x-remnic-file-sha256") ?? undefined;
-  if (content.length !== chunkBytes) {
-    throw new Error(`offline file content response length mismatch for ${relPath}`);
-  }
-  return {
-    path: relPath,
-    ...(sha256 ? { sha256 } : {}),
-    bytes: parseOfflineHeaderNumber(response.headers, "x-remnic-file-bytes"),
-    mtimeMs: parseOfflineHeaderNumber(response.headers, "x-remnic-file-mtime-ms"),
-    offset: parseOfflineHeaderNumber(response.headers, "x-remnic-chunk-offset"),
-    chunkBytes,
-    content,
-  };
 }
 
 async function postOfflineFileContentChunk(args: {
@@ -5777,39 +5884,36 @@ async function postOfflineFileContentChunk(args: {
   offset: number;
   content: Buffer;
 }): Promise<OfflineSyncApplyFileContentChunkResult & { namespace?: string }> {
-  const response = await fetch(
-    offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/apply-file-content", {
-      namespace: args.namespace,
-    }),
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${args.token}`,
-        "content-type": "application/octet-stream",
-        "x-remnic-include-transcripts": args.includeTranscripts ? "true" : "false",
-        "x-remnic-source-id": encodeURIComponent(args.sourceId),
-        "x-remnic-file-path": encodeURIComponent(args.file.path),
-        "x-remnic-file-sha256": args.file.sha256,
-        "x-remnic-file-bytes": String(args.file.bytes),
-        "x-remnic-file-mtime-ms": String(args.file.mtimeMs),
-        "x-remnic-chunk-offset": String(args.offset),
-        ...(args.baseSha256 ? { "x-remnic-base-sha256": args.baseSha256 } : {}),
-      },
-      body: new Blob([new Uint8Array(args.content)]),
+  const url = offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/apply-file-content", {
+    namespace: args.namespace,
+  });
+  const init: RequestInit = {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-remnic-include-transcripts": args.includeTranscripts ? "true" : "false",
+      "x-remnic-source-id": encodeURIComponent(args.sourceId),
+      "x-remnic-file-path": encodeURIComponent(args.file.path),
+      "x-remnic-file-sha256": args.file.sha256,
+      "x-remnic-file-bytes": String(args.file.bytes),
+      "x-remnic-file-mtime-ms": String(args.file.mtimeMs),
+      "x-remnic-chunk-offset": String(args.offset),
+      ...(args.baseSha256 ? { "x-remnic-base-sha256": args.baseSha256 } : {}),
+    },
+    body: new Blob([new Uint8Array(args.content)]),
+  };
+  return fetchOfflineWithResponse(
+    url,
+    args.token,
+    init,
+    {},
+    async (response) => {
+      if (!response.ok) {
+        await throwOfflineResponseError(response, url, init, "offline sync apply-file-content request");
+      }
+      return await response.json() as OfflineSyncApplyFileContentChunkResult & { namespace?: string };
     },
   );
-  if (!response.ok) {
-    let detail = "";
-    try {
-      detail = await response.text();
-    } catch {
-      detail = "";
-    }
-    throw new Error(
-      `offline sync apply-file-content request failed: ${response.status} ${response.statusText}${detail ? ` - ${detail.slice(0, 500)}` : ""}`,
-    );
-  }
-  return await response.json() as OfflineSyncApplyFileContentChunkResult & { namespace?: string };
 }
 
 function resolvedOfflineSnapshotNamespace(
@@ -5867,17 +5971,34 @@ function offlineFileStateMap(
   return new Map(files.map((file) => [file.path, file]));
 }
 
-function offlineSnapshotContentFilesForApply(options: {
+export function offlineSnapshotContentFilesForApply(options: {
   snapshot: OfflineSyncSnapshot;
   baseFiles: readonly OfflineSyncFileState[];
   currentFiles?: readonly OfflineSyncFileState[];
+  conflictContentMaxBytes?: number;
+  deferredPaths?: readonly string[];
 }): OfflineSyncFileState[] {
   const base = offlineFileStateMap(options.baseFiles);
   const current = options.currentFiles ? offlineFileStateMap(options.currentFiles) : null;
+  const conflictContentMaxBytes = options.conflictContentMaxBytes ?? Number.POSITIVE_INFINITY;
+  const deferredPaths = new Set(options.deferredPaths ?? []);
   const files: OfflineSyncFileState[] = [];
   for (const incoming of options.snapshot.files) {
-    if (current?.get(incoming.path)?.sha256 === incoming.sha256) continue;
-    if (base.get(incoming.path)?.sha256 === incoming.sha256) continue;
+    if (deferredPaths.has(incoming.path)) continue;
+    const baseEntry = base.get(incoming.path);
+    const currentEntry = current?.get(incoming.path);
+    if (currentEntry?.sha256 === incoming.sha256) continue;
+    if (!currentEntry && baseEntry && incoming.sha256 === baseEntry.sha256) continue;
+    if (!currentEntry && !baseEntry) {
+      files.push(incoming);
+      continue;
+    }
+    if (baseEntry && currentEntry && currentEntry.sha256 === baseEntry.sha256) {
+      files.push(incoming);
+      continue;
+    }
+    if (baseEntry && incoming.sha256 === baseEntry.sha256) continue;
+    if (incoming.bytes > conflictContentMaxBytes) continue;
     files.push(incoming);
   }
   return files.sort((left, right) => left.path.localeCompare(right.path));
@@ -6118,7 +6239,7 @@ async function fetchOfflineFileContent(args: {
       chunk.offset !== offset ||
       chunk.chunkBytes !== chunk.content.length
     ) {
-      throw new Error(`remote file changed while fetching offline content: ${args.expected.path}`);
+      throw new OfflineRemoteFileChangedError(args.expected.path);
     }
     if (chunk.chunkBytes === 0) {
       throw new Error(`remote offline content chunk was empty before EOF: ${args.expected.path}`);
@@ -6135,6 +6256,76 @@ async function fetchOfflineFileContent(args: {
   return content;
 }
 
+async function hydrateOfflineFileContent(args: {
+  remoteUrl: string;
+  token: string;
+  namespace?: string;
+  includeTranscripts: boolean;
+  memoryDir: string;
+  sourceId: string;
+  expected: OfflineSyncFileState;
+  baseSha256?: string;
+  readFile: NonNullable<Parameters<typeof applyOfflineSyncFileContentChunk>[0]["readFile"]>;
+  writeFile: NonNullable<Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeFile"]>;
+  writeStagingFile: NonNullable<Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeStagingFile"]>;
+  writeFileChunks: NonNullable<Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeFileChunks"]>;
+}): Promise<OfflineSyncApplyFileContentChunkResult> {
+  let offset = 0;
+  let finalResult: OfflineSyncApplyFileContentChunkResult | null = null;
+  while (offset < args.expected.bytes || (args.expected.bytes === 0 && offset === 0)) {
+    const chunk = await fetchOfflineFileContentChunk({
+      remoteUrl: args.remoteUrl,
+      token: args.token,
+      namespace: args.namespace,
+      includeTranscripts: args.includeTranscripts,
+      path: args.expected.path,
+      offset,
+      length: Math.min(
+        OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+        Math.max(1, args.expected.bytes - offset),
+      ),
+    });
+    if (
+      chunk.path !== args.expected.path ||
+      (chunk.sha256 !== undefined && chunk.sha256 !== args.expected.sha256) ||
+      chunk.bytes !== args.expected.bytes ||
+      chunk.mtimeMs !== args.expected.mtimeMs ||
+      chunk.offset !== offset ||
+      chunk.chunkBytes !== chunk.content.length
+    ) {
+      throw new OfflineRemoteFileChangedError(args.expected.path);
+    }
+    if (chunk.chunkBytes === 0 && args.expected.bytes > 0) {
+      throw new Error(`remote offline content chunk was empty before EOF: ${args.expected.path}`);
+    }
+    finalResult = await applyOfflineSyncFileContentChunk({
+      root: args.memoryDir,
+      sourceId: args.sourceId,
+      path: args.expected.path,
+      sha256: args.expected.sha256,
+      bytes: args.expected.bytes,
+      mtimeMs: args.expected.mtimeMs,
+      offset,
+      content: chunk.content,
+      ...(args.baseSha256 ? { baseSha256: args.baseSha256 } : {}),
+      includeTranscripts: args.includeTranscripts,
+      readFile: args.readFile,
+      writeFile: args.writeFile,
+      writeStagingFile: args.writeStagingFile,
+      writeFileChunks: args.writeFileChunks,
+    });
+    if (finalResult.conflict) {
+      return finalResult;
+    }
+    offset += chunk.chunkBytes;
+    if (args.expected.bytes === 0) break;
+  }
+  if (!finalResult?.done) {
+    throw new Error(`offline sync large-file hydrate did not finish for ${args.expected.path}`);
+  }
+  return finalResult;
+}
+
 async function directHydrateLargeOfflineFiles(args: {
   remoteUrl: string;
   token: string;
@@ -6145,12 +6336,18 @@ async function directHydrateLargeOfflineFiles(args: {
   currentFiles: readonly OfflineSyncFileState[];
   memoryDir: string;
   writeFile?: (target: OfflineSyncFileWriteTarget) => Promise<void>;
-}): Promise<Set<string>> {
-  if (!args.writeFile) return new Set();
+  readFile?: Parameters<typeof applyOfflineSyncFileContentChunk>[0]["readFile"];
+  writeStagingFile?: Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeStagingFile"];
+  writeFileChunks?: Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeFileChunks"];
+}): Promise<{ hydratedPaths: Set<string>; deferredPaths: Set<string> }> {
+  if (!args.readFile || !args.writeFile || !args.writeStagingFile || !args.writeFileChunks) {
+    return { hydratedPaths: new Set(), deferredPaths: new Set() };
+  }
   const snapshot = normalizeOfflineSyncSnapshot(args.snapshot);
   const base = offlineFileStateMap(args.baseFiles);
   const current = offlineFileStateMap(args.currentFiles);
-  const hydrated = new Set<string>();
+  const hydratedPaths = new Set<string>();
+  const deferredPaths = new Set<string>();
   const candidates = snapshot.files
     .filter((incoming) =>
       shouldDirectHydrateOfflineFile({
@@ -6160,22 +6357,32 @@ async function directHydrateLargeOfflineFiles(args: {
       }))
     .sort((left, right) => right.bytes - left.bytes || left.path.localeCompare(right.path));
   for (const incoming of candidates) {
-    const content = await fetchOfflineFileContent({
-      remoteUrl: args.remoteUrl,
-      token: args.token,
-      namespace: args.namespace,
-      includeTranscripts: args.includeTranscripts,
-      expected: incoming,
-    });
-    await args.writeFile({
-      root: args.memoryDir,
-      path: incoming.path,
-      filePath: resolveOfflineDirectHydrationPath(args.memoryDir, incoming.path),
-      content,
-    });
-    hydrated.add(incoming.path);
+    let result: OfflineSyncApplyFileContentChunkResult;
+    try {
+      result = await hydrateOfflineFileContent({
+        remoteUrl: args.remoteUrl,
+        token: args.token,
+        namespace: args.namespace,
+        includeTranscripts: args.includeTranscripts,
+        memoryDir: args.memoryDir,
+        sourceId: "remote",
+        expected: incoming,
+        baseSha256: base.get(incoming.path)?.sha256,
+        readFile: args.readFile,
+        writeFile: args.writeFile,
+        writeStagingFile: args.writeStagingFile,
+        writeFileChunks: args.writeFileChunks,
+      });
+    } catch (error) {
+      if (!isOfflineRemoteFileChangedError(error)) throw error;
+      deferredPaths.add(incoming.path);
+      continue;
+    }
+    if (result.applied || result.skipped) {
+      hydratedPaths.add(incoming.path);
+    }
   }
-  return hydrated;
+  return { hydratedPaths, deferredPaths };
 }
 
 export function chunkOfflineFileContentBatches(
@@ -6210,7 +6417,7 @@ export function chunkOfflineFileContentBatches(
 
 function isOfflineFilesUnsupportedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /offline sync request failed: 404\b/.test(message);
+  return /offline sync request failed: .* returned 404\b/.test(message);
 }
 
 function isMissingOfflineContentError(error: unknown): boolean {
@@ -6226,12 +6433,15 @@ async function hydrateOfflineSnapshotContent(args: {
   snapshot: OfflineSyncSnapshot & { namespace?: string };
   baseFiles: readonly OfflineSyncFileState[];
   currentFiles?: readonly OfflineSyncFileState[];
+  deferredPaths?: readonly string[];
 }): Promise<OfflineSyncSnapshot & { namespace?: string }> {
   const snapshot = normalizeOfflineSyncSnapshot(args.snapshot);
   const neededFiles = offlineSnapshotContentFilesForApply({
     snapshot,
     baseFiles: args.baseFiles,
     currentFiles: args.currentFiles,
+    conflictContentMaxBytes: OFFLINE_SYNC_FILES_CONTENT_MAX_BATCH_BYTES,
+    deferredPaths: args.deferredPaths,
   });
   if (neededFiles.length === 0) return { ...args.snapshot, files: snapshot.files };
 
@@ -6420,6 +6630,8 @@ async function createOfflineStorageIo(memoryDir: string): Promise<{
   readFile: Parameters<typeof buildOfflineSyncChangeset>[0]["readFile"];
   readFileChunks: OfflineFileChunkReader;
   writeFile: Parameters<typeof applyOfflineSyncSnapshot>[0]["writeFile"];
+  writeStagingFile: Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeStagingFile"];
+  writeFileChunks: Parameters<typeof applyOfflineSyncFileContentChunk>[0]["writeFileChunks"];
   deleteFile: Parameters<typeof applyOfflineSyncSnapshot>[0]["deleteFile"];
 }> {
   const storage = new StorageManager(memoryDir);
@@ -6442,6 +6654,8 @@ async function createOfflineStorageIo(memoryDir: string): Promise<{
       chunkSize,
     }),
     writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
+    writeStagingFile: async ({ filePath, content }) => storage.writeOfflineSyncStagingFile(filePath, content),
+    writeFileChunks: async ({ filePath, chunks }) => storage.writeOfflineSyncFileChunks(filePath, chunks),
     deleteFile: async ({ filePath }) => storage.deleteOfflineSyncFile(filePath),
   };
 }
@@ -6582,6 +6796,55 @@ class OfflineLargeFilePushError extends Error {
   }
 }
 
+type OfflineSyncPullResult = Awaited<ReturnType<typeof applyOfflineSyncSnapshot>>;
+type OfflineSyncRunResult = {
+  statePath: string;
+  namespace?: string;
+  prepared: boolean;
+  pushed: Awaited<ReturnType<typeof pushOfflineChanges>> | null;
+  pull: OfflineSyncPullResult | null;
+  pullError?: string;
+  partial: boolean;
+  pendingSummary: ReturnType<typeof summarizeOfflineSyncChangeset>;
+  remoteFileCount: number | null;
+  deferred: {
+    localChangedDuringPush: string[];
+    remoteChangedDuringHydrate: string[];
+    total: number;
+  };
+};
+
+export function advanceOfflineBaseFilesForSuccessfulPush(options: {
+  baseFiles: readonly OfflineSyncFileState[];
+  currentFiles: readonly OfflineSyncFileState[];
+  directPushedPaths?: readonly string[];
+  changeset: Awaited<ReturnType<typeof buildOfflineSyncChangeset>>;
+  conflicts?: readonly { path: string }[];
+}): OfflineSyncFileState[] {
+  const next = offlineFileStateMap(options.baseFiles);
+  const current = offlineFileStateMap(options.currentFiles);
+  const conflictPaths = new Set((options.conflicts ?? []).map((conflict) => conflict.path));
+  for (const relPath of options.directPushedPaths ?? []) {
+    if (conflictPaths.has(relPath)) continue;
+    const file = current.get(relPath);
+    if (file) next.set(relPath, file);
+  }
+  for (const change of options.changeset.changes) {
+    if (conflictPaths.has(change.path)) continue;
+    if (change.type === "delete") {
+      next.delete(change.path);
+    } else {
+      next.set(change.path, {
+        path: change.file.path,
+        sha256: change.file.sha256,
+        bytes: change.file.bytes,
+        mtimeMs: change.file.mtimeMs,
+      });
+    }
+  }
+  return [...next.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
 async function runOfflineSyncOnce(options: {
   memoryDir: string;
   remoteUrl: string;
@@ -6590,15 +6853,7 @@ async function runOfflineSyncOnce(options: {
   includeTranscripts: boolean;
   statePath: string;
   statePathExplicit: boolean;
-}): Promise<{
-  statePath: string;
-  namespace?: string;
-  prepared: boolean;
-  pushed: Awaited<ReturnType<typeof pushOfflineChanges>> | null;
-  pull: Awaited<ReturnType<typeof applyOfflineSyncSnapshot>>;
-  pendingSummary: ReturnType<typeof summarizeOfflineSyncChangeset>;
-  remoteFileCount: number;
-}> {
+}): Promise<OfflineSyncRunResult> {
   fs.mkdirSync(options.memoryDir, { recursive: true });
   let activeStatePath = options.statePath;
   let priorState = await readOfflineSyncState(activeStatePath);
@@ -6645,9 +6900,10 @@ async function runOfflineSyncOnce(options: {
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
   });
-  const currentSnapshotForPush = await buildOfflineSyncSnapshot({
+  const currentSnapshotForPush = await buildOfflineSyncSnapshotFromBase({
     root: options.memoryDir,
     sourceId: localSourceId,
+    baseFiles,
     includeContent: false,
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
@@ -6658,6 +6914,7 @@ async function runOfflineSyncOnce(options: {
   let directPushNamespace: string | undefined;
   const directPushConflicts: Array<{ path: string; reason: string; conflictPath?: string }> = [];
   const directPushedPaths = new Set<string>();
+  const directPushDeferredPaths = new Set<string>();
   const directPushFailures: Array<{ path: string; error: string }> = [];
   for (const file of offlineDirectPushFiles({
     currentFiles: currentSnapshotForPush.files,
@@ -6678,6 +6935,10 @@ async function runOfflineSyncOnce(options: {
         readFileChunks: storageIo.readFileChunks,
       });
     } catch (error) {
+      if (isOfflineLocalFileChangedError(error)) {
+        directPushDeferredPaths.add(file.path);
+        continue;
+      }
       directPushFailures.push({
         path: file.path,
         error: error instanceof Error ? error.message : String(error),
@@ -6704,7 +6965,7 @@ async function runOfflineSyncOnce(options: {
     root: options.memoryDir,
     sourceId: localSourceId,
     baseFiles,
-    excludePaths: [...directPushedPaths],
+    excludePaths: [...directPushedPaths, ...directPushDeferredPaths],
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
   });
@@ -6725,77 +6986,164 @@ async function runOfflineSyncOnce(options: {
         conflicts: [...directPushConflicts, ...(pushedInline?.conflicts ?? [])],
       }
     : null;
-  const remoteSnapshotMetadata = await fetchOfflineSnapshot({
+  const stateWritePathsFor = (resolvedNamespace: string | undefined): string[] => offlineStatePathsForNamespace({
+    memoryDir: options.memoryDir,
     remoteUrl: options.remoteUrl,
-    token: options.token,
-    namespace: syncNamespace,
-    includeTranscripts: options.includeTranscripts,
-    includeContent: false,
+    requestedNamespace: options.namespace,
+    resolvedNamespace,
+    explicitStatePath: options.statePathExplicit ? activeStatePath : undefined,
   });
-  const currentSnapshot = await buildOfflineSyncSnapshot({
+  const writePartialPushState = async (error: unknown): Promise<OfflineSyncRunResult> => {
+    const resolvedNamespace = pushed?.namespace || syncNamespace;
+    const stateWritePaths = stateWritePathsFor(resolvedNamespace);
+    const nextBaseFiles = advanceOfflineBaseFilesForSuccessfulPush({
+      baseFiles,
+      currentFiles: currentSnapshotForPush.files,
+      directPushedPaths: [...directPushedPaths],
+      changeset,
+      conflicts: pushed?.conflicts ?? directPushConflicts,
+    });
+    const state: OfflineSyncState = {
+      version: 1,
+      remoteId: options.remoteUrl,
+      ...(resolvedNamespace ? { namespace: resolvedNamespace } : {}),
+      includeTranscripts: options.includeTranscripts,
+      lastSyncedAt: new Date().toISOString(),
+      baseFiles: nextBaseFiles,
+    };
+    for (const statePath of stateWritePaths) {
+      await writeOfflineSyncState(statePath, state);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      statePath: stateWritePaths[0] ?? activeStatePath,
+      namespace: resolvedNamespace,
+      prepared: priorState === null,
+      pushed,
+      pull: null,
+      pullError: message,
+      partial: true,
+      pendingSummary,
+      remoteFileCount: null,
+      deferred: {
+        localChangedDuringPush: [...directPushDeferredPaths].sort(),
+        remoteChangedDuringHydrate: [],
+        total: directPushDeferredPaths.size,
+      },
+    };
+  };
+  let remoteSnapshotMetadata: Awaited<ReturnType<typeof fetchOfflineSnapshot>>;
+  try {
+    remoteSnapshotMetadata = await fetchOfflineSnapshot({
+      remoteUrl: options.remoteUrl,
+      token: options.token,
+      namespace: syncNamespace,
+      includeTranscripts: options.includeTranscripts,
+      includeContent: false,
+    });
+  } catch (error) {
+    if (pushed) return writePartialPushState(error);
+    throw error;
+  }
+  const currentSnapshot = await buildOfflineSyncSnapshotFromBase({
     root: options.memoryDir,
     sourceId: localSourceId,
+    baseFiles,
     includeContent: false,
     includeTranscripts: options.includeTranscripts,
     readFile: storageIo.readFile,
   });
-  const directHydratedPaths = await directHydrateLargeOfflineFiles({
-    remoteUrl: options.remoteUrl,
-    token: options.token,
-    namespace: syncNamespace,
-    includeTranscripts: options.includeTranscripts,
-    snapshot: remoteSnapshotMetadata,
-    baseFiles,
-    currentFiles: currentSnapshot.files,
-    memoryDir: options.memoryDir,
-    writeFile: storageIo.writeFile,
-  });
-  const applyCurrentSnapshot = directHydratedPaths.size > 0
-    ? await buildOfflineSyncSnapshot({
-        root: options.memoryDir,
-        sourceId: localSourceId,
-        includeContent: false,
-        includeTranscripts: options.includeTranscripts,
-        readFile: storageIo.readFile,
-      })
-    : currentSnapshot;
-  const remoteSnapshot = await hydrateOfflineSnapshotContent({
-    remoteUrl: options.remoteUrl,
-    token: options.token,
-    namespace: syncNamespace,
-    includeTranscripts: options.includeTranscripts,
-    snapshot: remoteSnapshotMetadata,
-    baseFiles,
-    currentFiles: applyCurrentSnapshot.files,
-  });
-  const resolvedNamespace = resolvedOfflineSnapshotNamespace(remoteSnapshot, syncNamespace);
-  let pull: Awaited<ReturnType<typeof applyOfflineSyncSnapshot>>;
+  let directHydration: Awaited<ReturnType<typeof directHydrateLargeOfflineFiles>>;
   try {
-    pull = await applyOfflineSyncSnapshot({
-      root: options.memoryDir,
-      snapshot: remoteSnapshot,
-      baseFiles,
-      readFile: storageIo.readFile,
-      writeFile: storageIo.writeFile,
-      deleteFile: storageIo.deleteFile,
-    });
-  } catch (error) {
-    if (!isMissingOfflineContentError(error)) throw error;
-    const retrySnapshot = await hydrateOfflineSnapshotContent({
+    directHydration = await directHydrateLargeOfflineFiles({
       remoteUrl: options.remoteUrl,
       token: options.token,
       namespace: syncNamespace,
       includeTranscripts: options.includeTranscripts,
       snapshot: remoteSnapshotMetadata,
       baseFiles,
+      currentFiles: currentSnapshot.files,
+      memoryDir: options.memoryDir,
+      readFile: storageIo.readFile,
+      writeFile: storageIo.writeFile,
+      writeStagingFile: storageIo.writeStagingFile,
+      writeFileChunks: storageIo.writeFileChunks,
     });
+  } catch (error) {
+    if (pushed) return writePartialPushState(error);
+    throw error;
+  }
+  const directHydratedPaths = directHydration.hydratedPaths;
+  const remoteDeferredPaths = directHydration.deferredPaths;
+  const applyCurrentSnapshot = directHydratedPaths.size > 0
+    ? await buildOfflineSyncSnapshotFromBase({
+        root: options.memoryDir,
+        sourceId: localSourceId,
+        baseFiles,
+        includeContent: false,
+        includeTranscripts: options.includeTranscripts,
+        readFile: storageIo.readFile,
+      })
+    : currentSnapshot;
+  let remoteSnapshot: Awaited<ReturnType<typeof hydrateOfflineSnapshotContent>>;
+  try {
+    remoteSnapshot = await hydrateOfflineSnapshotContent({
+      remoteUrl: options.remoteUrl,
+      token: options.token,
+      namespace: syncNamespace,
+      includeTranscripts: options.includeTranscripts,
+      snapshot: remoteSnapshotMetadata,
+      baseFiles,
+      currentFiles: applyCurrentSnapshot.files,
+      deferredPaths: [...remoteDeferredPaths],
+    });
+  } catch (error) {
+    if (pushed) return writePartialPushState(error);
+    throw error;
+  }
+  const resolvedNamespace = resolvedOfflineSnapshotNamespace(remoteSnapshot, syncNamespace);
+  let pull: OfflineSyncPullResult;
+  try {
     pull = await applyOfflineSyncSnapshot({
       root: options.memoryDir,
-      snapshot: retrySnapshot,
+      snapshot: remoteSnapshot,
       baseFiles,
+      deferredPaths: [...remoteDeferredPaths],
+      allowMissingConflictContent: true,
       readFile: storageIo.readFile,
       writeFile: storageIo.writeFile,
       deleteFile: storageIo.deleteFile,
+    });
+  } catch (error) {
+    if (!isMissingOfflineContentError(error)) {
+      if (pushed) return writePartialPushState(error);
+      throw error;
+    }
+    let retrySnapshot: Awaited<ReturnType<typeof hydrateOfflineSnapshotContent>>;
+    try {
+      retrySnapshot = await hydrateOfflineSnapshotContent({
+        remoteUrl: options.remoteUrl,
+        token: options.token,
+        namespace: syncNamespace,
+        includeTranscripts: options.includeTranscripts,
+        snapshot: remoteSnapshotMetadata,
+        baseFiles,
+        currentFiles: applyCurrentSnapshot.files,
+        deferredPaths: [...remoteDeferredPaths],
+      });
+    } catch (retryError) {
+      if (pushed) return writePartialPushState(retryError);
+      throw retryError;
+    }
+      pull = await applyOfflineSyncSnapshot({
+        root: options.memoryDir,
+        snapshot: retrySnapshot,
+        baseFiles,
+        deferredPaths: [...remoteDeferredPaths],
+        allowMissingConflictContent: true,
+        readFile: storageIo.readFile,
+        writeFile: storageIo.writeFile,
+        deleteFile: storageIo.deleteFile,
     });
   }
   const state = offlineSyncStateFromSnapshot({
@@ -6804,13 +7152,7 @@ async function runOfflineSyncOnce(options: {
     snapshot: remoteSnapshot,
     baseFiles: pull.nextBaseFiles,
   });
-  const stateWritePaths = offlineStatePathsForNamespace({
-    memoryDir: options.memoryDir,
-    remoteUrl: options.remoteUrl,
-    requestedNamespace: options.namespace,
-    resolvedNamespace,
-    explicitStatePath: options.statePathExplicit ? activeStatePath : undefined,
-  });
+  const stateWritePaths = stateWritePathsFor(resolvedNamespace);
   for (const statePath of stateWritePaths) {
     await writeOfflineSyncState(statePath, state);
   }
@@ -6820,8 +7162,61 @@ async function runOfflineSyncOnce(options: {
     prepared: priorState === null,
     pushed,
     pull,
+    partial: false,
     pendingSummary,
     remoteFileCount: remoteSnapshot.files.length,
+    deferred: {
+      localChangedDuringPush: [...directPushDeferredPaths].sort(),
+      remoteChangedDuringHydrate: [...remoteDeferredPaths].sort(),
+      total: directPushDeferredPaths.size + remoteDeferredPaths.size,
+    },
+  };
+}
+
+function sumOfflineFileBytes(files: readonly OfflineSyncFileState[]): number {
+  return files.reduce((total, file) => total + file.bytes, 0);
+}
+
+function offlineStateJsonSummary(state: OfflineSyncState | null): Record<string, unknown> | null {
+  if (!state) return null;
+  return {
+    remoteId: state.remoteId,
+    namespace: state.namespace ?? null,
+    includeTranscripts: state.includeTranscripts,
+    lastSyncedAt: state.lastSyncedAt,
+    baseFileCount: state.baseFiles.length,
+    baseBytes: sumOfflineFileBytes(state.baseFiles),
+  };
+}
+
+function offlinePullJsonSummary(
+  pull: Awaited<ReturnType<typeof applyOfflineSyncSnapshot>>,
+): Record<string, unknown> {
+  return {
+    upserted: pull.upserted,
+    deleted: pull.deleted,
+    skipped: pull.skipped,
+    pendingLocal: pull.pendingLocal,
+    conflicts: pull.conflicts,
+    nextBaseFileCount: pull.nextBaseFiles.length,
+    nextBaseBytes: sumOfflineFileBytes(pull.nextBaseFiles),
+  };
+}
+
+function offlineSyncResultJsonSummary(
+  result: Awaited<ReturnType<typeof runOfflineSyncOnce>>,
+): Record<string, unknown> {
+  return {
+    statePath: result.statePath,
+    namespace: result.namespace ?? null,
+    prepared: result.prepared,
+    partial: result.partial,
+    pushed: result.pushed,
+    pull: result.pull ? offlinePullJsonSummary(result.pull) : null,
+    pullError: result.pullError ?? null,
+    pendingSummary: result.pendingSummary,
+    remoteFileCount: result.remoteFileCount,
+    deferred: result.deferred,
   };
 }
 
@@ -6931,7 +7326,12 @@ Environment fallbacks:
       await writeOfflineSyncState(pathToWrite, state);
     }
     if (json) {
-      console.log(JSON.stringify({ statePath: activeStatePath, namespace: resolvedNamespace, remoteFiles: remoteSnapshot.files.length, pull }, null, 2));
+      console.log(JSON.stringify({
+        statePath: activeStatePath,
+        namespace: resolvedNamespace,
+        remoteFiles: remoteSnapshot.files.length,
+        pull: offlinePullJsonSummary(pull),
+      }, null, 2));
     } else {
       console.log(`Offline cache prepared: ${memoryDir}`);
       console.log(`Namespace: ${resolvedNamespace ?? "(default)"}`);
@@ -6954,12 +7354,19 @@ Environment fallbacks:
       statePathExplicit,
     });
     if (json) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify(offlineSyncResultJsonSummary(result), null, 2));
     } else {
       console.log(`Offline sync complete${result.prepared ? " (initialized state)" : ""}.`);
       console.log(`Pushed: ${result.pushed ? `${result.pushed.appliedUpserts} upserts, ${result.pushed.appliedDeletes} deletes, ${result.pushed.conflicts.length} conflicts` : "nothing pending"}`);
-      console.log(`Pulled: ${result.pull.upserted} upserts, ${result.pull.deleted} deletes, ${result.pull.conflicts.length} conflicts`);
+      if (result.pull) {
+        console.log(`Pulled: ${result.pull.upserted} upserts, ${result.pull.deleted} deletes, ${result.pull.conflicts.length} conflicts`);
+      } else {
+        console.log(`Pulled: deferred (${result.pullError ?? "pull unavailable"})`);
+      }
       console.log(`Pending local before push: ${result.pendingSummary.total}`);
+      if (result.deferred.total > 0) {
+        console.log(`Deferred volatile files: ${result.deferred.total}`);
+      }
       console.log(`Namespace: ${result.namespace ?? "(default)"}`);
       console.log(`State: ${result.statePath}`);
     }
@@ -6987,7 +7394,11 @@ Environment fallbacks:
       readFile: storageIo.readFile,
     });
     if (json) {
-      console.log(JSON.stringify({ statePath: statePath ?? null, state, pending: summary }, null, 2));
+      console.log(JSON.stringify({
+        statePath: statePath ?? null,
+        state: offlineStateJsonSummary(state),
+        pending: summary,
+      }, null, 2));
     } else {
       console.log(`Offline state: ${state ? "ready" : "not prepared"}`);
       console.log(`State: ${statePath ?? "(not selected; pass --state or --remote-url to inspect a prepared remote state)"}`);
@@ -7019,8 +7430,10 @@ Environment fallbacks:
           statePath,
           statePathExplicit,
         });
+        const pulled = result.pull ? result.pull.upserted + result.pull.deleted : 0;
+        const conflicts = (result.pushed?.conflicts.length ?? 0) + (result.pull?.conflicts.length ?? 0);
         console.log(
-          `[${new Date().toISOString()}] sync ok: pushed=${result.pushed ? result.pushed.appliedUpserts + result.pushed.appliedDeletes : 0}, pulled=${result.pull.upserted + result.pull.deleted}, conflicts=${(result.pushed?.conflicts.length ?? 0) + result.pull.conflicts.length}`,
+          `[${new Date().toISOString()}] sync ${result.partial ? "partial" : "ok"}: pushed=${result.pushed ? result.pushed.appliedUpserts + result.pushed.appliedDeletes : 0}, pulled=${pulled}, conflicts=${conflicts}, deferred=${result.deferred.total}${result.pullError ? `, pullError=${result.pullError}` : ""}`,
         );
       } catch (error) {
         console.log(`[${new Date().toISOString()}] sync waiting: ${error instanceof Error ? error.message : String(error)}`);

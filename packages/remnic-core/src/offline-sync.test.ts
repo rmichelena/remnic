@@ -11,6 +11,7 @@ import {
   applyOfflineSyncSnapshot,
   buildOfflineSyncChangeset,
   buildOfflineSyncSnapshot,
+  buildOfflineSyncSnapshotFromBase,
   buildOfflineSyncSnapshotForPaths,
   readOfflineSyncFileContentChunk,
   summarizeOfflineSyncPendingChanges,
@@ -295,6 +296,50 @@ test("offline sync includes durable runtime state and excludes only transient sy
 
     assert.equal(pull.skipped, 18);
     assert.equal(await readUtf8(root, "state/memory-lifecycle-ledger.jsonl"), "ledger");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offline snapshot from base avoids rehashing unchanged files", async () => {
+  const root = await tempDir("remnic-offline-fast-base");
+  try {
+    await write(root, "facts/a.md", "alpha");
+    const baseSnapshot = await buildOfflineSyncSnapshot({
+      root,
+      sourceId: "remote",
+      includeContent: false,
+    });
+    let readCount = 0;
+
+    const unchanged = await buildOfflineSyncSnapshotFromBase({
+      root,
+      sourceId: "remote",
+      baseFiles: baseSnapshot.files,
+      includeContent: false,
+      readFile: async () => {
+        readCount += 1;
+        throw new Error("unchanged file should not be read");
+      },
+    });
+
+    assert.equal(readCount, 0);
+    assert.deepEqual(unchanged.files, baseSnapshot.files);
+
+    await write(root, "facts/b.md", "beta");
+    const changed = await buildOfflineSyncSnapshotFromBase({
+      root,
+      sourceId: "remote",
+      baseFiles: baseSnapshot.files,
+      includeContent: false,
+      readFile: async ({ filePath }) => {
+        readCount += 1;
+        return readFile(filePath);
+      },
+    });
+
+    assert.equal(readCount, 1);
+    assert.deepEqual(changed.files.map((file) => file.path), ["facts/a.md", "facts/b.md"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -934,6 +979,46 @@ test("offline pull preserves local edits when both sides changed since the base"
   }
 });
 
+test("offline pull can record conflicts without hydrating oversized incoming content", async () => {
+  const remote = await tempDir("remnic-offline-metadata-conflict-remote");
+  const local = await tempDir("remnic-offline-metadata-conflict-local");
+  try {
+    await write(remote, "state/lcm.sqlite", "base");
+    const initial = await buildOfflineSyncSnapshot({
+      root: remote,
+      sourceId: "remote",
+      includeContent: true,
+    });
+    const firstPull = await applyOfflineSyncSnapshot({
+      root: local,
+      snapshot: initial,
+    });
+
+    await write(local, "state/lcm.sqlite", "local edit");
+    await write(remote, "state/lcm.sqlite", "remote edit");
+    const metadataOnly = await buildOfflineSyncSnapshot({
+      root: remote,
+      sourceId: "remote",
+      includeContent: false,
+    });
+
+    const secondPull = await applyOfflineSyncSnapshot({
+      root: local,
+      snapshot: metadataOnly,
+      baseFiles: firstPull.nextBaseFiles,
+      allowMissingConflictContent: true,
+    });
+
+    assert.equal(secondPull.conflicts.length, 1);
+    assert.equal(secondPull.conflicts[0]?.reason, "both_modified");
+    assert.equal(secondPull.conflicts[0]?.conflictPath, undefined);
+    assert.equal(await readUtf8(local, "state/lcm.sqlite"), "local edit");
+  } finally {
+    await rm(remote, { recursive: true, force: true });
+    await rm(local, { recursive: true, force: true });
+  }
+});
+
 test("offline push preserves remote edits when both sides changed since the base", async () => {
   const remote = await tempDir("remnic-offline-push-conflict-remote");
   const local = await tempDir("remnic-offline-push-conflict-local");
@@ -1320,6 +1405,51 @@ test("offline storage writes invalidate fact hash readiness for rebuild", async 
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(source, { recursive: true, force: true });
+  }
+});
+
+test("offline snapshot apply defers volatile remote paths without changing local files", async () => {
+  const root = await tempDir("remnic-offline-deferred-remote");
+  try {
+    const relPath = "state/memory-lifecycle-ledger.jsonl";
+    const localContent = Buffer.from("base ledger\n");
+    const remoteContent = Buffer.from("remote ledger changed during fetch\n");
+    await write(root, relPath, localContent);
+    const baseFile = {
+      path: relPath,
+      sha256: createHash("sha256").update(localContent).digest("hex"),
+      bytes: localContent.byteLength,
+      mtimeMs: 1,
+    };
+    const incomingFile = {
+      path: relPath,
+      sha256: createHash("sha256").update(remoteContent).digest("hex"),
+      bytes: remoteContent.byteLength,
+      mtimeMs: 2,
+    };
+
+    const pull = await applyOfflineSyncSnapshot({
+      root,
+      snapshot: {
+        format: "remnic.offline-sync.snapshot.v1",
+        schemaVersion: 1,
+        createdAt: new Date().toISOString(),
+        sourceId: "remote",
+        includeTranscripts: true,
+        files: [incomingFile],
+      },
+      baseFiles: [baseFile],
+      deferredPaths: [relPath],
+    });
+
+    assert.equal(await readUtf8(root, relPath), localContent.toString("utf-8"));
+    assert.equal(pull.upserted, 0);
+    assert.equal(pull.deleted, 0);
+    assert.equal(pull.skipped, 1);
+    assert.equal(pull.conflicts.length, 0);
+    assert.deepEqual(pull.nextBaseFiles, [baseFile]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

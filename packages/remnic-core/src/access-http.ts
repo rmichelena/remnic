@@ -125,6 +125,16 @@ function parseTrustZoneFilter(raw: string | null): TrustZoneName | undefined {
   throw new HttpError(400, "zone must be one of quarantine|working|trusted", "invalid_zone_filter");
 }
 
+function summarizeHttpRequest(req: IncomingMessage): string {
+  const method = req.method ?? "UNKNOWN";
+  try {
+    const parsed = new URL(req.url ?? "/", "http://localhost");
+    return `${method} ${parsed.pathname}`;
+  } catch {
+    return `${method} ${(req.url ?? "/").split("?")[0]}`;
+  }
+}
+
 /**
  * Decode a `:peerId` URL path segment, converting malformed percent-encoded
  * input (e.g., `%E0%A4%A`) into a 400 client error rather than letting
@@ -217,6 +227,10 @@ export class EngramAccessHttpServer {
             res.destroy(err as Error);
             return;
           }
+          log.error(
+            `engram access HTTP internal error [${correlationId}] ${summarizeHttpRequest(req)}`,
+            err,
+          );
           this.respondJson(res, 500, { error: "internal_error", code: "internal_error" });
         });
       });
