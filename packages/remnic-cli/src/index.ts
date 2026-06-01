@@ -38,6 +38,7 @@ import path from "node:path";
 import { createDecipheriv, createHash } from "node:crypto";
 import * as childProcess from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import {
   parseConfig,
   isOpenaiApiKeyDisabled,
@@ -5857,28 +5858,35 @@ export async function fetchOfflineSnapshot(args: {
 }): Promise<OfflineSyncSnapshot & { namespace?: string }> {
   let tryStreamSnapshot = false;
   if (args.includeContent === false && args.baseFiles && args.baseFiles.length > 0) {
-    const postBody = offlineSnapshotBasePostBody({
-      namespace: args.namespace,
-      includeTranscripts: args.includeTranscripts,
-      baseFiles: args.baseFiles,
-      baseCapturedAt: args.baseCapturedAt,
-    });
-    if (offlineSnapshotBasePostBodyFits(postBody)) {
-      try {
-        return await fetchOfflineJson(
-          offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/snapshot"),
-          args.token,
-          {
-            method: "POST",
-            body: postBody,
-          },
-        );
-      } catch (error) {
-        if (!isOfflineSnapshotPostFallbackError(error)) throw error;
+    if (args.baseFiles.length > OFFLINE_SYNC_SNAPSHOT_BASE_POST_MAX_FILES) {
+      tryStreamSnapshot = true;
+    } else {
+      const postBody = offlineSnapshotBasePostBody({
+        namespace: args.namespace,
+        includeTranscripts: args.includeTranscripts,
+        baseFiles: args.baseFiles,
+        baseCapturedAt: args.baseCapturedAt,
+      });
+      const postRequest = offlineSnapshotBasePostRequest(postBody);
+      if (postRequest) {
+        const postRequestUsesGzip =
+          new Headers(postRequest.headers).get("content-encoding")?.toLowerCase() === "gzip";
+        try {
+          return await fetchOfflineJson(
+            offlineEndpoint(args.remoteUrl, "/remnic/v1/offline-sync/snapshot"),
+            args.token,
+            {
+              method: "POST",
+              ...postRequest,
+            },
+          );
+        } catch (error) {
+          if (!isOfflineSnapshotPostFallbackError(error, { compressed: postRequestUsesGzip })) throw error;
+          tryStreamSnapshot = true;
+        }
+      } else {
         tryStreamSnapshot = true;
       }
-    } else {
-      tryStreamSnapshot = true;
     }
   }
   if (tryStreamSnapshot) {
@@ -5924,9 +5932,35 @@ export function offlineSnapshotBasePostBodyFits(body: string): boolean {
     bytes <= OFFLINE_SYNC_SNAPSHOT_BASE_POST_PREFERRED_MAX_BODY_BYTES;
 }
 
-export function isOfflineSnapshotPostFallbackError(error: unknown): boolean {
+export const OFFLINE_SYNC_SNAPSHOT_BASE_POST_MAX_FILES = 50_000;
+
+export function offlineSnapshotBasePostRequest(body: string): Pick<RequestInit, "body" | "headers"> | null {
+  const bytes = Buffer.byteLength(body, "utf-8");
+  if (bytes > OFFLINE_SYNC_SNAPSHOT_BASE_MAX_BODY_BYTES) return null;
+  if (bytes <= OFFLINE_SYNC_SNAPSHOT_BASE_POST_PREFERRED_MAX_BODY_BYTES) {
+    return { body };
+  }
+  const compressed = gzipSync(body);
+  if (compressed.byteLength > OFFLINE_SYNC_SNAPSHOT_BASE_POST_PREFERRED_MAX_BODY_BYTES) {
+    return null;
+  }
+  return {
+    body: compressed,
+    headers: {
+      "content-encoding": "gzip",
+    },
+  };
+}
+
+export function isOfflineSnapshotPostFallbackError(
+  error: unknown,
+  options: { compressed?: boolean } = {},
+): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /offline-sync\/snapshot\b.* returned (404|405|413)\b/.test(message);
+  if (/offline-sync\/snapshot\b.* returned (404|405|413)\b/.test(message)) return true;
+  if (!options.compressed) return false;
+  return /offline-sync\/snapshot\b.* returned (400|415)\b/.test(message) &&
+    /\b(unsupported_content_encoding|invalid_gzip_body|invalid_json)\b/.test(message);
 }
 
 function isOfflineSnapshotStreamFallbackError(error: unknown): boolean {
