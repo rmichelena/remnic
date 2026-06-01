@@ -1,6 +1,6 @@
 {
   "name": "@remnic/import-gemini",
-  "version": "0.1.0",
+  "version": "9.3.515",
   "description": "Import activity history from Google Takeout (Gemini Apps) exports into Remnic (issue #568)",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
     "precheck-types": "node ../../scripts/ensure-bench-build-deps.mjs",
@@ -24,7 +26,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "@remnic/core": "^1.1.31"
+    "@remnic/core": "^9.3.515"
   },
   "devDependencies": {
     "@remnic/core": "workspace:*",
@@ -38,5 +40,12 @@
     "url": "https://github.com/joshuaswarren/remnic.git",
     "directory": "packages/import-gemini"
   },
-  "keywords": ["remnic", "memory", "gemini", "google", "takeout", "import"]
+  "keywords": [
+    "remnic",
+    "memory",
+    "gemini",
+    "google",
+    "takeout",
+    "import"
+  ]
 }
