@@ -7,6 +7,8 @@ on:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:
     types: [created]
+  check_run:
+    types: [completed]
 
 permissions:
   contents: read
@@ -17,12 +19,13 @@ permissions:
 jobs:
   ai-reviewers:
     if: >-
-      github.event.pull_request.draft == false
+      (github.event_name == 'check_run' &&
+        contains(fromJSON('["cursor-bugbot","cursor"]'), github.event.check_run.app.slug)) ||
+      (github.event_name != 'check_run' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Wait for AI reviewers on push events
-        if: github.event_name == 'pull_request'
+      - name: Wait for AI reviewers to settle
         run: |
           echo "Waiting 3 minutes for AI reviewers to analyse the diff..."
           sleep 180
@@ -31,107 +34,386 @@ jobs:
         uses: actions/github-script@v7
         env:
           REQUIRED_AI_REVIEWER_GROUPS: >-
-            kilo-code-bot[bot]|kilo-code-bot|kiloconnect[bot]|kilo[bot]|kiloconnect|kilo,
-            codex[bot]|openai-codex[bot]|codex-reviewer[bot]|chatgpt-codex-connector|chatgpt-codex-connector[bot],
             cursor-bugbot[bot]|cursor[bot]|cursor-bugbot|cursor
         with:
           script: |
+            const BAD_CHECK_CONCLUSIONS = new Set([
+              'action_required',
+              'cancelled',
+              'failure',
+              'skipped',
+              'stale',
+              'startup_failure',
+              'timed_out',
+            ]);
+            const POSITIVE_CHECK_CONCLUSIONS = new Set(['success', 'neutral']);
+            const NEGATIVE_REVIEW_STATES = new Set(['CHANGES_REQUESTED']);
+            const NEGATIVE_VERDICT_PATTERN =
+              /\b(?:changes\s+requested|do\s+not\s+merge|(?:not|no|never|cannot|can['’]?t|isn['’]?t)\s+(?:a\s+)?(?:pass|approved|lgtm))\b/i;
+            const POSITIVE_VERDICT_PATTERN = /\b(?:PASS|APPROVED|LGTM)\b/i;
+            const SHA_REFERENCE_PATTERN =
+              /\b(?:sha|commit|head|rev|revision)\s*[:#]?\s*([0-9a-f]{7,40})\b|\bfor\s+([0-9a-f]{7,40})\b/gi;
+
+            function normalizeLogin(value) {
+              return typeof value === 'string' ? value.trim().toLowerCase() : '';
+            }
+
+            function bodyHasPositiveVerdict(body) {
+              if (typeof body !== 'string') return false;
+              return !NEGATIVE_VERDICT_PATTERN.test(body) && POSITIVE_VERDICT_PATTERN.test(body);
+            }
+
+            function bodyShaReferences(body) {
+              if (typeof body !== 'string') return [];
+              return [...body.matchAll(SHA_REFERENCE_PATTERN)]
+                .map((match) => (match[1] ?? match[2] ?? '').toLowerCase())
+                .filter(Boolean);
+            }
+
+            function bodyReferencesCurrentHead(body, headSha) {
+              if (typeof body !== 'string' || typeof headSha !== 'string' || !headSha.trim()) {
+                return true;
+              }
+              const normalizedHead = headSha.trim().toLowerCase();
+              const references = bodyShaReferences(body);
+              if (references.length === 0) return true;
+              return references.some((reference) => normalizedHead.startsWith(reference));
+            }
+
+            function bodyExplicitlyReferencesCurrentHead(body, headSha) {
+              if (typeof headSha !== 'string' || !headSha.trim()) return false;
+              const normalizedHead = headSha.trim().toLowerCase();
+              return bodyShaReferences(body).some((reference) => normalizedHead.startsWith(reference));
+            }
+
+            function checkRunTime(checkRun) {
+              const parsed = Date.parse(
+                checkRun.completed_at ??
+                  checkRun.updated_at ??
+                  checkRun.started_at ??
+                  checkRun.created_at ??
+                  '',
+              );
+              return Number.isFinite(parsed) ? parsed : 0;
+            }
+
+            function activityTime(activity) {
+              const parsed = Date.parse(
+                activity.submitted_at ??
+                  activity.created_at ??
+                  activity.updated_at ??
+                  '',
+              );
+              return Number.isFinite(parsed) ? parsed : 0;
+            }
+
+            function isCurrentActivity(activity, headSha, headCommittedAt) {
+              if (activity.commit_id && headSha) {
+                return activity.commit_id === headSha;
+              }
+              if (activity.original_commit_id && headSha) {
+                return activity.original_commit_id === headSha;
+              }
+              if (!bodyReferencesCurrentHead(activity.body, headSha)) {
+                return false;
+              }
+              const parsedActivityTime = Date.parse(activity.submitted_at ?? activity.created_at ?? '');
+              const parsedHeadTime = Date.parse(headCommittedAt ?? '');
+              if (!Number.isFinite(parsedHeadTime)) {
+                return Number.isFinite(parsedActivityTime) &&
+                  bodyExplicitlyReferencesCurrentHead(activity.body, headSha);
+              }
+              return Number.isFinite(parsedActivityTime) &&
+                parsedActivityTime >= parsedHeadTime;
+            }
+
+            function isCurrentCheckRun(checkRun, headSha, headCommittedAt) {
+              const checkHeadSha = checkRun.head_sha ?? checkRun.headSha;
+              if (headSha && typeof checkHeadSha === 'string' && checkHeadSha.trim()) {
+                return checkHeadSha === headSha;
+              }
+              const checkTime = Date.parse(
+                checkRun.completed_at ??
+                  checkRun.updated_at ??
+                  checkRun.started_at ??
+                  checkRun.created_at ??
+                  '',
+              );
+              const headTime = Date.parse(headCommittedAt ?? '');
+              return Number.isFinite(checkTime) &&
+                Number.isFinite(headTime) &&
+                checkTime >= headTime;
+            }
+
+            function parseReviewerGroups(raw) {
+              return String(raw ?? '')
+                .split(',')
+                .map((group) =>
+                  group
+                    .split('|')
+                    .map(normalizeLogin)
+                    .filter(Boolean),
+                )
+                .filter((group) => group.length > 0);
+            }
+
+            function associatedPullRequestNumbers(payload = {}) {
+              const directPr = Number(payload.pull_request?.number);
+              if (Number.isInteger(directPr) && directPr > 0) {
+                return [directPr];
+              }
+
+              return [
+                ...new Set(
+                  (Array.isArray(payload.check_run?.pull_requests)
+                    ? payload.check_run.pull_requests
+                    : [])
+                    .map((pullRequest) => Number(pullRequest?.number))
+                    .filter((number) => Number.isInteger(number) && number > 0),
+                ),
+              ];
+            }
+
+            function evaluateAiReviewGate({
+              groups,
+              headSha,
+              headCommittedAt,
+              reviews = [],
+              issueComments = [],
+              reviewComments = [],
+              checkRuns = [],
+            }) {
+              if (!Array.isArray(groups) || groups.length === 0) {
+                return {
+                  ok: false,
+                  reason: 'No required AI reviewer groups configured.',
+                  present: [],
+                  missing: [],
+                  blockers: [],
+                };
+              }
+
+              const positiveByAlias = new Map();
+              const positiveCheckRunAliases = new Set();
+              const blockers = [];
+              const configuredAliases = new Set(groups.flat());
+
+              const latestReviews = new Map();
+              for (const review of reviews) {
+                const login = normalizeLogin(review.user?.login);
+                if (!login || !configuredAliases.has(login)) continue;
+                if (!isCurrentActivity(review, headSha, headCommittedAt)) continue;
+                const previous = latestReviews.get(login);
+                if (!previous || activityTime(review) >= activityTime(previous)) {
+                  latestReviews.set(login, review);
+                }
+              }
+
+              for (const [login, review] of latestReviews) {
+                if (review.state === 'APPROVED') {
+                  positiveByAlias.set(login, { alias: login, kind: 'review', state: review.state });
+                  continue;
+                }
+                if (NEGATIVE_REVIEW_STATES.has(review.state)) {
+                  blockers.push({ alias: login, kind: 'review', state: review.state });
+                }
+              }
+
+              for (const comment of [...issueComments, ...reviewComments]) {
+                const login = normalizeLogin(comment.user?.login);
+                if (!login || !configuredAliases.has(login) || !bodyHasPositiveVerdict(comment.body)) continue;
+                if (!isCurrentActivity(comment, headSha, headCommittedAt)) continue;
+                positiveByAlias.set(login, { alias: login, kind: 'comment', state: 'POSITIVE_COMMENT' });
+              }
+
+              const latestCheckRuns = new Map();
+              for (const checkRun of checkRuns) {
+                if (!isCurrentCheckRun(checkRun, headSha, headCommittedAt)) continue;
+                const checkName = normalizeLogin(checkRun.name) || 'unnamed-check';
+                const aliases = [checkRun.app?.slug, checkRun.app?.name]
+                  .map(normalizeLogin)
+                  .filter((alias) => alias && configuredAliases.has(alias));
+                for (const alias of aliases) {
+                  const key = `${alias}\0${checkName}`;
+                  const previous = latestCheckRuns.get(key);
+                  if (!previous || checkRunTime(checkRun) >= checkRunTime(previous)) {
+                    latestCheckRuns.set(key, { ...checkRun, alias });
+                  }
+                }
+              }
+
+              for (const checkRun of latestCheckRuns.values()) {
+                const conclusion = normalizeLogin(checkRun.conclusion);
+                const alias = checkRun.alias;
+                if (BAD_CHECK_CONCLUSIONS.has(conclusion)) {
+                  blockers.push({ alias, kind: 'check_run', state: conclusion || 'unknown' });
+                } else if (POSITIVE_CHECK_CONCLUSIONS.has(conclusion)) {
+                  positiveCheckRunAliases.add(alias);
+                  positiveByAlias.set(alias, { alias, kind: 'check_run', state: conclusion });
+                }
+              }
+
+              const present = [];
+              const missing = [];
+              for (const group of groups) {
+                const matchedAlias = group.find((alias) => positiveByAlias.has(alias));
+                if (matchedAlias) {
+                  present.push({ group, ...positiveByAlias.get(matchedAlias) });
+                } else {
+                  missing.push(group);
+                }
+              }
+
+              const effectiveBlockers = blockers.filter(
+                (blocker) => blocker.kind !== 'review' || !positiveCheckRunAliases.has(blocker.alias),
+              );
+
+              if (effectiveBlockers.length > 0) {
+                return {
+                  ok: false,
+                  reason: `AI reviewer check run failed or was not positive: ${effectiveBlockers.map((b) => `${b.alias}(${b.state})`).join(', ')}`,
+                  present,
+                  missing,
+                  blockers: effectiveBlockers,
+                };
+              }
+
+              if (missing.length > 0) {
+                return {
+                  ok: false,
+                  reason: `Missing required positive AI review groups: ${missing.map((group) => group.join(' OR ')).join('; ')}`,
+                  present,
+                  missing,
+                  blockers: effectiveBlockers,
+                };
+              }
+
+              return {
+                ok: true,
+                reason: 'AI review gate satisfied.',
+                present,
+                missing,
+                blockers: effectiveBlockers,
+              };
+            }
+
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            // Resolve PR number — all supported events include pull_request.
-            const pr = context.payload.pull_request?.number;
-            if (!pr) {
+            const pullRequestNumbers = associatedPullRequestNumbers(context.payload);
+            if (pullRequestNumbers.length === 0) {
+              if (context.eventName === 'check_run') {
+                core.notice('Skipping check_run event with no associated pull request.');
+                return;
+              }
               core.setFailed('Unable to determine pull request number.');
               return;
             }
-
             const groupsRaw = process.env.REQUIRED_AI_REVIEWER_GROUPS || '';
-            const groups = groupsRaw
-              .split(',')
-              .map(s => s.trim())
-              .filter(Boolean)
-              .map(group => group.split('|').map(x => x.trim().toLowerCase()).filter(Boolean));
+            const groups = parseReviewerGroups(groupsRaw);
 
             if (groups.length === 0) {
               core.setFailed('No required AI reviewer groups configured.');
               return;
             }
 
-            const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              owner,
-              repo,
-              pull_number: Number(pr),
-              per_page: 100,
-            });
+            const failures = [];
+            let evaluatedCount = 0;
 
-            const issueComments = await github.paginate(github.rest.issues.listComments, {
-              owner,
-              repo,
-              issue_number: Number(pr),
-              per_page: 100,
-            });
-
-            const prComments = await github.paginate(github.rest.pulls.listReviewComments, {
-              owner,
-              repo,
-              pull_number: Number(pr),
-              per_page: 100,
-            });
-
-            const headSha = context.payload.pull_request?.head?.sha;
-            const checkRuns = headSha
-              ? await github.paginate(github.rest.checks.listForRef, {
-                  owner,
-                  repo,
-                  ref: headSha,
-                  per_page: 100,
-                })
-              : [];
-
-            const latestByUser = new Map();
-            for (const review of reviews) {
-              const login = review.user?.login?.toLowerCase();
-              if (!login) continue;
-              latestByUser.set(login, review.state);
-            }
-            for (const comment of [...issueComments, ...prComments]) {
-              const login = comment.user?.login?.toLowerCase();
-              if (!login) continue;
-              if (!latestByUser.has(login)) latestByUser.set(login, "COMMENTED");
-            }
-            for (const checkRun of checkRuns) {
-              if (!["success", "failure", "neutral"].includes(checkRun.conclusion)) continue;
-              for (const appName of [checkRun.app?.slug, checkRun.app?.name]) {
-                const login = appName?.toLowerCase();
-                if (!login) continue;
-                if (!latestByUser.has(login)) latestByUser.set(login, "CHECK_RUN");
+            for (const pr of pullRequestNumbers) {
+              const pullRequest = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pr,
+              });
+              if (pullRequest.data.draft) {
+                core.notice(`Skipping draft pull request #${pr}.`);
+                continue;
               }
-            }
+              evaluatedCount += 1;
 
-            const present = [];
-            const missing = [];
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner,
+                repo,
+                pull_number: pr,
+                per_page: 100,
+              });
 
-            for (const group of groups) {
-              const matched = group.find(alias => latestByUser.has(alias));
-              if (matched) {
-                present.push({ group, matched, state: latestByUser.get(matched) });
-              } else {
-                missing.push(group);
+              const issueComments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number: pr,
+                per_page: 100,
+              });
+
+              const prComments = await github.paginate(github.rest.pulls.listReviewComments, {
+                owner,
+                repo,
+                pull_number: pr,
+                per_page: 100,
+              });
+
+              const headSha = pullRequest.data.head.sha;
+              const headCommit = headSha
+                ? await github.rest.repos.getCommit({
+                    owner,
+                    repo,
+                    ref: headSha,
+                  })
+                : null;
+              const headCommittedAt =
+                headCommit?.data?.commit?.committer?.date ??
+                headCommit?.data?.commit?.author?.date ??
+                null;
+              const checkRuns = headSha
+                ? await github.paginate(github.rest.checks.listForRef, {
+                    owner,
+                    repo,
+                    ref: headSha,
+                    per_page: 100,
+                  })
+                : [];
+
+              const result = evaluateAiReviewGate({
+                groups,
+                headSha,
+                headCommittedAt,
+                reviews,
+                issueComments,
+                reviewComments: prComments,
+                checkRuns,
+              });
+
+              core.info(
+                `PR #${pr} positive current-head AI review activity from: ${
+                  result.present.map(p => `${p.alias}(${p.kind}:${p.state})`).join(', ') || 'none'
+                }`,
+              );
+
+              if (result.blockers.length > 0) {
+                core.info(
+                  `PR #${pr} blocking AI review activity: ${
+                    result.blockers.map(b => `${b.alias}(${b.state})`).join(', ')
+                  }`,
+                );
               }
+
+              if (!result.ok) {
+                failures.push({ pr, reason: result.reason });
+                continue;
+              }
+
+              core.notice(`PR #${pr}: ${result.reason}`);
             }
 
-            core.info(`Found review activity from: ${present.map(p => `${p.matched}(${p.state})`).join(', ') || 'none'}`);
-
-            if (present.length === 0) {
-              const expected = groups.map(group => group.join(' OR ')).join('; ');
-              core.setFailed(`No required AI review activity found. Expected one of: ${expected}`);
+            if (failures.length > 0) {
+              core.setFailed(
+                `AI review gate failed for ${failures.map((failure) => `#${failure.pr}: ${failure.reason}`).join(' | ')}`,
+              );
               return;
             }
 
-            if (missing.length > 0) {
-              const missingText = missing.map(group => group.join(' OR ')).join('; ');
-              core.warning(`Some AI reviewer groups have not reported yet: ${missingText}`);
+            if (evaluatedCount === 0) {
+              core.setFailed('AI review gate did not evaluate any non-draft pull requests.');
+              return;
             }
-
-            core.notice('AI review gate satisfied (at least one required AI reviewer group reported activity).');

@@ -1,3 +1,4 @@
+import * as React from "react";
 import type { BenchIntegritySummary } from "../bench-data";
 import { describeIntegrity } from "./integrity-model";
 

@@ -4,6 +4,7 @@
  * Activated via --mcp flag.
  */
 
+import { randomUUID } from "node:crypto";
 import type {
   MemorySystem,
   Message,
@@ -70,6 +71,16 @@ export async function createMcpAdapter(
 ): Promise<MemorySystem> {
   const { baseUrl, authToken, timeoutMs } = options;
   const rpcOpts = { authToken, timeoutMs };
+  let runPrefix = createRunPrefix();
+  let runSessionIds = new Set<string>();
+  const qualifySessionId = (sessionId: string, prefix = runPrefix): string =>
+    `${prefix}:${sessionId}`;
+  const stripRunPrefix = (sessionId: string, prefix = runPrefix): string =>
+    sessionId.startsWith(`${prefix}:`)
+      ? sessionId.slice(prefix.length + 1)
+      : sessionId;
+  const isCurrentRunSession = (sessionId: string, prefix = runPrefix): boolean =>
+    sessionId.startsWith(`${prefix}:`);
 
   // Health check
   try {
@@ -87,14 +98,21 @@ export async function createMcpAdapter(
 
   return {
     async store(sessionId: string, messages: Message[]): Promise<void> {
-      await mcpRequest(baseUrl, "engram.lcm.observe", { sessionId, messages }, rpcOpts);
+      const qualifiedSessionId = qualifySessionId(sessionId);
+      await mcpRequest(
+        baseUrl,
+        "engram.lcm.observe",
+        { sessionId: qualifiedSessionId, messages },
+        rpcOpts,
+      );
+      runSessionIds.add(sessionId);
     },
 
     async recall(sessionId: string, query: string, budgetChars?: number): Promise<string> {
       const result = await mcpRequest(
         baseUrl,
         "engram.lcm.recall",
-        { sessionId, query, budgetChars: budgetChars ?? 32000 },
+        { sessionId: qualifySessionId(sessionId), query, budgetChars: budgetChars ?? 32000 },
         rpcOpts,
       );
       return typeof result === "string" ? result : JSON.stringify(result);
@@ -105,44 +123,100 @@ export async function createMcpAdapter(
       limit: number,
       sessionId?: string,
     ): Promise<SearchResult[]> {
+      const requestedLimit = normalizeSearchLimit(limit);
+      if (requestedLimit <= 0) return [];
+
+      const searchRunPrefix = runPrefix;
+      const qualifiedSessionId =
+        typeof sessionId === "string" && sessionId.length > 0
+          ? qualifySessionId(sessionId, searchRunPrefix)
+          : undefined;
       const result = await mcpRequest(
         baseUrl,
         "engram.lcm.search",
-        { query, limit, sessionId },
+        {
+          query,
+          limit: requestedLimit,
+          ...(qualifiedSessionId
+            ? { sessionId: qualifiedSessionId }
+            : { sessionPrefix: `${searchRunPrefix}:` }),
+        },
         rpcOpts,
       );
       if (!Array.isArray(result)) return [];
-      return (result as Array<Record<string, unknown>>).map((r) => ({
-        turnIndex: typeof r.turn_index === "number" ? r.turn_index : 0,
-        role: typeof r.role === "string" ? r.role : "unknown",
-        snippet: typeof r.snippet === "string" ? r.snippet : "",
-        sessionId: typeof r.session_id === "string" ? r.session_id : "",
-      }));
+      return (result as Array<Record<string, unknown>>)
+        .map((r) => ({
+          turnIndex: typeof r.turn_index === "number" ? r.turn_index : 0,
+          role: typeof r.role === "string" ? r.role : "unknown",
+          snippet: typeof r.snippet === "string" ? r.snippet : "",
+          sessionId: typeof r.session_id === "string" ? r.session_id : "",
+        }))
+        .filter((entry) => isCurrentRunSession(entry.sessionId, searchRunPrefix))
+        .slice(0, requestedLimit)
+        .map((entry) => ({
+          ...entry,
+          sessionId: stripRunPrefix(entry.sessionId, searchRunPrefix),
+        }));
     },
 
-    async reset(_sessionId?: string): Promise<void> {
-      // MCP adapter can't easily reset server state.
-      // Log a warning — benchmark should use unique session IDs instead.
-      console.warn("[mcp-adapter] reset() is a no-op in MCP mode; use unique session IDs per run");
+    async reset(): Promise<void> {
+      runPrefix = createRunPrefix();
+      runSessionIds = new Set<string>();
     },
 
     async getStats(sessionId?: string): Promise<MemoryStats> {
-      const result = await mcpRequest(
-        baseUrl,
-        "engram.lcm.stats",
-        { sessionId },
-        rpcOpts,
-      );
-      const r = result as Record<string, unknown> | null;
-      return {
-        totalMessages: typeof r?.totalMessages === "number" ? r.totalMessages : 0,
-        totalSummaryNodes: typeof r?.totalSummaryNodes === "number" ? r.totalSummaryNodes : 0,
-        maxDepth: typeof r?.maxDepth === "number" ? r.maxDepth : -1,
+      const statsRunPrefix = runPrefix;
+      const qualifiedSessionId =
+        typeof sessionId === "string" && sessionId.length > 0
+          ? qualifySessionId(sessionId, statsRunPrefix)
+          : undefined;
+      const readStats = async (params: Record<string, unknown>): Promise<MemoryStats> => {
+        const result = await mcpRequest(
+          baseUrl,
+          "engram.lcm.stats",
+          params,
+          rpcOpts,
+        );
+        const r = result as Record<string, unknown> | null;
+        return {
+          totalMessages: typeof r?.totalMessages === "number" ? r.totalMessages : 0,
+          totalSummaryNodes: typeof r?.totalSummaryNodes === "number" ? r.totalSummaryNodes : 0,
+          maxDepth: typeof r?.maxDepth === "number" ? r.maxDepth : -1,
+        };
       };
+      if (!qualifiedSessionId) {
+        const sessionIds = [...runSessionIds];
+        if (sessionIds.length === 0) {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: -1 };
+        }
+        const stats = await Promise.all(
+          sessionIds.map((storedSessionId) =>
+            readStats({ sessionId: qualifySessionId(storedSessionId, statsRunPrefix) }),
+          ),
+        );
+        return stats.reduce<MemoryStats>(
+          (combined, next) => ({
+            totalMessages: combined.totalMessages + next.totalMessages,
+            totalSummaryNodes: combined.totalSummaryNodes + next.totalSummaryNodes,
+            maxDepth: Math.max(combined.maxDepth, next.maxDepth),
+          }),
+          { totalMessages: 0, totalSummaryNodes: 0, maxDepth: -1 },
+        );
+      }
+      return readStats({ sessionId: qualifiedSessionId });
     },
 
     async destroy(): Promise<void> {
       // Nothing to clean up for HTTP adapter
     },
   };
+}
+
+function createRunPrefix(): string {
+  return `eval-${randomUUID()}`;
+}
+
+function normalizeSearchLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return 0;
+  return Math.max(0, Math.floor(limit));
 }

@@ -23,15 +23,20 @@ export interface LcmEngineConfig {
   messagePartsRecallMaxResults: number;
 }
 
+function positiveInteger(value: unknown, fallback: number, min = 1): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.floor(value));
+}
+
 export function extractLcmConfig(cfg: PluginConfig): LcmEngineConfig {
   return {
     enabled: (cfg as any).lcmEnabled === true,
-    leafBatchSize: (cfg as any).lcmLeafBatchSize ?? 8,
-    rollupFanIn: (cfg as any).lcmRollupFanIn ?? 4,
-    freshTailTurns: (cfg as any).lcmFreshTailTurns ?? 16,
-    maxDepth: (cfg as any).lcmMaxDepth ?? 5,
-    deterministicMaxTokens: (cfg as any).lcmDeterministicMaxTokens ?? 512,
-    archiveRetentionDays: (cfg as any).lcmArchiveRetentionDays ?? 90,
+    leafBatchSize: positiveInteger((cfg as any).lcmLeafBatchSize, 8),
+    rollupFanIn: positiveInteger((cfg as any).lcmRollupFanIn, 4, 2),
+    freshTailTurns: positiveInteger((cfg as any).lcmFreshTailTurns, 16),
+    maxDepth: positiveInteger((cfg as any).lcmMaxDepth, 5),
+    deterministicMaxTokens: positiveInteger((cfg as any).lcmDeterministicMaxTokens, 512),
+    archiveRetentionDays: positiveInteger((cfg as any).lcmArchiveRetentionDays, 90, 0),
     recallBudgetShare: (cfg as any).lcmRecallBudgetShare ?? 0.15,
     observeConcurrency:
       typeof (cfg as any).lcmObserveConcurrency === "number" &&
@@ -377,6 +382,7 @@ export class LcmEngine {
     const normalizedSessionId = normalizeLcmSessionId(sessionId);
     if (!normalizedSessionId) return;
     await this.ensureInitialized();
+    await this.waitForSessionObserveIdle(normalizedSessionId);
 
     try {
       await this.summarizer!.summarizeIncremental(normalizedSessionId);
@@ -395,6 +401,7 @@ export class LcmEngine {
     const normalizedSessionId = normalizeLcmSessionId(sessionId);
     if (!normalizedSessionId) return;
     await this.ensureInitialized();
+    await this.waitForSessionObserveIdle(normalizedSessionId);
 
     const maxTurn = this.archive!.getMaxTurnIndex(normalizedSessionId);
 
@@ -425,6 +432,7 @@ export class LcmEngine {
     query: string,
     limit: number,
     sessionId?: string,
+    sessionPrefix?: string,
   ): Promise<
     Array<{
       turn_index: number;
@@ -436,8 +444,10 @@ export class LcmEngine {
     if (!this.config.enabled) return [];
     const normalizedSessionId = normalizeOptionalLcmSessionId(sessionId);
     if (sessionId !== undefined && !normalizedSessionId) return [];
+    const normalizedSessionPrefix = normalizeOptionalLcmSessionId(sessionPrefix);
+    if (sessionPrefix !== undefined && !normalizedSessionPrefix) return [];
     await this.ensureInitialized();
-    return this.archive!.search(query, limit, normalizedSessionId);
+    return this.archive!.search(query, limit, normalizedSessionId, normalizedSessionPrefix);
   }
 
   /** Search via FTS returning full message content (not snippets). */
@@ -445,6 +455,7 @@ export class LcmEngine {
     query: string,
     limit: number,
     sessionId?: string,
+    sessionPrefix?: string,
   ): Promise<
     Array<{
       id: number;
@@ -458,8 +469,16 @@ export class LcmEngine {
     if (!this.config.enabled) return [];
     const normalizedSessionId = normalizeOptionalLcmSessionId(sessionId);
     if (sessionId !== undefined && !normalizedSessionId) return [];
+    const normalizedSessionPrefix = normalizeOptionalLcmSessionId(sessionPrefix);
+    if (sessionPrefix !== undefined && !normalizedSessionPrefix) return [];
     await this.ensureInitialized();
-    return this.archive!.searchWithContent(query, limit, normalizedSessionId);
+    return this.archive!.searchWithContent(
+      query,
+      limit,
+      normalizedSessionId,
+      1000,
+      normalizedSessionPrefix,
+    );
   }
 
   /** Get a compressed summary of a turn range. */

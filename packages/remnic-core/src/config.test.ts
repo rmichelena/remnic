@@ -3,6 +3,24 @@ import test from "node:test";
 
 import { parseConfig } from "./config.js";
 
+test("parseConfig expands tilde paths for core storage directories", () => {
+  const previousHome = process.env.HOME;
+  process.env.HOME = "/Users/remnic-test";
+  try {
+    const result = parseConfig({
+      memoryDir: "~/memory",
+      workspaceDir: "~/workspace",
+      memoryExtensionsRoot: "~/extensions",
+    });
+    assert.equal(result.memoryDir, "/Users/remnic-test/memory");
+    assert.equal(result.workspaceDir, "/Users/remnic-test/workspace");
+    assert.equal(result.memoryExtensionsRoot, "/Users/remnic-test/extensions");
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  }
+});
+
 // ── PR #394 Bug 2: parseConfig must coerce string "false" for installExtension
 
 test('parseConfig codex.installExtension="false" (string) → false (boolean)', () => {
@@ -211,6 +229,20 @@ test("parseConfig localLlmTimeoutMs clamps invalid values to a positive timeout"
   assert.equal(parseConfig({ localLlmTimeoutMs: 0 }).localLlmTimeoutMs, 1);
   assert.equal(parseConfig({ localLlmTimeoutMs: Number.NaN }).localLlmTimeoutMs, 180_000);
 });
+
+test("parseConfig validates localLlmMaxContext as a usable context window", () => {
+  assert.equal(parseConfig({ localLlmMaxContext: 4096 }).localLlmMaxContext, 4096);
+  assert.equal(parseConfig({ localLlmMaxContext: "8192" }).localLlmMaxContext, 8192);
+  assert.equal(parseConfig({}).localLlmMaxContext, undefined);
+
+  for (const value of [0, -1, 128, 1023, 1.5, "1.5", "abc", Number.NaN, Infinity]) {
+    assert.throws(
+      () => parseConfig({ localLlmMaxContext: value }),
+      /localLlmMaxContext must be an integer greater than or equal to 1024/,
+      `invalid localLlmMaxContext ${String(value)} should throw`,
+    );
+  }
+});
 test("parseConfig extractionTelemetryPrefilterEnabled defaults on and accepts string false", () => {
   assert.equal(parseConfig({}).extractionTelemetryPrefilterEnabled, true);
   assert.equal(parseConfig({ extractionTelemetryPrefilterEnabled: "false" }).extractionTelemetryPrefilterEnabled, false);
@@ -312,9 +344,9 @@ test("parseConfig preserves custom entity schemas without code changes", () => {
 
 // ── Issue #518: direct-answer retrieval tier config ─────────────────────────
 
-test("parseConfig recallDirectAnswerEnabled defaults to true (slice 8a flip)", () => {
+test("parseConfig recallDirectAnswerEnabled defaults to false", () => {
   const result = parseConfig({});
-  assert.equal(result.recallDirectAnswerEnabled, true);
+  assert.equal(result.recallDirectAnswerEnabled, false);
 });
 
 test('parseConfig recallDirectAnswerEnabled coerces string "true" to boolean true', () => {

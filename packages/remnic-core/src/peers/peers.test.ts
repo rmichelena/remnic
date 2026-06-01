@@ -18,6 +18,7 @@ import {
   listPeers,
   PEER_ID_PATTERN,
   readInteractionLogRaw,
+  readPeerInteractionLog,
   readPeer,
   readPeerProfile,
   writePeer,
@@ -272,6 +273,75 @@ test("appendInteractionLog creates peer directory on demand", async () => {
   });
   const raw = await readInteractionLogRaw(dir, "self");
   assert.ok(raw.includes("no identity yet"));
+});
+
+test("appendInteractionLog rejects non-canonical timestamps", async () => {
+  const dir = await makeTempDir();
+
+  await assert.rejects(
+    appendInteractionLog(dir, "self", {
+      timestamp: "zzzz",
+      kind: "peer_profile_reasoner_run",
+      summary: "bad marker",
+    }),
+    /canonical ISO-8601 timestamp/,
+  );
+});
+
+test("readPeerInteractionLog skips malformed timestamp lines before timestamp filtering", async () => {
+  const dir = await makeTempDir();
+  const peerDir = path.join(dir, "peers", "self");
+  await fs.mkdir(peerDir, { recursive: true });
+  await fs.writeFile(
+    path.join(peerDir, "interactions.log.md"),
+    [
+      "- [zzzz] (peer_profile_reasoner_run) bad marker",
+      "- [2026-04-25T00:00:01.000Z] (message) good marker",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const entries = await readPeerInteractionLog(dir, "self", {
+    afterTimestamp: "2026-04-25T00:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    entries.map((entry) => entry.summary),
+    ["good marker"],
+  );
+});
+
+test("readPeerInteractionLog preserves valid non-canonical ISO timestamps", async () => {
+  const dir = await makeTempDir();
+  const peerDir = path.join(dir, "peers", "self");
+  await fs.mkdir(peerDir, { recursive: true });
+  await fs.writeFile(
+    path.join(peerDir, "interactions.log.md"),
+    [
+      "- [2026-04-25T00:00:00Z] (message) no millisecond marker",
+      "- [2026-04-25T01:00:00+01:00] (message) offset marker for same instant",
+      "- [2026-04-25T00:00:01.000Z] (message) newer marker",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const allEntries = await readPeerInteractionLog(dir, "self");
+
+  assert.deepEqual(
+    allEntries.map((entry) => entry.timestamp),
+    ["2026-04-25T00:00:00Z", "2026-04-25T01:00:00+01:00", "2026-04-25T00:00:01.000Z"],
+  );
+
+  const filteredEntries = await readPeerInteractionLog(dir, "self", {
+    afterTimestamp: "2026-04-25T00:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    filteredEntries.map((entry) => entry.timestamp),
+    ["2026-04-25T00:00:01.000Z"],
+  );
 });
 
 test("readInteractionLogRaw returns empty string when log does not exist", async () => {

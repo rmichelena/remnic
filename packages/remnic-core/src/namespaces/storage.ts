@@ -1,8 +1,10 @@
 import path from "node:path";
-import { access } from "node:fs/promises";
+import { access, lstat, readdir } from "node:fs/promises";
 import { isSafeRouteNamespace } from "../routing/engine.js";
 import { StorageManager } from "../storage.js";
 import type { PluginConfig } from "../types.js";
+import { ALL_CATEGORY_DIRS } from "../utils/category-dir.js";
+import { namespaceIdentityToken, normalizeNamespaceIdentity } from "./identity.js";
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -13,11 +15,67 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+async function hasStoredEntries(p: string): Promise<boolean> {
+  try {
+    const entry = await lstat(p);
+    if (entry.isSymbolicLink()) return true;
+    if (!entry.isDirectory()) return true;
+    const children = await readdir(p, { withFileTypes: true });
+    for (const child of children) {
+      const childPath = path.join(p, child.name);
+      if (child.isSymbolicLink() || child.isFile()) return true;
+      if (child.isDirectory() && (await hasStoredEntries(childPath))) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+const LEGACY_NAMESPACE_CONTENT_CHILDREN = [
+  ...ALL_CATEGORY_DIRS,
+  "entities",
+  "artifacts",
+  "identity",
+  "config",
+  "summaries",
+  "profile.md",
+] as const;
+
+const LEGACY_NAMESPACE_RUNTIME_CHILDREN = ["state"] as const;
+
+async function hasAnyLegacyData(
+  rootDir: string,
+  options: { includeRuntimeState?: boolean } = {},
+): Promise<boolean> {
+  const children = options.includeRuntimeState === true
+    ? [...LEGACY_NAMESPACE_CONTENT_CHILDREN, ...LEGACY_NAMESPACE_RUNTIME_CHILDREN]
+    : LEGACY_NAMESPACE_CONTENT_CHILDREN;
+  for (const child of children) {
+    if (await hasStoredEntries(path.join(rootDir, child))) return true;
+  }
+  return false;
+}
+
+async function hasAnyNamespaceStorageMarker(
+  rootDir: string,
+  options: { includeRuntimeState?: boolean } = {},
+): Promise<boolean> {
+  const children = options.includeRuntimeState === true
+    ? [...LEGACY_NAMESPACE_CONTENT_CHILDREN, ...LEGACY_NAMESPACE_RUNTIME_CHILDREN]
+    : LEGACY_NAMESPACE_CONTENT_CHILDREN;
+  for (const child of children) {
+    if (await exists(path.join(rootDir, child))) return true;
+  }
+  return false;
+}
+
 /**
  * Storage routing for namespaces.
  *
  * Compatibility note:
- * - When namespaces are enabled, non-default namespaces live under `memoryDir/namespaces/<ns>`.
+ * - When namespaces are enabled, existing raw namespace roots are preserved.
+ *   New namespace roots use tokenized names under `memoryDir/namespaces/<token>`.
  * - The default namespace continues to use the legacy `memoryDir` root unless the caller
  *   has created `memoryDir/namespaces/<defaultNamespace>` (in which case we use that).
  *
@@ -31,38 +89,62 @@ export class NamespaceStorageRouter {
   constructor(private readonly config: PluginConfig) {}
 
   private async defaultNamespaceRoot(): Promise<string> {
-    if (this.defaultNsRootResolved) return this.defaultNsRootResolved;
     if (!this.config.namespacesEnabled) {
       this.defaultNsRootResolved = this.config.memoryDir;
       return this.defaultNsRootResolved;
     }
 
-    const nsDir = path.join(this.config.memoryDir, "namespaces", this.config.defaultNamespace);
-    this.defaultNsRootResolved = (await exists(nsDir)) ? nsDir : this.config.memoryDir;
+    const legacyNsDir = path.join(this.config.memoryDir, "namespaces", this.config.defaultNamespace);
+    const tokenizedNsDir = path.join(
+      this.config.memoryDir,
+      "namespaces",
+      namespaceIdentityToken(this.config.defaultNamespace),
+    );
+    const tokenizedHasData =
+      (await exists(tokenizedNsDir)) && (await hasAnyNamespaceStorageMarker(tokenizedNsDir, { includeRuntimeState: true }));
+    const nsDir = tokenizedHasData
+      ? tokenizedNsDir
+      : (await exists(legacyNsDir)) ? legacyNsDir : tokenizedNsDir;
+    this.defaultNsRootResolved =
+      (await exists(nsDir)) && !(await hasAnyLegacyData(this.config.memoryDir))
+        ? nsDir
+        : this.config.memoryDir;
     return this.defaultNsRootResolved;
   }
 
-  private namespaceRootSync(namespace: string): string {
+  private async namespaceRoot(namespace: string): Promise<string> {
     // NOTE: only used after defaultNamespaceRoot() resolution.
     if (!this.config.namespacesEnabled) return this.config.memoryDir;
     if (namespace === this.config.defaultNamespace) {
       return this.defaultNsRootResolved ?? this.config.memoryDir;
     }
-    return path.join(this.config.memoryDir, "namespaces", namespace);
+    const legacyRoot = path.join(this.config.memoryDir, "namespaces", namespace);
+    const tokenizedRoot = path.join(this.config.memoryDir, "namespaces", namespaceIdentityToken(namespace));
+    if ((await exists(tokenizedRoot)) && (await hasAnyNamespaceStorageMarker(tokenizedRoot, { includeRuntimeState: true }))) {
+      return tokenizedRoot;
+    }
+    return (await exists(legacyRoot)) ? legacyRoot : tokenizedRoot;
   }
 
   async storageFor(namespace: string): Promise<StorageManager> {
-    const ns = namespace || this.config.defaultNamespace;
+    const ns = normalizeNamespaceIdentity(namespace || this.config.defaultNamespace);
     if (ns !== this.config.defaultNamespace && !isSafeRouteNamespace(ns)) {
       throw new Error(`unsafe namespace: ${ns}`);
     }
-    if (this.cache.has(ns)) return this.cache.get(ns)!;
 
+    let root: string;
     if (ns === this.config.defaultNamespace) {
-      await this.defaultNamespaceRoot();
+      root = await this.defaultNamespaceRoot();
+      const cached = this.cache.get(ns);
+      if (cached && cached.dir === root) {
+        return cached;
+      }
+    } else {
+      const cached = this.cache.get(ns);
+      root = await this.namespaceRoot(ns);
+      if (cached && cached.dir === root) return cached;
     }
 
-    const root = this.namespaceRootSync(ns);
     const sm = new StorageManager(root, this.config.entitySchemas);
     // Propagate the inline-attribution template so that router-created storages
     // (used by extraction and shared-promotion paths) strip citations consistently,

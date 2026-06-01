@@ -28,8 +28,10 @@ export {
 } from "./registry.js";
 
 export {
+  ConnectorStateLockLostError,
   listConnectorStates,
   readConnectorState,
+  withConnectorStateLock,
   writeConnectorState,
   type ConnectorState,
   type ConnectorSyncStatus,

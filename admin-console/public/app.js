@@ -800,7 +800,7 @@ let graphSim = null;
 /**
  * Run a Verlet-style force simulation on `nodes` / `edges`.
  * Mutates `nodes` in-place; every element gains `.x`, `.y`, `.vx`, `.vy`.
- * Returns a handle with `.stop()` and `.restart()`.
+ * Returns a handle with `.stop()`, `.restart()`, and `.reheat()`.
  */
 function createForceSimulation(nodes, edges, width, height) {
   const REPULSION = 6000;
@@ -895,6 +895,14 @@ function createForceSimulation(nodes, edges, width, height) {
       this.stop();
       this.start(drawFn);
     },
+    reheat(drawFn) {
+      if (drawFn) onDraw = drawFn;
+      if (!running) {
+        this.start(onDraw);
+        return;
+      }
+      if (onDraw) onDraw();
+    },
   };
 }
 
@@ -911,6 +919,9 @@ function resetGraphView() {
 
 /** Last rendered snapshot, kept for re-draw on resize / pan / zoom. */
 let graphData = null; // { nodes, edges }
+
+/** Monotonic guard for async graph refreshes. */
+let graphLoadToken = 0;
 
 /**
  * Guard flag: canvas interaction listeners (mouse/wheel) must be attached
@@ -941,6 +952,15 @@ function drawGraph() {
   ctx.save();
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, lw, lh);
+
+  if (graphData.nodes.length === 0 && graphData.edges.length === 0) {
+    ctx.fillStyle = "#aaa";
+    ctx.font = "14px Avenir Next, Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("No graph data — memory graph is empty.", lw / 2, lh / 2);
+    ctx.restore();
+    return;
+  }
 
   ctx.save();
   ctx.translate(graphView.tx, graphView.ty);
@@ -1188,8 +1208,11 @@ async function loadMemoryGraph() {
   const canvas = $("graphCanvas");
   if (!canvas) return;
 
-  // Stop any running simulation.
-  if (graphSim) { graphSim.stop(); graphSim = null; }
+  const loadToken = ++graphLoadToken;
+  const previousGraphSim = graphSim;
+  if (previousGraphSim) previousGraphSim.stop();
+  graphSim = null;
+  closeGraphEventSource();
 
   setStatus("graphStatus", "Fetching graph snapshot...");
 
@@ -1203,12 +1226,47 @@ async function loadMemoryGraph() {
   try {
     snapshot = await fetchJson(`/engram/v1/graph/snapshot?${params.toString()}`);
   } catch (err) {
-    setStatus("graphStatus", err.message || String(err), "error");
+    if (loadToken !== graphLoadToken) return;
+    if (graphData) {
+      graphSim = previousGraphSim;
+      if (graphSim) graphSim.reheat(drawGraph);
+      else drawGraph();
+      mountGraphEventSource();
+      setStatus(
+        "graphStatus",
+        `Snapshot refresh failed; kept previous live graph: ${err.message || String(err)}`,
+        "error",
+      );
+    } else {
+      setStatus("graphStatus", err.message || String(err), "error");
+    }
     return;
   }
 
+  if (loadToken !== graphLoadToken) return;
+
+  _orphanEdgeQueue.length = 0;
+
   const nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
   const edges = Array.isArray(snapshot.edges) ? snapshot.edges : [];
+
+  if (edges.length > 0) {
+    const nodeIds = new Set(nodes.map((n) => n.id).filter(Boolean));
+    for (const edge of edges) {
+      for (const endpoint of [edge.source, edge.target]) {
+        if (typeof endpoint !== "string" || endpoint === "" || nodeIds.has(endpoint)) continue;
+        nodeIds.add(endpoint);
+        nodes.push({
+          id: endpoint,
+          label: endpoint,
+          kind: "unknown",
+          score: 0,
+          lastUpdated: "",
+          metadata: { synthetic: true },
+        });
+      }
+    }
+  }
 
   // Always reset highlights, invalidate in-flight searches, and close panel
   // at the start of every reload — so stale state never persists.
@@ -1216,31 +1274,29 @@ async function loadMemoryGraph() {
   graphHighlightIds = new Map();
   closeGraphNodePanel();
 
-  if (nodes.length === 0) {
-    graphData = null;
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      const dpr = window.devicePixelRatio || 1;
-      const lw = canvas.offsetWidth;
-      const lh = canvas.offsetHeight;
-      canvas.width = lw * dpr;
-      canvas.height = lh * dpr;
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, lw, lh);
-      ctx.fillStyle = "#aaa";
-      ctx.font = "14px Avenir Next, Segoe UI, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("No graph data — memory graph is empty.", lw / 2, lh / 2);
-      ctx.restore();
-    }
-    setStatus("graphStatus", "Graph snapshot is empty.", "default");
-    return;
-  }
-
   // Reset colours on each fresh fetch so legend is consistent.
   graphCategoryColors.clear();
   graphCategoryColorIndex = 0;
+
+  if (nodes.length === 0) {
+    graphData = { nodes, edges };
+    graphView.tx = 0;
+    graphView.ty = 0;
+    graphView.scale = 1;
+    const lw = canvas.offsetWidth || 800;
+    const lh = canvas.offsetHeight || 520;
+    graphSim = createForceSimulation(nodes, edges, lw, lh);
+    // Prime the draw callback for future SSE reheats without running an
+    // empty requestAnimationFrame loop.
+    graphSim.start(drawGraph);
+    graphSim.stop();
+    drawGraph();
+    attachGraphInteractions(canvas);
+    renderGraphLegend();
+    mountGraphEventSource();
+    setStatus("graphStatus", "Graph snapshot is empty.", "default");
+    return;
+  }
 
   // Pre-warm category colours in node order.
   for (const n of nodes) graphColorForCategory(n.kind);
@@ -1310,6 +1366,12 @@ const _ORPHAN_EDGE_QUEUE_MAX = 200;
  */
 let graphEventSource = null;
 
+function closeGraphEventSource() {
+  if (!graphEventSource) return;
+  try { graphEventSource.close(); } catch { /* ignore */ }
+  graphEventSource = null;
+}
+
 /**
  * Apply a single graph mutation event to the in-memory graphData and
  * re-render without a full re-fetch.
@@ -1328,6 +1390,9 @@ function applyGraphEvent(event) {
   if (event.type === "node-added") {
     const existing = graphData.nodes.find((n) => n.id === p.nodeId);
     if (!existing) {
+      const canvas = $("graphCanvas");
+      const lw = canvas?.offsetWidth || 800;
+      const lh = canvas?.offsetHeight || 520;
       const node = {
         id: p.nodeId,
         label: p.label || p.nodeId,
@@ -1335,14 +1400,15 @@ function applyGraphEvent(event) {
         score: 1,
         lastUpdated: p.lastUpdated || event.ts,
         // Place new nodes at a random position near the canvas centre.
-        x: (Math.random() - 0.5) * 200,
-        y: (Math.random() - 0.5) * 200,
+        x: lw / 2 + (Math.random() - 0.5) * 200,
+        y: lh / 2 + (Math.random() - 0.5) * 200,
         vx: 0,
         vy: 0,
         _memoryId: null,
       };
       graphData.nodes.push(node);
       graphColorForCategory(node.kind);
+      renderGraphLegend();
       // Drain any queued orphan edges now that a new node has arrived.
       // Iterate backwards so splicing by index is safe.
       let drainedAny = false;
@@ -1455,9 +1521,12 @@ function applyGraphEvent(event) {
       hadEdges.add(e.source);
       hadEdges.add(e.target);
     }
-    graphData.edges = graphData.edges.filter(
-      (e) => !(e.source === p.source && e.target === p.target && e.kind === p.kind),
-    );
+    for (let i = graphData.edges.length - 1; i >= 0; i -= 1) {
+      const e = graphData.edges[i];
+      if (e.source === p.source && e.target === p.target && e.kind === p.kind) {
+        graphData.edges.splice(i, 1);
+      }
+    }
     // Build the still-connected set after removal.
     const stillConnected = new Set();
     for (const e of graphData.edges) {
@@ -1465,9 +1534,12 @@ function applyGraphEvent(event) {
       stillConnected.add(e.target);
     }
     // Only prune a node when it was connected before AND is now orphaned.
-    graphData.nodes = graphData.nodes.filter(
-      (n) => !hadEdges.has(n.id) || stillConnected.has(n.id),
-    );
+    for (let i = graphData.nodes.length - 1; i >= 0; i -= 1) {
+      const n = graphData.nodes[i];
+      if (hadEdges.has(n.id) && !stillConnected.has(n.id)) {
+        graphData.nodes.splice(i, 1);
+      }
+    }
     if (graphSim) graphSim.reheat();
     drawGraph();
   }
@@ -1487,10 +1559,7 @@ function applyGraphEvent(event) {
  */
 function mountGraphEventSource() {
   // Close any previous connection first (e.g. after a graph refresh).
-  if (graphEventSource) {
-    try { graphEventSource.close(); } catch { /* ignore */ }
-    graphEventSource = null;
-  }
+  closeGraphEventSource();
 
   const token = readToken();
   if (!token) return; // no token → no stream; user can still use manual refresh

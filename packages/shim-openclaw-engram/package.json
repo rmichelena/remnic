@@ -4,11 +4,14 @@
   "description": "Deprecated compatibility shim for Engram installs. Re-exports @remnic/plugin-openclaw and forwards engram-access to @remnic/core.",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
     "./access-cli": {
+      "types": "./dist/access-cli.d.ts",
       "import": "./dist/access-cli.js"
     }
   },

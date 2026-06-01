@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { Orchestrator, parseConfig, parseEntityFile, StorageManager } from "@remnic/core";
+import { LcmEngine } from "@remnic/core/lcm";
 
 import {
   buildBenchAdapterConfig,
@@ -22,12 +23,15 @@ import {
   createLightweightAdapter,
   createRemnicAdapter,
 } from "./remnic-adapter.ts";
+import { createTimeoutGuardedAdapter } from "./timeout-guard.ts";
 
 const BASE_CONFIG = {
   memoryDir: "/tmp/remnic-bench-memory",
   workspaceDir: "/tmp/remnic-bench-workspace",
   lcmEnabled: true as const,
 };
+const BENCH_TEST_RM_RETRY_OPTIONS = { maxRetries: 5, retryDelay: 50 } as const;
+const BENCH_TEST_OPERATION_START_TIMEOUT_MS = 10_000;
 
 function benchReplaySourceForTest(sessionId: string): string {
   return `bench-replay-${createHash("sha256").update(sessionId).digest("hex").slice(0, 16)}`;
@@ -142,6 +146,143 @@ test("adapter sandbox QMD index settings cannot be overridden by runtime config"
   assert.equal(lightweight.qmdPath, "/tmp/remnic-bench-qmd");
 });
 
+test("runtime-backed adapter waits for full reset rebuild to settle after abort", async () => {
+  const adapter = await createLightweightAdapter();
+  const originalInitialize = Orchestrator.prototype.initialize;
+  const rebuildStarted = createDeferredForTest();
+  const rebuildCanFinish = createDeferredForTest();
+
+  Orchestrator.prototype.initialize = async function patchedInitialize() {
+    rebuildStarted.resolve();
+    await rebuildCanFinish.promise;
+    return originalInitialize.call(this);
+  };
+
+  try {
+    const controller = new AbortController();
+    const resetPromise = adapter.reset(undefined, { signal: controller.signal });
+    await Promise.race([
+      rebuildStarted.promise,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error("timed out waiting for reset rebuild")),
+          BENCH_TEST_OPERATION_START_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+    controller.abort(new Error("reset deadline"));
+    let resetSettled = false;
+    void resetPromise.catch(() => {
+      resetSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(resetSettled, false);
+
+    rebuildCanFinish.resolve();
+    await assert.rejects(resetPromise, /reset deadline/);
+    assert.equal(resetSettled, true);
+  } finally {
+    Orchestrator.prototype.initialize = originalInitialize;
+    rebuildCanFinish.resolve();
+    await adapter.destroy();
+  }
+});
+
+test("runtime-backed adapter waits for scoped reset cleanup to settle after abort", async () => {
+  const adapter = await createLightweightAdapter();
+  const originalClearSession = LcmEngine.prototype.clearSession;
+  const clearStarted = createDeferredForTest();
+  const clearCanFinish = createDeferredForTest();
+  const sessionId = "scoped-reset-abort-session";
+
+  LcmEngine.prototype.clearSession = async function patchedClearSession(
+    this: LcmEngine,
+    clearSessionId: string,
+  ): Promise<void> {
+    if (clearSessionId === sessionId) {
+      clearStarted.resolve();
+      await clearCanFinish.promise;
+    }
+    return originalClearSession.call(this, clearSessionId);
+  };
+
+  try {
+    const controller = new AbortController();
+    const resetPromise = adapter.reset(sessionId, { signal: controller.signal });
+    await Promise.race([
+      clearStarted.promise,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error("timed out waiting for scoped reset cleanup")),
+          BENCH_TEST_OPERATION_START_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+    controller.abort(new Error("scoped reset deadline"));
+    let resetSettled = false;
+    void resetPromise.catch(() => {
+      resetSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(resetSettled, false);
+
+    clearCanFinish.resolve();
+    await assert.rejects(resetPromise, /scoped reset deadline/);
+    assert.equal(resetSettled, true);
+  } finally {
+    LcmEngine.prototype.clearSession = originalClearSession;
+    clearCanFinish.resolve();
+    await adapter.destroy();
+  }
+});
+
+test("direct caller-owned adapter waits for full clearAll reset to settle after abort", async () => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "remnic-bench-clearall-abort-"));
+  const adapter = await createRemnicAdapter({ memoryDir });
+  const originalClearAll = LcmEngine.prototype.clearAll;
+  const clearStarted = createDeferredForTest();
+  const clearCanFinish = createDeferredForTest();
+
+  LcmEngine.prototype.clearAll = async function patchedClearAll(this: LcmEngine): Promise<void> {
+    clearStarted.resolve();
+    await clearCanFinish.promise;
+    return originalClearAll.call(this);
+  };
+
+  try {
+    const controller = new AbortController();
+    const resetPromise = adapter.reset(undefined, { signal: controller.signal });
+    await Promise.race([
+      clearStarted.promise,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error("timed out waiting for clearAll reset")),
+          BENCH_TEST_OPERATION_START_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+    controller.abort(new Error("clearAll reset deadline"));
+    let resetSettled = false;
+    void resetPromise.catch(() => {
+      resetSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(resetSettled, false);
+
+    clearCanFinish.resolve();
+    await assert.rejects(resetPromise, /clearAll reset deadline/);
+    assert.equal(resetSettled, true);
+  } finally {
+    LcmEngine.prototype.clearAll = originalClearAll;
+    clearCanFinish.resolve();
+    await adapter.destroy();
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+  }
+});
+
 test("adapter QMD wrapper resolves relative binaries and isolates QMD env", async () => {
   const fakeRoot = await mkdtemp(path.join(tmpdir(), "remnic-fake-qmd-"));
   const fakeQmdPath = path.join(fakeRoot, "qmd");
@@ -181,7 +322,7 @@ test("adapter QMD wrapper resolves relative binaries and isolates QMD env", asyn
     assert.doesNotMatch(marker, /openclaw-engram/);
   } finally {
     await adapter.destroy();
-    await rm(fakeRoot, { recursive: true, force: true });
+    await rm(fakeRoot, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -211,7 +352,249 @@ test("direct adapter can use a caller-owned memory directory", async () => {
   try {
     assert.equal((await stat(memoryDir)).isDirectory(), true);
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+  }
+});
+
+test("direct adapter observes timeout guard abort control before storing messages", async () => {
+  const adapter = await createRemnicAdapter({
+    configOverrides: {
+      extractionMinUserTurns: 999,
+    },
+  });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "remnic-abort-test",
+    timeoutMs: 1_000,
+  });
+  const controller = new AbortController();
+  controller.abort(new Error("caller aborted remnic store"));
+
+  try {
+    await assert.rejects(
+      () => guarded.store(
+        "abort-store-session",
+        [
+          {
+            role: "user",
+            content: "Remember the aborted adapter code is orange-41.",
+          },
+        ],
+        { signal: controller.signal },
+      ),
+      /caller aborted remnic store/,
+    );
+
+    await adapter.drain?.();
+    const recalled = await adapter.recall(
+      "abort-store-session",
+      "What is the aborted adapter code?",
+    );
+    assert.doesNotMatch(recalled, /orange-41/);
+  } finally {
+    await adapter.destroy();
+  }
+});
+
+test("direct adapter cleans up late replay writes after timeout abort", async () => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "remnic-bench-abort-replay-"));
+  const preservedSessionId = "abort-replay-preserved-session";
+  const sessionId = "abort-replay-session";
+  const releaseReplay = createDeferredForTest();
+  const originalIngestReplayBatch = Orchestrator.prototype.ingestReplayBatch;
+  let lateWriteFinished = false;
+
+  Orchestrator.prototype.ingestReplayBatch = async function patchedIngestReplayBatch(
+    this: Orchestrator,
+    turns: Parameters<Orchestrator["ingestReplayBatch"]>[0],
+    options?: Parameters<Orchestrator["ingestReplayBatch"]>[1],
+  ): Promise<void> {
+    if (turns[0]?.sessionKey !== sessionId) {
+      return originalIngestReplayBatch.call(this, turns, options);
+    }
+    assert.ok(options?.abortSignal, "adapter must pass replay abort signal into core");
+    await releaseReplay.promise;
+    await this.storage.writeMemory(
+      "fact",
+      "Remember the aborted late replay code is garnet-99.",
+      { source: "extraction" },
+    );
+    lateWriteFinished = true;
+  };
+
+  const adapter = await createRemnicAdapter({
+    memoryDir,
+    replayExtractionMode: "await",
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "remnic-abort-replay-test",
+    timeoutMs: 5,
+  });
+
+  try {
+    await adapter.store(preservedSessionId, [
+      {
+        role: "user",
+        content: "Remember the preserved replay code is cobalt-71.",
+      },
+    ]);
+    await adapter.drain?.();
+    assert.match(
+      await adapter.recall(preservedSessionId, "What is the preserved replay code?"),
+      /cobalt-71/,
+    );
+
+    await assert.rejects(
+      () => guarded.store(sessionId, [
+        {
+          role: "user",
+          content: "Remember the aborted late replay code is garnet-99.",
+        },
+      ]),
+      /benchmark phase timed out after 5ms: remnic-abort-replay-test:store session=abort-replay-session messages=1/,
+    );
+
+    releaseReplay.resolve();
+    for (let i = 0; i < 50; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      StorageManager.clearAllStaticCaches();
+      const memories = await new StorageManager(memoryDir).readAllMemories();
+      const preservedRecall = await adapter.recall(
+        preservedSessionId,
+        "What is the preserved replay code?",
+      );
+      if (
+        lateWriteFinished &&
+        memories.every((memory) => !memory.content.includes("garnet-99")) &&
+        /cobalt-71/.test(preservedRecall)
+      ) {
+        return;
+      }
+    }
+
+    StorageManager.clearAllStaticCaches();
+    const memories = await new StorageManager(memoryDir).readAllMemories();
+    assert.deepEqual(
+      memories.map((memory) => memory.content).filter((content) => content.includes("garnet-99")),
+      [],
+    );
+    assert.match(
+      await adapter.recall(preservedSessionId, "What is the preserved replay code?"),
+      /cobalt-71/,
+    );
+  } finally {
+    releaseReplay.resolve();
+    await adapter.destroy();
+    Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+  }
+});
+
+test("direct adapter keeps replay queue blocked until aborted ingestion settles", async () => {
+  const firstSessionId = "abort-replay-queue-first";
+  const secondSessionId = "abort-replay-queue-second";
+  const releaseFirstReplay = createDeferredForTest();
+  const firstReplayStarted = createDeferredForTest();
+  const events: string[] = [];
+  const originalIngestReplayBatch = Orchestrator.prototype.ingestReplayBatch;
+
+  Orchestrator.prototype.ingestReplayBatch = async function patchedQueuedIngestReplayBatch(
+    this: Orchestrator,
+    turns: Parameters<Orchestrator["ingestReplayBatch"]>[0],
+    options?: Parameters<Orchestrator["ingestReplayBatch"]>[1],
+  ): Promise<void> {
+    const sessionKey = turns[0]?.sessionKey;
+    if (sessionKey === firstSessionId) {
+      events.push("first:start");
+      firstReplayStarted.resolve();
+      await releaseFirstReplay.promise;
+      events.push("first:end");
+      return;
+    }
+    if (sessionKey === secondSessionId) {
+      events.push("second:start");
+    }
+    return originalIngestReplayBatch.call(this, turns, options);
+  };
+
+  const adapter = await createRemnicAdapter({
+    replayExtractionMode: "await",
+    configOverrides: {
+      transcriptEnabled: true,
+      extractionMinUserTurns: 0,
+    },
+  });
+
+  try {
+    const controller = new AbortController();
+    const firstStore = adapter.store(
+      firstSessionId,
+      [
+        {
+          role: "user",
+          content: "Remember the first aborted replay queue marker.",
+        },
+      ],
+      { signal: controller.signal },
+    );
+    await firstReplayStarted.promise;
+
+    controller.abort(new Error("caller aborted replay queue"));
+    await assert.rejects(
+      () => Promise.race([
+        firstStore,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error("store abort did not surface before replay settled"));
+          }, 250);
+        }),
+      ]),
+      /caller aborted replay queue/,
+    );
+
+    const secondStore = adapter.store(secondSessionId, [
+      {
+        role: "user",
+        content: "Remember the second replay queue marker.",
+      },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(events, ["first:start"]);
+
+    releaseFirstReplay.resolve();
+    await secondStore;
+    assert.deepEqual(events, ["first:start", "first:end", "second:start"]);
+  } finally {
+    releaseFirstReplay.resolve();
+    await adapter.destroy();
+    Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
+  }
+});
+
+test("direct adapter observes timeout guard abort control before drain work", async () => {
+  const adapter = await createRemnicAdapter({
+    configOverrides: {
+      extractionMinUserTurns: 999,
+    },
+  });
+  const guarded = createTimeoutGuardedAdapter(adapter, {
+    benchmarkId: "remnic-abort-test",
+    timeoutMs: 1_000,
+  });
+  const controller = new AbortController();
+  controller.abort(new Error("caller aborted remnic drain"));
+
+  try {
+    assert.ok(guarded.drain, "guarded adapter must expose drain");
+    await assert.rejects(
+      () => guarded.drain!({ signal: controller.signal }),
+      /caller aborted remnic drain/,
+    );
+  } finally {
+    await adapter.destroy();
   }
 });
 
@@ -267,7 +650,7 @@ test("direct adapter reset clears caller-owned memory directory", async () => {
     assert.doesNotMatch(afterReset, /violet-19/);
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -303,8 +686,8 @@ test("direct adapter rejects symlinked caller-owned memory directories before in
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve symlink target data");
   } finally {
-    await rm(parentDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(parentDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -326,8 +709,8 @@ test("direct adapter rejects symlinked parent directories before creating state"
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve symlink parent data");
   } finally {
-    await rm(parentDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(parentDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -354,7 +737,7 @@ test("direct adapter allows caller-owned memory directories under macOS /tmp ali
     assert.match(recalled, /silver-94/);
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -370,7 +753,7 @@ test("direct adapter rejects dangling symlink directories before creating state"
       /must not be a symlink path/,
     );
   } finally {
-    await rm(parentDir, { recursive: true, force: true });
+    await rm(parentDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -388,8 +771,8 @@ test("direct adapter rejects symlinked caller-owned Remnic state children", asyn
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve symlink child data");
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -407,8 +790,8 @@ test("direct adapter rejects symlinked caller-owned search index children", asyn
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve search index symlink data");
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -431,8 +814,8 @@ test("direct adapter rejects symlinked custom caller-owned search index children
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve custom search index symlink data");
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -450,8 +833,8 @@ test("direct adapter rejects custom caller-owned search index paths outside memo
       /search index paths must stay inside memoryDir\/sandboxDir/,
     );
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(outsideDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(outsideDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -475,8 +858,8 @@ test("direct adapter rejects custom search index paths under symlinked parents",
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve custom search parent symlink data");
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -496,8 +879,8 @@ test("direct adapter rejects nested symlinks in caller-owned Remnic state childr
     );
     assert.equal(await readFile(sentinelPath, "utf8"), "preserve nested symlink data");
   } finally {
-    await rm(memoryDir, { recursive: true, force: true });
-    await rm(protectedDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
+    await rm(protectedDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -556,7 +939,7 @@ test("direct adapter session reset preserves other caller-owned sessions", async
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -624,7 +1007,7 @@ test("direct adapter session reset clears caller-owned hourly summaries", async 
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -666,7 +1049,7 @@ test("direct adapter session reset rejects summary path traversal", async () => 
     );
   } finally {
     await adapter.destroy();
-    await rm(parentDir, { recursive: true, force: true });
+    await rm(parentDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -742,7 +1125,7 @@ test("direct adapter session reset clears caller-owned core replay state", async
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -803,7 +1186,7 @@ test("direct adapter session reset clears caller-owned verbatim artifacts", asyn
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -900,7 +1283,7 @@ test("direct adapter session reset clears caller-owned entity timeline state", a
     assert.doesNotMatch(preexistingStructuredEntity, /basalt-29/);
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1009,7 +1392,7 @@ test("direct adapter session reset clears replay structured entity facts", async
   } finally {
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter?.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1072,7 +1455,7 @@ test("direct adapter scoped reset waits for background core replay", async () =>
     releaseReplay.resolve();
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1125,7 +1508,7 @@ test("direct adapter scoped reset marks partial replay writes after rejection", 
   } finally {
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1200,7 +1583,7 @@ test("direct adapter drain checks extraction idle after background replay comple
     Orchestrator.prototype.waitForExtractionIdle = originalWaitForExtractionIdle;
     Orchestrator.prototype.waitForConsolidationIdle = originalWaitForConsolidationIdle;
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1266,7 +1649,7 @@ test("direct adapter full reset waits for background core replay before rebuild"
     releaseReplay.resolve();
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1341,7 +1724,7 @@ test("direct adapter attributes concurrent background replay memories by session
     releaseFirstReplay.resolve();
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1426,7 +1809,7 @@ test("direct adapter normalizes session IDs for scoped reset", async () => {
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1468,7 +1851,7 @@ test("direct adapter session reset clears caller-owned cold replay state", async
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1532,7 +1915,7 @@ test("direct adapter session reset tracks replay-created cold memories", async (
   } finally {
     Orchestrator.prototype.ingestReplayBatch = originalIngestReplayBatch;
     await adapter?.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1565,7 +1948,7 @@ test("direct adapter full reset clears caller-owned core state when replay is sk
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1605,7 +1988,7 @@ test("direct adapter scoped reset clears caller-owned core state when replay is 
     );
   } finally {
     await adapter.destroy();
-    await rm(memoryDir, { recursive: true, force: true });
+    await rm(memoryDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 
@@ -1631,6 +2014,118 @@ test("AMB bridge rejects non-object config JSON", () => {
     payload.error,
     /REMNIC_AMB_CONFIG_JSON must be valid JSON: must be a JSON object/,
   );
+});
+
+test("AMB bridge flushes cleanup acknowledgement before exit", async () => {
+  const child = spawn(
+    process.execPath,
+    ["packages/bench/scripts/amb-remnic-bridge.mjs"],
+    {
+      cwd: path.resolve(import.meta.dirname, "../../../.."),
+      env: {
+        ...process.env,
+        REMNIC_AMB_TEST_STUB_ADAPTER: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    },
+  );
+
+  child.stdin.write(`${JSON.stringify({ command: "cleanup" })}\n`);
+
+  let cleanupExitTimeout: NodeJS.Timeout | undefined;
+  const result = await Promise.race([
+    exit,
+    new Promise<never>((_, reject) => {
+      cleanupExitTimeout = setTimeout(() => {
+        child.kill();
+        reject(new Error("AMB bridge cleanup did not exit"));
+      }, 1_000);
+    }),
+  ]);
+  if (cleanupExitTimeout) clearTimeout(cleanupExitTimeout);
+  assert.equal(result.code, 0, stderr);
+  assert.equal(result.signal, null);
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  assert.equal(lines.length, 1, stdout);
+  assert.deepEqual(JSON.parse(lines[0]!), { ok: true });
+});
+
+test("AMB bridge document parser requires blank lines between role turns", async () => {
+  // @ts-expect-error The bridge script is plain JS without declaration output.
+  const module = await import("../../scripts/amb-remnic-bridge.mjs") as {
+    parseAmbDocumentMessages(document: {
+      id?: string;
+      user_id?: string;
+      content?: string;
+    }): Array<{ role: string; content: string }>;
+  };
+  const messages = module.parseAmbDocumentMessages({
+    id: "doc-role-label",
+    user_id: "user-role-label",
+    content: [
+      "User: Please follow this runbook:",
+      "Assistant:",
+      "Do not treat this quoted label as a new assistant turn.",
+      "",
+      "Assistant: Confirmed.",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(
+    messages.map((message: { role: string }) => message.role),
+    ["system", "user", "assistant"],
+  );
+  assert.match(messages[1]?.content ?? "", /Assistant:\nDo not treat/);
+  assert.equal(messages[2]?.content, "Confirmed.");
+});
+
+test("AMB bridge document parser preserves preface text before role turns", async () => {
+  // @ts-expect-error The bridge script is plain JS without declaration output.
+  const module = await import("../../scripts/amb-remnic-bridge.mjs") as {
+    parseAmbDocumentMessages(document: {
+      id?: string;
+      user_id?: string;
+      content?: string;
+    }): Array<{ role: string; content: string }>;
+  };
+  const messages = module.parseAmbDocumentMessages({
+    id: "doc-preface",
+    user_id: "user-preface",
+    content: [
+      "This document starts with unlabelled source text.",
+      "It should be preserved for ingest.",
+      "",
+      "User: Then the labelled exchange starts.",
+      "",
+      "Assistant: Confirmed.",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(
+    messages.map((message: { role: string }) => message.role),
+    ["system", "user", "user", "assistant"],
+  );
+  assert.match(messages[1]?.content ?? "", /unlabelled source text/);
+  assert.equal(messages[2]?.content, "Then the labelled exchange starts.");
+  assert.equal(messages[3]?.content, "Confirmed.");
 });
 
 test("lightweight adapter keeps smoke-run guardrails even when overrides conflict", () => {
@@ -2964,7 +3459,7 @@ test("runtime-backed adapter preserves source timestamps for historical recall",
     );
   } finally {
     await adapter.destroy();
-    await rm(sandboxDir, { recursive: true, force: true });
+    await rm(sandboxDir, { recursive: true, force: true, ...BENCH_TEST_RM_RETRY_OPTIONS });
   }
 });
 

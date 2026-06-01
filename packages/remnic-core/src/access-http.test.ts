@@ -9,6 +9,7 @@ import { EngramAccessHttpServer } from "./access-http.js";
 import { EngramAccessInputError, type EngramAccessService } from "./access-service.js";
 import { parseConfig } from "./config.js";
 import { readPair, writePair } from "./contradiction/contradiction-review.js";
+import { projectTagProjectId } from "./coding/coding-namespace.js";
 import { OFFLINE_SYNC_MAX_MTIME_MS } from "./offline-sync.js";
 import type { StorageManager } from "./storage.js";
 
@@ -27,6 +28,155 @@ test("HTTP server rejects invalid constructor ports", () => {
       /access HTTP port must be an integer from 0 to 65535/,
       `port ${port} should be rejected`,
     );
+  }
+});
+
+test("parseConfig validates agentAccessHttp.port bounds and CLI strings", () => {
+  for (const [input, expected] of [
+    [0, 0],
+    [4318, 4318],
+    [65535, 65535],
+    ["5555", 5555],
+  ] as const) {
+    const parsed = parseConfig({ agentAccessHttp: { port: input } });
+    assert.equal(parsed.agentAccessHttp.port, expected);
+  }
+
+  for (const port of [
+    -1,
+    3.7,
+    65536,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "not-a-port",
+  ]) {
+    assert.throws(
+      () => parseConfig({ agentAccessHttp: { port } }),
+      /agentAccessHttp\.port must be an integer from 0 to 65535/,
+      `port ${String(port)} should be rejected`,
+    );
+  }
+});
+
+test("HTTP memory browse rejects malformed pagination and sort query values", async () => {
+  const calls: unknown[] = [];
+  const service = {
+    memoryBrowse: async (request: unknown) => {
+      calls.push(request);
+      return { total: 0, memories: [] };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    for (const query of ["limit=10abc", "offset=1.5", "limit=0", "sort=udpated_desc"]) {
+      const response = await fetch(`http://127.0.0.1:${status.port}/engram/v1/memories?${query}`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      assert.equal(response.status, 400, `${query} should be rejected`);
+    }
+    assert.equal(calls.length, 0, "invalid queries must fail before calling memoryBrowse");
+
+    const response = await fetch(
+      `http://127.0.0.1:${status.port}/engram/v1/memories?limit=10&offset=1&sort=updated_desc`,
+      { headers: { authorization: "Bearer test-token" } },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [
+      {
+        query: undefined,
+        status: undefined,
+        category: undefined,
+        namespace: undefined,
+        authenticatedPrincipal: undefined,
+        sort: "updated_desc",
+        limit: 10,
+        offset: 1,
+      },
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP admin console assets are public but API routes require bearer authentication", async () => {
+  const service = {} as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+  });
+
+  const status = await server.start();
+  try {
+    const shell = await fetch(`http://127.0.0.1:${status.port}/remnic/ui/`);
+    assert.equal(shell.status, 200);
+    assert.match(await shell.text(), /Remnic Admin Console/);
+
+    const app = await fetch(`http://127.0.0.1:${status.port}/remnic/ui/app.js`);
+    assert.equal(app.status, 200);
+    assert.match(app.headers.get("content-type") ?? "", /javascript/);
+
+    const api = await fetch(`http://127.0.0.1:${status.port}/engram/v1/health`);
+    const body = await api.json() as { code?: string };
+    assert.equal(api.status, 401);
+    assert.equal(body.code, "unauthorized");
+    assert.equal(api.headers.get("www-authenticate"), "Bearer");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP coding-context endpoint accepts projectTag shorthand", async () => {
+  const calls: unknown[] = [];
+  const service = {
+    setCodingContext: (request: unknown) => {
+      calls.push(request);
+    },
+  } as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    adminConsoleEnabled: false,
+  });
+
+  const status = await server.start();
+  try {
+    const response = await fetch(`http://127.0.0.1:${status.port}/engram/v1/coding-context`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        sessionKey: "s1",
+        projectTag: "Blend/Supply",
+      }),
+    });
+
+    const projectId = projectTagProjectId("Blend/Supply");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.deepEqual(calls, [
+      {
+        sessionKey: "s1",
+        codingContext: {
+          projectId,
+          branch: null,
+          rootPath: projectId,
+          defaultBranch: null,
+        },
+      },
+    ]);
+  } finally {
+    await server.stop();
   }
 });
 

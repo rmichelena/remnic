@@ -10,6 +10,7 @@ class FakeElement {
   disabled = false;
   className = "";
   dataset: Record<string, string> = {};
+  style: Record<string, string> = {};
 
   addEventListener(): void {}
   appendChild(): void {}
@@ -26,6 +27,7 @@ class FakeCanvasContext {
   restore() { this.calls.push("restore"); }
   clearRect() { this.calls.push("clearRect"); }
   scale() {}
+  translate() {}
   beginPath() {}
   arc() {}
   fill() {}
@@ -125,6 +127,7 @@ async function loadAdminConsoleContext(pageSizeValue: string, extraElements: Rec
       results: Array<{ id: string; path?: string }>,
     ) => Map<string, string>,
     applyGraphEvent: vm.runInContext("applyGraphEvent", context) as (event: AppEvent) => void,
+    loadMemoryGraph: vm.runInContext("loadMemoryGraph", context) as () => Promise<void>,
     _orphanEdgeQueue: vm.runInContext("_orphanEdgeQueue", context) as OrphanEdge[],
     getContext: () => context,
   };
@@ -241,6 +244,141 @@ test("drawGraph is a no-op when graphData is null", async () => {
   assert.doesNotThrow(() => drawGraph());
   // Canvas context must not have been touched (no save calls).
   assert.equal(canvas._ctx.calls.length, 0);
+});
+
+test("loadMemoryGraph keeps an empty snapshot subscribed for live graph events", async () => {
+  const { getContext, loadMemoryGraph, _orphanEdgeQueue } = await loadAdminConsoleContext("25", {
+    graphCanvas: new FakeCanvas(),
+    graphStatus: new FakeElement(),
+    graphLegend: new FakeElement(),
+  });
+  const context = getContext();
+  _orphanEdgeQueue.push({
+    source: "facts/old-a.md",
+    target: "facts/old-b.md",
+    kind: "entity",
+  });
+
+  vm.runInContext(
+    `
+      globalThis.__closedGraphEventSource = false;
+      graphEventSource = { close() { globalThis.__closedGraphEventSource = true; } };
+      globalThis.__graphEventSourceUrl = "";
+      EventSource = class {
+        constructor(url) {
+          globalThis.__graphEventSourceUrl = url;
+        }
+        close() {}
+      };
+      writeToken("graph-token");
+      fetchJson = async () => ({ nodes: [], edges: [], generatedAt: "2026-05-31T00:00:00.000Z" });
+    `,
+    context,
+  );
+
+  await loadMemoryGraph();
+
+  assert.equal(vm.runInContext("globalThis.__closedGraphEventSource", context), true);
+  assert.notEqual(vm.runInContext("graphEventSource", context), null);
+  assert.equal(
+    vm.runInContext("globalThis.__graphEventSourceUrl", context),
+    "/engram/v1/graph/events?token=graph-token",
+  );
+  assert.equal(vm.runInContext("graphData.nodes.length", context), 0);
+  assert.equal(_orphanEdgeQueue.length, 0);
+
+  vm.runInContext(
+    `
+      applyGraphEvent({
+        type: "node-added",
+        payload: { nodeId: "facts/live.md", kind: "fact", label: "Live" },
+        ts: "2026-05-31T00:00:01.000Z",
+      });
+    `,
+    context,
+  );
+
+  assert.equal(vm.runInContext("graphData.nodes.length", context), 1);
+});
+
+test("loadMemoryGraph materializes missing edge endpoints from snapshot edges", async () => {
+  const { getContext, loadMemoryGraph } = await loadAdminConsoleContext("25", {
+    graphCanvas: new FakeCanvas(),
+    graphStatus: new FakeElement(),
+    graphLegend: new FakeElement(),
+  });
+  const context = getContext();
+
+  vm.runInContext(
+    `
+      fetchJson = async () => ({
+        nodes: [],
+        edges: [{ source: "facts/a.md", target: "facts/b.md", kind: "entity", weight: 1, label: "", confidence: 1 }],
+        generatedAt: "2026-05-31T00:00:00.000Z",
+      });
+    `,
+    context,
+  );
+
+  await loadMemoryGraph();
+
+  assert.equal(vm.runInContext("graphData.nodes.length", context), 2);
+  assert.equal(vm.runInContext("graphData.edges.length", context), 1);
+  assert.equal(vm.runInContext("graphData.edges[0]._srcNode.id", context), "facts/a.md");
+  assert.equal(vm.runInContext("graphData.edges[0]._tgtNode.id", context), "facts/b.md");
+  assert.match(vm.runInContext('document.getElementById("graphStatus").textContent', context), /Loaded 2 nodes, 1 edges/);
+});
+
+test("stale graph refresh failure does not restore an older simulation over newer data", async () => {
+  const { getContext, loadMemoryGraph } = await loadAdminConsoleContext("25", {
+    graphCanvas: new FakeCanvas(),
+    graphStatus: new FakeElement(),
+    graphLegend: new FakeElement(),
+  });
+  const context = getContext();
+
+  vm.runInContext(
+    `
+      fetchJson = async () => ({
+        nodes: [{ id: "facts/old.md", label: "Old", kind: "fact", score: 1, metadata: {}, lastUpdated: "" }],
+        edges: [],
+        generatedAt: "2026-05-31T00:00:00.000Z",
+      });
+    `,
+    context,
+  );
+  await loadMemoryGraph();
+  vm.runInContext("globalThis.__oldGraphSim = graphSim;", context);
+
+  vm.runInContext(
+    `
+      globalThis.__rejectFirstRefresh = null;
+      let refreshCalls = 0;
+      fetchJson = () => {
+        refreshCalls += 1;
+        if (refreshCalls === 1) {
+          return new Promise((_, reject) => {
+            globalThis.__rejectFirstRefresh = reject;
+          });
+        }
+        return Promise.resolve({
+          nodes: [{ id: "facts/new.md", label: "New", kind: "decision", score: 1, metadata: {}, lastUpdated: "" }],
+          edges: [],
+          generatedAt: "2026-05-31T00:00:01.000Z",
+        });
+      };
+    `,
+    context,
+  );
+
+  const staleRefresh = loadMemoryGraph();
+  const currentRefresh = loadMemoryGraph();
+  await currentRefresh;
+  vm.runInContext("globalThis.__rejectFirstRefresh(new Error('stale refresh failed'));", context);
+  await staleRefresh;
+
+  assert.equal(vm.runInContext("graphData.nodes[0].id", context), "facts/new.md");
+  assert.equal(vm.runInContext("graphSim === globalThis.__oldGraphSim", context), false);
 });
 
 test("graph pane HTML elements are present in index.html", async () => {
@@ -453,6 +591,40 @@ test("duplicate orphan edges are not queued twice", async () => {
   applyGraphEvent({ type: "edge-added", payload: { source: "facts/p.md", target: "facts/q.md", kind: "entity", weight: 1, label: "", confidence: 1 }, ts });
 
   assert.equal(_orphanEdgeQueue.length, 1, "duplicate orphan edge must not be queued twice");
+});
+
+test("edge-removed mutates graph arrays in place for the active simulation", async () => {
+  const { applyGraphEvent, getContext, getGraphData, ts } = await loadGraphEventContext();
+  const context = getContext();
+
+  vm.runInContext(
+    `
+      const a = { id: "facts/a.md", label: "A", kind: "fact", score: 1, x: 10, y: 10, vx: 0, vy: 0 };
+      const b = { id: "facts/b.md", label: "B", kind: "fact", score: 1, x: 20, y: 20, vx: 0, vy: 0 };
+      const c = { id: "facts/c.md", label: "C", kind: "fact", score: 1, x: 30, y: 30, vx: 0, vy: 0 };
+      graphData.nodes.push(a, b, c);
+      graphData.edges.push({ source: "facts/a.md", target: "facts/b.md", kind: "entity", weight: 1, label: "", confidence: 1, _srcNode: a, _tgtNode: b });
+      graphSim = createForceSimulation(graphData.nodes, graphData.edges, 800, 520);
+      globalThis.__nodesRef = graphData.nodes;
+      globalThis.__edgesRef = graphData.edges;
+    `,
+    context,
+  );
+
+  const before = getGraphData();
+  applyGraphEvent({
+    type: "edge-removed",
+    payload: { source: "facts/a.md", target: "facts/b.md", kind: "entity" },
+    ts,
+  });
+  const after = getGraphData();
+
+  assert.equal(after.nodes, before.nodes, "node array identity must be preserved");
+  assert.equal(after.edges, before.edges, "edge array identity must be preserved");
+  assert.equal(after.edges.length, 0);
+  assert.equal(after.nodes.map((node) => (node as { id: string }).id).join(","), "facts/c.md");
+  assert.equal(vm.runInContext("globalThis.__nodesRef === graphData.nodes", context), true);
+  assert.equal(vm.runInContext("globalThis.__edgesRef === graphData.edges", context), true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

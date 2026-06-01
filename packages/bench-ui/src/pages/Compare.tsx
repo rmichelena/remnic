@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useEffect, useState } from "react";
 import type { BenchResultSummary, BenchResultSummaryPayload } from "../bench-data";
 import { buildCompareModel, pickDefaultCompareIds } from "../bench-data";
@@ -11,6 +12,7 @@ export function canCompareBenchRuns(
   return (
     baselineSummary !== null &&
     candidateSummary !== null &&
+    baselineSummary.id !== candidateSummary.id &&
     baselineSummary.benchmark === candidateSummary.benchmark
   );
 }
@@ -24,32 +26,88 @@ export function filterComparableCandidateRuns(
   }
 
   return payload.summaries.filter(
-    (summary) => summary.benchmark === baselineSummary.benchmark,
+    (summary) =>
+      summary.benchmark === baselineSummary.benchmark &&
+      summary.id !== baselineSummary.id,
   );
+}
+
+export function reconcileCompareSelection(
+  payload: BenchResultSummaryPayload,
+  selection: { baselineId: string; candidateId: string },
+  options: { preserveClearedSelection?: boolean } = {},
+): { baselineId: string; candidateId: string } {
+  const preserveClearedSelection = options.preserveClearedSelection ?? true;
+  const defaults = pickDefaultCompareIds(payload);
+  const summariesById = new Map(payload.summaries.map((summary) => [summary.id, summary]));
+  let baselineId = selection.baselineId;
+  if (baselineId === "") {
+    if (preserveClearedSelection) {
+      return { baselineId: "", candidateId: "" };
+    }
+    baselineId = defaults.baselineId ?? "";
+  }
+  if (!summariesById.has(baselineId)) {
+    baselineId = defaults.baselineId ?? "";
+  }
+
+  const baselineSummary = summariesById.get(baselineId) ?? null;
+  if (!baselineSummary) {
+    return { baselineId, candidateId: "" };
+  }
+
+  const candidateOptions = filterComparableCandidateRuns(payload, baselineSummary);
+  const candidateIds = new Set(candidateOptions.map((summary) => summary.id));
+  let candidateId = selection.candidateId;
+  if (candidateId === "") {
+    if (preserveClearedSelection) {
+      return { baselineId, candidateId: "" };
+    }
+    if (defaults.candidateId && candidateIds.has(defaults.candidateId)) {
+      candidateId = defaults.candidateId;
+    } else {
+      candidateId = candidateOptions[0]?.id ?? "";
+    }
+  }
+  if (!candidateIds.has(candidateId)) {
+    if (defaults.candidateId && candidateIds.has(defaults.candidateId)) {
+      candidateId = defaults.candidateId;
+    } else {
+      candidateId = candidateOptions[0]?.id ?? "";
+    }
+  }
+
+  return { baselineId, candidateId };
 }
 
 export function Compare({ payload }: { payload: BenchResultSummaryPayload }) {
   const defaults = pickDefaultCompareIds(payload);
   const [baselineId, setBaselineId] = useState<string>(defaults.baselineId ?? "");
   const [candidateId, setCandidateId] = useState<string>(defaults.candidateId ?? "");
+  const [selectionTouched, setSelectionTouched] = useState(false);
 
   useEffect(() => {
-    setBaselineId(defaults.baselineId ?? "");
-    setCandidateId(defaults.candidateId ?? "");
-  }, [defaults.baselineId, defaults.candidateId]);
+    const next = reconcileCompareSelection(
+      payload,
+      { baselineId, candidateId },
+      { preserveClearedSelection: selectionTouched },
+    );
+    if (next.baselineId !== baselineId) {
+      setBaselineId(next.baselineId);
+    }
+    if (next.candidateId !== candidateId) {
+      setCandidateId(next.candidateId);
+    }
+  }, [payload, baselineId, candidateId, selectionTouched]);
 
   const baselineSummary =
     payload.summaries.find((summary) => summary.id === baselineId) ?? null;
   const candidateSummary =
     payload.summaries.find((summary) => summary.id === candidateId) ?? null;
 
-  useEffect(() => {
-    if (baselineSummary && candidateSummary && !canCompareBenchRuns(baselineSummary, candidateSummary)) {
-      setCandidateId("");
-    }
-  }, [baselineSummary, candidateSummary]);
-
-  const candidateOptions = filterComparableCandidateRuns(payload, baselineSummary);
+  const candidateOptions = baselineSummary
+    ? filterComparableCandidateRuns(payload, baselineSummary)
+    : [];
 
   const comparison = canCompareBenchRuns(baselineSummary, candidateSummary)
     ? buildCompareModel(payload, baselineId, candidateId)
@@ -68,7 +126,10 @@ export function Compare({ payload }: { payload: BenchResultSummaryPayload }) {
       <section className="panel controls-grid">
         <label>
           <span>Baseline run</span>
-          <select value={baselineId} onChange={(event) => setBaselineId(event.target.value)}>
+          <select value={baselineId} onChange={(event) => {
+            setSelectionTouched(true);
+            setBaselineId(event.target.value);
+          }}>
             <option value="">Select baseline</option>
             {payload.summaries.map((summary) => (
               <option key={summary.id} value={summary.id}>
@@ -79,7 +140,10 @@ export function Compare({ payload }: { payload: BenchResultSummaryPayload }) {
         </label>
         <label>
           <span>Candidate run</span>
-          <select value={candidateId} onChange={(event) => setCandidateId(event.target.value)}>
+          <select value={candidateId} onChange={(event) => {
+            setSelectionTouched(true);
+            setCandidateId(event.target.value);
+          }}>
             <option value="">Select candidate</option>
             {candidateOptions.map((summary) => (
               <option key={summary.id} value={summary.id}>

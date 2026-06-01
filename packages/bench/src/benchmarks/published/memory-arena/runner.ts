@@ -90,6 +90,7 @@ export async function runMemoryArenaBenchmark(
           console.error(
             `  [WARN] memory-arena initial task state failed for ${domain}:${task.id}: ${initialSeedError}`,
           );
+          pendingPrerequisiteError = `MemoryArena initial task state failed: ${initialSeedError}`;
         }
       }
       for (
@@ -474,6 +475,9 @@ function parseTask(line: string, filename: string, lineNumber: number): ArenaTas
   ) {
     throw new Error(`${location} must include a questions array of strings.`);
   }
+  if (record.questions.length === 0) {
+    throw new Error(`${location} must include at least one question.`);
+  }
   if (
     !Array.isArray(record.answers)
     || record.answers.some(
@@ -483,6 +487,16 @@ function parseTask(line: string, filename: string, lineNumber: number): ArenaTas
   ) {
     throw new Error(
       `${location} must include an answers array of strings, objects, or arrays of those values.`,
+    );
+  }
+  if (record.answers.length < record.questions.length) {
+    throw new Error(
+      `${location} must include exactly one answer for each question; received ${record.questions.length} questions and ${record.answers.length} answers.`,
+    );
+  }
+  if (record.answers.length > record.questions.length) {
+    throw new Error(
+      `${location} must include exactly one answer for each question; received ${record.questions.length} questions and ${record.answers.length} answers.`,
     );
   }
   if (
@@ -676,7 +690,9 @@ async function storeInitialTaskState(
   try {
     await options.system.drain?.();
   } catch (drainErr) {
-    console.error(`  [WARN] memory-arena drain failed after initial task state: ${drainErr instanceof Error ? drainErr.message : String(drainErr)}`);
+    throw new Error(
+      `MemoryArena drain failed after initial task state: ${formatUnknownError(drainErr)}`,
+    );
   }
 }
 
@@ -1924,8 +1940,9 @@ function predictionIncludesExpectedTargetAsin(
   if (expectation.targetAsin === undefined) {
     return false;
   }
-  return predictedNormalized.includes(
-    normalizeItemSelectionText(expectation.targetAsin),
+  return normalizedPredictionIncludesTargetReference(
+    predictedNormalized,
+    expectation.targetAsin,
   );
 }
 
@@ -2011,7 +2028,12 @@ function itemSelectionExpectationMatches(
       return !asinContext.hasConflictingExplicitAsin
         && asinContext.predictedExplicitAsins.includes(normalizedExpectedAsin);
     }
-    if (predictedNormalized.includes(textNormalizedExpectedAsin)) {
+    if (
+      normalizedTextContainsTokenSequence(
+        predictedNormalized,
+        textNormalizedExpectedAsin,
+      )
+    ) {
       return true;
     }
     return expectation.attributes.length > 0
@@ -2043,7 +2065,7 @@ function extractItemSelectionAsinReferences(
   const asinPattern =
     /\b(?:target\s+asin|asin)\s+([a-z0-9][a-z0-9 ]{1,30}?)(?=\s+(?:attributes?|item|selected|price|rating|reviews|product|title|category)\b|$)/g;
   for (const match of predictedNormalized.matchAll(asinPattern)) {
-    const normalizedAsin = normalizeMemoryArenaWebshopAsinReference(match[1]);
+    const normalizedAsin = normalizeExplicitItemSelectionAsinReference(match[1]);
     if (normalizedAsin !== undefined) {
       asinReferences.add(normalizedAsin);
     }
@@ -2060,6 +2082,40 @@ function extractItemSelectionAsinReferences(
 function normalizeItemSelectionAsinForComparison(value: string): string {
   return normalizeMemoryArenaWebshopAsinReference(value)
     ?? normalizeItemSelectionText(value);
+}
+
+function normalizeExplicitItemSelectionAsinReference(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined || !/\d/.test(value)) {
+    return undefined;
+  }
+  return normalizeItemSelectionAsinForComparison(value);
+}
+
+function normalizedPredictionIncludesTargetReference(
+  predictedNormalized: string,
+  targetReference: string,
+): boolean {
+  const normalizedTarget = normalizeItemSelectionAsinForComparison(targetReference);
+  const explicitReferences = extractItemSelectionAsinReferences(predictedNormalized);
+  if (explicitReferences.length > 0) {
+    return explicitReferences.includes(normalizedTarget);
+  }
+  return normalizedTextContainsTokenSequence(
+    predictedNormalized,
+    normalizeItemSelectionText(targetReference),
+  );
+}
+
+function normalizedTextContainsTokenSequence(
+  haystack: string,
+  needle: string,
+): boolean {
+  if (needle.length === 0) {
+    return false;
+  }
+  return ` ${haystack} `.includes(` ${needle} `);
 }
 
 function normalizeMemoryArenaWebshopAsinReference(

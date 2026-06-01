@@ -227,6 +227,179 @@ test("AMemGym rejects malformed primary dataset files instead of falling back", 
   }
 });
 
+test("AMemGym applies a positive limit before validating later profiles", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-amemgym-limit-"));
+
+  try {
+    await writeFile(
+      path.join(tempDir, "data.json"),
+      JSON.stringify([
+        {
+          id: "valid-prefix-profile",
+          start_time: "2025-01-01T00:00:00Z",
+          user_profile: {
+            uuid: "user-1",
+            name: "Maya",
+            age: 29,
+            gender: "female",
+          },
+          state_schema: { city: { type: "string" } },
+          periods: [
+            {
+              period_start: "2025-01-01T00:00:00Z",
+              period_end: "2025-01-31T23:59:59Z",
+              period_summary: "Maya updated her city.",
+              sessions: [],
+              state: { city: "Chicago" },
+              updates: { city: "Chicago" },
+              update_cnts: { city: 1 },
+            },
+          ],
+          qas: [
+            {
+              query: "What city does Maya live in now?",
+              required_info: ["city"],
+              answer_choices: [
+                { state: ["Chicago"], answer: "Chicago" },
+                { state: ["Austin"], answer: "Austin" },
+              ],
+            },
+          ],
+        },
+        {
+          id: "malformed-after-limit",
+          qas: [],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runAMemGymBenchmark({
+      benchmark: amemGymDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      limit: 1,
+      system: {
+        async store() {},
+        async recall() {
+          return "Chicago";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+        responder: {
+          async respond() {
+            return {
+              text: "1",
+              tokens: { input: 1, output: 1 },
+              latencyMs: 1,
+              model: "amemgym-test-responder",
+            };
+          },
+        },
+        judge: {
+          async score() {
+            return 1;
+          },
+          async scoreWithMetrics() {
+            return {
+              score: 1,
+              tokens: { input: 0, output: 0 },
+              latencyMs: 0,
+              model: "amemgym-test-judge",
+            };
+          },
+        },
+      },
+    });
+
+    assert.equal(result.results.tasks.length, 1);
+    assert.equal(result.results.tasks[0]?.taskId, "valid-prefix-profile-q0");
+    assert.equal(result.results.tasks[0]?.scores.qa_accuracy, 1);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("AMemGym falls back to the first answer choice when final state has no choice match", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "remnic-amemgym-bad-choice-"));
+
+  try {
+    await writeFile(
+      path.join(tempDir, "amemgym-v1-base.json"),
+      JSON.stringify([
+        {
+          id: "bad-choice-profile",
+          start_time: "2025-01-01T00:00:00Z",
+          user_profile: {
+            uuid: "user-1",
+            name: "Maya",
+            age: 29,
+            gender: "female",
+          },
+          state_schema: { city: { type: "string" } },
+          periods: [
+            {
+              period_start: "2025-01-01T00:00:00Z",
+              period_end: "2025-01-31T23:59:59Z",
+              period_summary: "Maya updated her city.",
+              sessions: [],
+              state: { city: "Chicago" },
+              updates: { city: "Chicago" },
+              update_cnts: { city: 1 },
+            },
+          ],
+          qas: [
+            {
+              query: "What city does Maya live in now?",
+              required_info: ["city"],
+              answer_choices: [
+                { state: ["Austin"], answer: "Austin" },
+                { state: ["Boston"], answer: "Boston" },
+              ],
+            },
+          ],
+        },
+      ]),
+      "utf8",
+    );
+
+    const result = await runAMemGymBenchmark({
+      benchmark: amemGymDefinition,
+      mode: "full",
+      datasetDir: tempDir,
+      system: {
+        async store() {},
+        async recall() {
+          return "Austin";
+        },
+        async search() {
+          return [];
+        },
+        async reset() {},
+        async drain() {},
+        async destroy() {},
+        async getStats() {
+          return { totalMessages: 0, totalSummaryNodes: 0, maxDepth: 0 };
+        },
+      },
+    });
+
+    const task = result.results.tasks[0]!;
+    assert.equal(task.expected, "Austin");
+    assert.equal(task.details?.expectedChoiceIndex, null);
+    assert.equal(task.scores.qa_accuracy, 0);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("AMemGym fails fast when profile drain fails before scoring", async () => {
   let completedTasks = 0;
   let recallCalls = 0;

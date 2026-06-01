@@ -1,6 +1,6 @@
 import { mkdir, open, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 type AccessIdempotencyEntry = {
   recordedAt: string;
@@ -13,6 +13,8 @@ type AccessIdempotencyTestHooks = {
   lockTimeoutMs?: number;
   staleLockMs?: number;
   lockHeartbeatMs?: number;
+  beforeLockOwnerWrite?: (lockPath: string, ownerToken: string) => Promise<void> | void;
+  beforeStaleLockUnlink?: () => Promise<void> | void;
 };
 
 let testHooks: AccessIdempotencyTestHooks | null = null;
@@ -171,8 +173,17 @@ export class AccessIdempotencyStore {
     const startedAt = Date.now();
 
     while (true) {
+      const ownerToken = `${process.pid}:${randomUUID()}`;
       try {
         const handle = await open(lockPath, "wx");
+        try {
+          await testHooks?.beforeLockOwnerWrite?.(lockPath, ownerToken);
+          await handle.writeFile(ownerToken, "utf-8");
+        } catch (error) {
+          await handle.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+          throw error;
+        }
         let heartbeat: NodeJS.Timeout | null = null;
         if (lockHeartbeatMs > 0) {
           heartbeat = setInterval(() => {
@@ -187,14 +198,24 @@ export class AccessIdempotencyStore {
             clearInterval(heartbeat);
           }
           await handle.close().catch(() => undefined);
-          await unlink(lockPath).catch(() => undefined);
+          await unlinkLockIfOwner(lockPath, ownerToken, staleLockMs);
         }
       } catch (error) {
         if (!isAlreadyExistsError(error)) throw error;
         try {
           const lockStat = await stat(lockPath);
+          const lockOwner = await readLockOwner(lockPath);
           if (Date.now() - lockStat.mtimeMs > staleLockMs) {
-            await unlink(lockPath).catch(() => undefined);
+            await testHooks?.beforeStaleLockUnlink?.();
+            const removed = await unlinkStaleLockIfUnchanged({
+              lockPath,
+              observedOwner: lockOwner,
+              observedMtimeMs: lockStat.mtimeMs,
+              staleLockMs,
+            });
+            if (!removed) {
+              await sleep(10);
+            }
             continue;
           }
         } catch {
@@ -225,6 +246,118 @@ export class AccessIdempotencyStore {
 
 function isAlreadyExistsError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+}
+
+async function readLockOwner(lockPath: string): Promise<string | null> {
+  try {
+    return await readFile(lockPath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+async function unlinkLockIfOwner(lockPath: string, ownerToken: string, staleLockMs: number): Promise<void> {
+  const reclaimHandle = await openStaleReclaimLock(`${lockPath}.reclaim`, staleLockMs);
+  if (!reclaimHandle) return;
+  try {
+    await reclaimHandle.writeFile(`${process.pid}:${Date.now()}`, "utf-8");
+    await unlinkLockIfOwnerWhileReclaimHeld(lockPath, ownerToken);
+  } finally {
+    await reclaimHandle.close().catch(() => undefined);
+    await unlink(`${lockPath}.reclaim`).catch(() => undefined);
+  }
+}
+
+async function unlinkLockIfOwnerWhileReclaimHeld(lockPath: string, ownerToken: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(lockPath, "r");
+  } catch {
+    return;
+  }
+  try {
+    const openedStat = await handle.stat();
+    const currentOwner = await handle.readFile("utf-8");
+    if (currentOwner !== ownerToken) return;
+    let currentStat: Awaited<ReturnType<typeof stat>>;
+    try {
+      currentStat = await stat(lockPath);
+    } catch {
+      return;
+    }
+    if (!isSameFileIdentity(openedStat, currentStat)) return;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  await unlink(lockPath).catch(() => undefined);
+}
+
+function isSameFileIdentity(left: Awaited<ReturnType<typeof stat>>, right: Awaited<ReturnType<typeof stat>>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function unlinkStaleLockIfUnchanged(options: {
+  lockPath: string;
+  observedOwner: string | null;
+  observedMtimeMs: number;
+  staleLockMs: number;
+}): Promise<boolean> {
+  const reclaimPath = `${options.lockPath}.reclaim`;
+  const reclaimHandle = await openStaleReclaimLock(reclaimPath, options.staleLockMs);
+  if (!reclaimHandle) return false;
+  try {
+    await reclaimHandle.writeFile(`${process.pid}:${Date.now()}`, "utf-8");
+    return await unlinkStaleLockIfStillOwned(options);
+  } finally {
+    await reclaimHandle.close().catch(() => undefined);
+    await unlink(reclaimPath).catch(() => undefined);
+  }
+}
+
+async function openStaleReclaimLock(
+  reclaimPath: string,
+  staleLockMs: number,
+): Promise<Awaited<ReturnType<typeof open>> | null> {
+  try {
+    return await open(reclaimPath, "wx");
+  } catch (error) {
+    if (!isAlreadyExistsError(error)) throw error;
+  }
+
+  try {
+    const reclaimStat = await stat(reclaimPath);
+    if (Date.now() - reclaimStat.mtimeMs <= staleLockMs) return null;
+    await unlink(reclaimPath);
+  } catch {
+    return null;
+  }
+
+  try {
+    return await open(reclaimPath, "wx");
+  } catch (error) {
+    if (isAlreadyExistsError(error)) return null;
+    throw error;
+  }
+}
+
+async function unlinkStaleLockIfStillOwned(options: {
+  lockPath: string;
+  observedOwner: string | null;
+  observedMtimeMs: number;
+  staleLockMs: number;
+}): Promise<boolean> {
+  let currentStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    currentStat = await stat(options.lockPath);
+  } catch {
+    return true;
+  }
+  if (currentStat.mtimeMs !== options.observedMtimeMs) return false;
+  if (Date.now() - currentStat.mtimeMs <= options.staleLockMs) return false;
+  const currentOwner = await readLockOwner(options.lockPath);
+  if (currentOwner !== options.observedOwner) return false;
+  await unlink(options.lockPath);
+  return true;
 }
 
 function sleep(ms: number): Promise<void> {

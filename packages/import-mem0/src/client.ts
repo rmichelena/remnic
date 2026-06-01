@@ -63,6 +63,13 @@ export interface Mem0ClientOptions {
   fetchImpl?: typeof fetch;
   /** Requests per second limiter. Applied between pages. */
   rateLimit?: number;
+  /**
+   * Filters required by hosted mem0 list requests. Defaults to a broad empty
+   * filter body for the current hosted API.
+   */
+  filters?: Record<string, unknown>;
+  /** Use the legacy GET list contract for self-hosted or older v1 deployments. */
+  legacyGet?: boolean;
   /** Abort signal wired through to fetch. */
   signal?: AbortSignal;
   /** Sleep function for rate limiting; injectable so tests run instantly. */
@@ -70,7 +77,8 @@ export interface Mem0ClientOptions {
 }
 
 const DEFAULT_BASE_URL = "https://api.mem0.ai";
-const DEFAULT_LIST_PATH = "/v1/memories/";
+const DEFAULT_LIST_PATH = "/v3/memories/?page=1&page_size=50";
+const DEFAULT_LEGACY_GET_LIST_PATH = "/v1/memories/";
 
 /**
  * Fetch all mem0 memories across pagination. Returns a flat array; the
@@ -91,7 +99,10 @@ export async function fetchAllMem0Memories(
   }
   const sleep = options.sleep ?? defaultSleep;
   const base = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
-  const listPath = normalizeListPath(options.listPath ?? DEFAULT_LIST_PATH);
+  const defaultListPath = options.legacyGet === true
+    ? DEFAULT_LEGACY_GET_LIST_PATH
+    : DEFAULT_LIST_PATH;
+  const listPath = normalizeListPath(options.listPath ?? defaultListPath);
   const intervalMs =
     options.rateLimit && options.rateLimit > 0 ? 1000 / options.rateLimit : 0;
 
@@ -108,16 +119,9 @@ export async function fetchAllMem0Memories(
   while (nextUrl) {
     throwIfAborted(options.signal);
     if (pageIndex > 0 && intervalMs > 0) {
-      await sleep(intervalMs);
+      await sleepWithAbort(sleep, intervalMs, options.signal);
     }
-    const response = await fetchImpl(nextUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `Token ${options.apiKey}`,
-        Accept: "application/json",
-      },
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    const response = await fetchImpl(nextUrl, buildMem0ListRequest(options));
     if (!response.ok) {
       const body = await safeText(response);
       throw new Error(
@@ -137,8 +141,32 @@ export async function fetchAllMem0Memories(
   return all;
 }
 
+function buildMem0ListRequest(options: Mem0ClientOptions): RequestInit {
+  if (options.legacyGet === true) {
+    return {
+      method: "GET",
+      headers: {
+        Authorization: `Token ${options.apiKey}`,
+        Accept: "application/json",
+      },
+      ...(options.signal ? { signal: options.signal } : {}),
+    };
+  }
+  return {
+    method: "POST",
+    headers: {
+      Authorization: `Token ${options.apiKey}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ filters: options.filters ?? {} }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  };
+}
+
 function normalizeListPath(p: string): string {
   const withLeadingSlash = p.startsWith("/") ? p : `/${p}`;
+  if (withLeadingSlash.includes("?")) return withLeadingSlash;
   return withLeadingSlash.endsWith("/") ? withLeadingSlash : `${withLeadingSlash}/`;
 }
 
@@ -248,10 +276,37 @@ function resolveCursorOrThrow(
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    const err = new Error("mem0 import aborted");
-    (err as Error & { name: string }).name = "AbortError";
-    throw err;
+    throw makeAbortError();
   }
+}
+
+function makeAbortError(): Error {
+  const err = new Error("mem0 import aborted");
+  (err as Error & { name: string }).name = "AbortError";
+  return err;
+}
+
+function sleepWithAbort(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(makeAbortError());
+
+  let removeAbortListener: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    const onAbort = () => {
+      removeAbortListener?.();
+      reject(makeAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+
+  return Promise.race([sleep(ms), abortPromise]).finally(() => {
+    removeAbortListener?.();
+  });
 }
 
 async function safeText(response: Response): Promise<string> {

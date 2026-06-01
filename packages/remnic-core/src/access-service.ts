@@ -7,6 +7,7 @@ import { AccessIdempotencyStore, hashAccessIdempotencyPayload } from "./access-i
 import { AccessAuditAdapter, type AccessAuditConfig, type AccessAuditResult } from "./access-audit.js";
 import type { AnomalyDetectorResult } from "./recall-audit-anomaly.js";
 import { resolveGitContext } from "./coding/git-context.js";
+import { projectTagProjectId } from "./coding/coding-namespace.js";
 import { WorkStorage } from "./work/storage.js";
 import {
   exportWorkBoardMarkdown,
@@ -809,6 +810,7 @@ export interface EngramAccessObserveResponse {
 export interface EngramAccessLcmSearchRequest {
   query: string;
   sessionKey?: string;
+  sessionPrefix?: string;
   namespace?: string;
   limit?: number;
   authenticatedPrincipal?: string;
@@ -1721,11 +1723,11 @@ export class EngramAccessService {
     if (this.orchestrator.getCodingContextForSession(sessionKey)) return;
     // projectTag takes priority over cwd.
     if (typeof options.projectTag === "string" && options.projectTag.trim().length > 0) {
-      const tag = options.projectTag.trim();
+      const projectId = projectTagProjectId(options.projectTag);
       this.orchestrator.setCodingContextForSession(sessionKey, {
-        projectId: `tag:${tag}`,
+        projectId,
         branch: null,
-        rootPath: `tag:${tag}`,
+        rootPath: projectId,
         defaultBranch: null,
       });
       return;
@@ -3910,10 +3912,14 @@ export class EngramAccessService {
     const lcmSessionKey = request.sessionKey && namespace !== this.orchestrator.config.defaultNamespace
       ? `${namespace}:${request.sessionKey}`
       : request.sessionKey;
+    const lcmSessionPrefix = request.sessionPrefix && namespace !== this.orchestrator.config.defaultNamespace
+      ? `${namespace}:${request.sessionPrefix}`
+      : request.sessionPrefix;
     const rawResults = await this.orchestrator.lcmEngine.searchContextFull(
       request.query,
       limit,
       lcmSessionKey,
+      lcmSessionPrefix,
     );
 
     const results = rawResults.map((r: { session_id: string; content: string; turn_index: number }) => ({
@@ -4611,13 +4617,8 @@ export class EngramAccessService {
     const resolvedNs = this.resolveReadableNamespace(namespace, principal);
     const namespaceFilter = resolvedNs !== this.orchestrator.config.defaultNamespace ? resolvedNs : undefined;
 
-    const results = collection === "global"
-      ? (await this.orchestrator.qmd.searchGlobal(query, maxResults)).filter((r) =>
-          namespaceFilter
-            ? r.path.includes(`/namespaces/${namespaceFilter}/`) ||
-              (!r.path.includes("/namespaces/") && namespaceFilter === this.orchestrator.config.defaultNamespace)
-            : true,
-        )
+    const results = collection === "global" && !namespaceFilter
+      ? await this.orchestrator.qmd.searchGlobal(query, maxResults)
       : await this.orchestrator.searchAcrossNamespaces({
           query,
           namespaces: namespaceFilter ? [namespaceFilter] : undefined,

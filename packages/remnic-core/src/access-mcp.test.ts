@@ -30,6 +30,24 @@ function makeMockService(briefingFn?: () => Promise<unknown>): EngramAccessServi
     recallExplain: () => Promise.resolve(null),
     store: () => Promise.resolve({ id: "synthetic-id", stored: true }),
     suggest: () => Promise.resolve({ id: "synthetic-id" }),
+    memoryStore: () => Promise.resolve({
+      schemaVersion: 1,
+      operation: "memory_store",
+      namespace: "default",
+      dryRun: true,
+      accepted: true,
+      queued: false,
+      status: "validated",
+    }),
+    suggestionSubmit: () => Promise.resolve({
+      schemaVersion: 1,
+      operation: "suggestion_submit",
+      namespace: "default",
+      dryRun: true,
+      accepted: true,
+      queued: false,
+      status: "validated",
+    }),
     daySum: () => Promise.resolve({ summary: "" }),
     memoryGet: () => Promise.resolve(null),
     memoryTimeline: () => Promise.resolve([]),
@@ -178,6 +196,143 @@ test("MCP maintenance: hourly summarization dispatches to the access service", a
   const response = await server.handleRequest(makeToolRequest("engram.memory_summarize_hourly"));
 
   assert.equal(called, true, "memorySummarizeHourly should be dispatched");
+  assert.equal((response as Record<string, unknown> & { result?: { isError?: boolean } }).result?.isError, false);
+});
+
+test("MCP memory write tools reject malformed arguments before dispatch", async () => {
+  for (const toolName of ["engram.memory_store", "engram.suggestion_submit"]) {
+    for (const badArgs of [
+      {
+        content: "valid durable content",
+        category: "fact",
+        confidence: "0.9",
+        dryRun: true,
+      },
+      {
+        content: "valid durable content",
+        category: "fact",
+        tags: ["project", 123],
+        dryRun: true,
+      },
+      {
+        content: "valid durable content",
+        category: "fact",
+        dryRun: true,
+        unknownField: "must be rejected",
+      },
+    ]) {
+      let dispatched = false;
+      const service = {
+        ...makeMockService(),
+        memoryStore: async () => {
+          dispatched = true;
+          return {
+            schemaVersion: 1,
+            operation: "memory_store",
+            namespace: "default",
+            dryRun: true,
+            accepted: true,
+            queued: false,
+            status: "validated",
+          };
+        },
+        suggestionSubmit: async () => {
+          dispatched = true;
+          return {
+            schemaVersion: 1,
+            operation: "suggestion_submit",
+            namespace: "default",
+            dryRun: true,
+            accepted: true,
+            queued: false,
+            status: "validated",
+          };
+        },
+      } as unknown as EngramAccessService;
+      const server = new EngramMcpServer(service);
+
+      const response = await server.handleRequest(makeToolRequest(toolName, badArgs));
+      const result = (response as Record<string, unknown> & {
+        result?: { isError?: boolean; content?: Array<{ text?: string }> };
+      }).result;
+
+      assert.equal(result?.isError, true, `${toolName} should reject ${JSON.stringify(badArgs)}`);
+      assert.equal(dispatched, false, `${toolName} should not dispatch malformed writes`);
+    }
+  }
+});
+
+test("MCP session override is injected only into tools that accept sessionKey", async () => {
+  let capsuleListArgs: Record<string, unknown> | undefined;
+  let observeArgs: Record<string, unknown> | undefined;
+  const service = {
+    ...makeMockService(),
+    capsuleList: async (args: Record<string, unknown>) => {
+      capsuleListArgs = args;
+      return { capsules: [] };
+    },
+    observe: async (args: Record<string, unknown>) => {
+      observeArgs = args;
+      return { ok: true };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramMcpServer(service);
+
+  const capsuleResponse = await server.handleRequest(
+    makeToolRequest("engram.capsule_list"),
+    { sessionKeyOverride: "adapter-session" },
+  );
+  const observeResponse = await server.handleRequest(
+    makeToolRequest("engram.observe", {
+      messages: [{ role: "user", content: "hello" }],
+    }),
+    { sessionKeyOverride: "adapter-session" },
+  );
+
+  assert.deepEqual(capsuleListArgs, {
+    namespace: undefined,
+    principal: undefined,
+  });
+  assert.deepEqual(observeArgs, {
+    sessionKey: "adapter-session",
+    messages: [{ role: "user", content: "hello", parts: undefined, rawContent: undefined, sourceFormat: undefined }],
+    namespace: undefined,
+    authenticatedPrincipal: undefined,
+    skipExtraction: false,
+    cwd: undefined,
+    projectTag: undefined,
+  });
+  assert.equal((capsuleResponse as Record<string, unknown> & { result?: { isError?: boolean } }).result?.isError, false);
+  assert.equal((observeResponse as Record<string, unknown> & { result?: { isError?: boolean } }).result?.isError, false);
+});
+
+test("MCP capsule import forwards encrypted archive passphrase", async () => {
+  let received: Record<string, unknown> | undefined;
+  const service = {
+    ...makeMockService(),
+    capsuleImport: async (args: Record<string, unknown>) => {
+      received = args;
+      return { imported: true };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramMcpServer(service);
+
+  const response = await server.handleRequest(
+    makeToolRequest("engram.capsule_import", {
+      archivePath: "~/capsules/team.capsule.json.gz.enc",
+      namespace: "team",
+      mode: "overwrite",
+      passphrase: "correct horse battery staple",
+    }),
+  );
+
+  assert.deepEqual(received, {
+    archivePath: path.join(os.homedir(), "capsules/team.capsule.json.gz.enc"),
+    namespace: "team",
+    principal: undefined,
+    mode: "overwrite",
+    passphrase: "correct horse battery staple",
+  });
   assert.equal((response as Record<string, unknown> & { result?: { isError?: boolean } }).result?.isError, false);
 });
 

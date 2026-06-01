@@ -1,3 +1,4 @@
+import * as React from "react";
 import type { CompareMetricRow } from "../bench-data";
 import { formatMetricValue } from "../bench-data";
 

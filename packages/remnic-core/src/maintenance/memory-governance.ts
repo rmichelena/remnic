@@ -139,7 +139,7 @@ export interface RestoreMemoryGovernanceRunOptions {
   now?: Date;
 }
 
-const RULE_VERSION = "memory-governance.v2";
+export const RULE_VERSION = "memory-governance.v2";
 const SEMANTIC_DUPLICATE_MIN_TOKENS = 6;
 const SEMANTIC_DUPLICATE_MIN_JACCARD = 0.66;
 const QUALITY_SCORE_WEIGHTS: Record<MemoryGovernanceReasonCode, number> = {
@@ -852,6 +852,8 @@ export async function runMemoryGovernance(
 
       if (action.action === "archive") {
         const reviewEntry = reviewEntryByActionKey.get(`${action.memoryId}:${action.reasonCode}`);
+        restoreEntry.applied = true;
+        await persistRestoreManifest(options.memoryDir, restoreManifest);
         const archivedPath = await storage.archiveMemory(memory, {
           at: now,
           actor: "memory-governance.apply",
@@ -860,10 +862,13 @@ export async function runMemoryGovernance(
           relatedMemoryIds: reviewEntry?.relatedMemoryIds ?? [],
           correlationId: traceId,
         });
-        if (!archivedPath) continue;
+        if (!archivedPath) {
+          restoreEntry.applied = false;
+          await persistRestoreManifest(options.memoryDir, restoreManifest);
+          continue;
+        }
         restoreEntry.currentPath = archivedPath;
         restoreEntry.expectedCurrentRaw = await safeRead(archivedPath) ?? undefined;
-        restoreEntry.applied = true;
         await persistRestoreManifest(options.memoryDir, restoreManifest);
         appliedActions.push({
           ...action,
@@ -875,6 +880,8 @@ export async function runMemoryGovernance(
 
       if (!action.afterStatus || action.beforeStatus === action.afterStatus) continue;
       const reviewEntry = reviewEntryByActionKey.get(`${action.memoryId}:${action.reasonCode}`);
+      restoreEntry.applied = true;
+      await persistRestoreManifest(options.memoryDir, restoreManifest);
       const updated = await storage.writeMemoryFrontmatter(memory, {
         status: action.afterStatus,
         updated: now.toISOString(),
@@ -885,9 +892,12 @@ export async function runMemoryGovernance(
         relatedMemoryIds: reviewEntry?.relatedMemoryIds ?? [],
         correlationId: traceId,
       });
-      if (!updated) continue;
+      if (!updated) {
+        restoreEntry.applied = false;
+        await persistRestoreManifest(options.memoryDir, restoreManifest);
+        continue;
+      }
       restoreEntry.expectedCurrentRaw = await safeRead(memory.path) ?? undefined;
-      restoreEntry.applied = true;
       await persistRestoreManifest(options.memoryDir, restoreManifest);
       appliedActions.push({
         ...action,

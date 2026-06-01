@@ -1,3 +1,4 @@
+import * as React from "react";
 import type { BenchResultSummaryPayload } from "../bench-data";
 import {
   buildProviderRows,

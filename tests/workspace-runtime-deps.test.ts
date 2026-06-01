@@ -10,6 +10,7 @@ const packageExpectations = [
     path: new URL("../packages/remnic-cli/package.json", testDir),
     deps: {
       "@remnic/core": "workspace:^",
+      "@remnic/plugin-pi": "workspace:^",
       "@remnic/server": "workspace:^",
     },
   },
@@ -23,6 +24,28 @@ const packageExpectations = [
   {
     label: "OpenClaw plugin",
     path: new URL("../packages/plugin-openclaw/package.json", testDir),
+    deps: {
+      "@remnic/core": "workspace:^",
+    },
+  },
+  {
+    label: "Pi plugin",
+    path: new URL("../packages/plugin-pi/package.json", testDir),
+    deps: {
+      "@remnic/core": "workspace:^",
+    },
+  },
+  {
+    label: "OpenClaw Engram shim",
+    path: new URL("../packages/shim-openclaw-engram/package.json", testDir),
+    deps: {
+      "@remnic/core": "workspace:^",
+      "@remnic/plugin-openclaw": "workspace:^",
+    },
+  },
+  {
+    label: "Codex plugin",
+    path: new URL("../packages/plugin-codex/package.json", testDir),
     deps: {
       "@remnic/core": "workspace:^",
     },

@@ -1,5 +1,7 @@
+import * as React from "react";
 import type { BenchmarkCard } from "../bench-data";
 import {
+  deltaPolarityClass,
   formatDelta,
   formatMetricValue,
   formatTimestamp,
@@ -8,6 +10,11 @@ import {
 import { IntegrityBadge } from "./IntegrityBadge";
 
 export function ScoreCard({ card }: { card: BenchmarkCard }) {
+  const deltaClass = deltaPolarityClass(
+    card.delta,
+    card.latest.primaryMetric ?? undefined,
+  );
+
   return (
     <article className="score-card">
       <div className="score-card__header">
@@ -21,13 +28,7 @@ export function ScoreCard({ card }: { card: BenchmarkCard }) {
       <div className="score-card__score-row">
         <strong>{formatMetricValue(card.latest.primaryScore, card.latest.primaryMetric ?? undefined)}</strong>
         <span
-          className={`delta-pill${
-            card.delta !== null && card.delta > 0
-              ? " delta-pill--positive"
-              : card.delta !== null && card.delta < 0
-                ? " delta-pill--negative"
-                : ""
-          }`}
+          className={`delta-pill${deltaClass ? ` ${deltaClass}` : ""}`}
         >
           {formatDelta(card.delta, card.latest.primaryMetric ?? undefined)}
         </span>

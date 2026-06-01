@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import type { BenchResultSummary, BenchResultSummaryPayload, TaskDeltaRow } from "../bench-data";
@@ -55,6 +56,18 @@ export function resolveSelectedRunId(
   return runs[0]?.id ?? "";
 }
 
+export function histogramBarHeight(
+  count: number,
+  maxCount: number,
+  maxHeight = 120,
+  minNonZeroHeight = 12,
+): number {
+  if (count <= 0 || maxCount <= 0) {
+    return 0;
+  }
+  return Math.max((count / maxCount) * maxHeight, minNonZeroHeight);
+}
+
 export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayload }) {
   const { benchmarkId } = useParams();
   const runs = benchmarkId ? benchmarkRuns(payload, benchmarkId) : [];
@@ -86,6 +99,10 @@ export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayloa
   const primaryMetric = selected.primaryMetric ?? undefined;
   const showNormalizedHistogram = !isRawCountMetric(primaryMetric);
   const histogram = showNormalizedHistogram ? buildHistogram(selected) : [];
+  const maxHistogramCount = histogram.reduce(
+    (max, bucket) => Math.max(max, bucket.count),
+    0,
+  );
   const taskRows = buildBenchmarkDetailTaskRows(selected);
   const lowScoring = selectLowestScoringTasks(taskRows, primaryMetric);
   const failureTitle = isLowerIsBetterMetric(primaryMetric)
@@ -142,7 +159,10 @@ export function BenchmarkDetail({ payload }: { payload: BenchResultSummaryPayloa
             {histogram.map((bucket) => (
               <div className="histogram__bucket" key={bucket.label}>
                 <div className="histogram__bar-wrap">
-                  <div className="histogram__bar" style={{ height: `${Math.max(bucket.count * 18, 12)}px` }} />
+                  <div
+                    className="histogram__bar"
+                    style={{ height: `${histogramBarHeight(bucket.count, maxHistogramCount)}px` }}
+                  />
                 </div>
                 <strong>{bucket.count}</strong>
                 <span>{bucket.label}</span>

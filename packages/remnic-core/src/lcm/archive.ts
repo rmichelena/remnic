@@ -53,6 +53,19 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+const PUBLIC_LCM_SEARCH_LIMIT = 100;
+
+function normalizeSearchLimit(limit: number, fallback = 10, max = PUBLIC_LCM_SEARCH_LIMIT): number {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return fallback;
+  const normalized = Math.floor(limit);
+  if (normalized <= 0) return 0;
+  return Math.min(max, normalized);
+}
+
+function escapeSqlLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
 export class LcmArchive {
   constructor(private readonly db: Database.Database) {}
 
@@ -193,10 +206,12 @@ export class LcmArchive {
   }
 
   /** Full-text search across all messages. */
-  search(query: string, limit: number, sessionId?: string): LcmSearchResult[] {
+  search(query: string, limit: number, sessionId?: string, sessionPrefix?: string): LcmSearchResult[] {
     try {
       const ftsQuery = sanitizeFtsQuery(query);
       if (!ftsQuery) return [];
+      const cappedLimit = normalizeSearchLimit(limit);
+      if (cappedLimit === 0) return [];
 
       let sql: string;
       const params: unknown[] = [ftsQuery];
@@ -212,7 +227,19 @@ export class LcmArchive {
           ORDER BY rank
           LIMIT ?
         `;
-        params.push(sessionId, limit);
+        params.push(sessionId, cappedLimit);
+      } else if (sessionPrefix) {
+        sql = `
+          SELECT m.turn_index, m.role, snippet(lcm_messages_fts, 0, '>>>', '<<<', '...', 48) as snippet,
+                 m.session_id, rank
+          FROM lcm_messages_fts f
+          JOIN lcm_messages m ON m.id = f.rowid
+          WHERE lcm_messages_fts MATCH ?
+            AND m.session_id LIKE ? ESCAPE '\\'
+          ORDER BY rank
+          LIMIT ?
+        `;
+        params.push(`${escapeSqlLike(sessionPrefix)}%`, cappedLimit);
       } else {
         sql = `
           SELECT m.turn_index, m.role, snippet(lcm_messages_fts, 0, '>>>', '<<<', '...', 48) as snippet,
@@ -223,7 +250,7 @@ export class LcmArchive {
           ORDER BY rank
           LIMIT ?
         `;
-        params.push(limit);
+        params.push(cappedLimit);
       }
 
       const rows = this.db.prepare(sql).all(...params) as Array<{
@@ -252,10 +279,12 @@ export class LcmArchive {
    * Returns ~1000-char windows centered on query term matches.
    * Deduplicates by message id and returns results sorted by FTS rank.
    */
-  searchWithContent(query: string, limit: number, sessionId?: string, excerptChars = 1000): LcmSearchWithContentResult[] {
+  searchWithContent(query: string, limit: number, sessionId?: string, excerptChars = 1000, sessionPrefix?: string): LcmSearchWithContentResult[] {
     try {
       const ftsQuery = sanitizeFtsQuery(query);
       if (!ftsQuery) return [];
+      const cappedLimit = normalizeSearchLimit(limit);
+      if (cappedLimit === 0) return [];
 
       // Extract content words from query for excerpt windowing
       const queryWords = query
@@ -277,7 +306,18 @@ export class LcmArchive {
           ORDER BY rank
           LIMIT ?
         `;
-        params.push(sessionId, limit);
+        params.push(sessionId, cappedLimit);
+      } else if (sessionPrefix) {
+        sql = `
+          SELECT m.id, m.turn_index, m.role, m.content, m.session_id, rank
+          FROM lcm_messages_fts f
+          JOIN lcm_messages m ON m.id = f.rowid
+          WHERE lcm_messages_fts MATCH ?
+            AND m.session_id LIKE ? ESCAPE '\\'
+          ORDER BY rank
+          LIMIT ?
+        `;
+        params.push(`${escapeSqlLike(sessionPrefix)}%`, cappedLimit);
       } else {
         sql = `
           SELECT m.id, m.turn_index, m.role, m.content, m.session_id, rank
@@ -287,7 +327,7 @@ export class LcmArchive {
           ORDER BY rank
           LIMIT ?
         `;
-        params.push(limit);
+        params.push(cappedLimit);
       }
 
       const rows = this.db.prepare(sql).all(...params) as Array<{
@@ -431,17 +471,26 @@ export class LcmArchive {
   pruneOldMessages(retentionDays: number): number {
     const cutoff = new Date(Date.now() - retentionDays * 86400_000).toISOString();
 
-    // Delete from FTS first
-    this.db
-      .prepare(
-        "DELETE FROM lcm_messages_fts WHERE rowid IN (SELECT id FROM lcm_messages WHERE created_at < ?)",
-      )
-      .run(cutoff);
+    const txn = this.db.transaction(() => {
+      // Delete from FTS and child tables first. Some handles may not have
+      // foreign_keys enabled, so do not rely on ON DELETE CASCADE for parts.
+      this.db
+        .prepare(
+          "DELETE FROM lcm_messages_fts WHERE rowid IN (SELECT id FROM lcm_messages WHERE created_at < ?)",
+        )
+        .run(cutoff);
+      this.db
+        .prepare(
+          "DELETE FROM lcm_message_parts WHERE message_id IN (SELECT id FROM lcm_messages WHERE created_at < ?)",
+        )
+        .run(cutoff);
 
-    const result = this.db
-      .prepare("DELETE FROM lcm_messages WHERE created_at < ?")
-      .run(cutoff);
-    return result.changes;
+      const result = this.db
+        .prepare("DELETE FROM lcm_messages WHERE created_at < ?")
+        .run(cutoff);
+      return result.changes;
+    });
+    return txn();
   }
 }
 
