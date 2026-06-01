@@ -139,11 +139,13 @@ import {
   applyOfflineSyncFileContentChunk,
   applyOfflineSyncChangeset,
   buildOfflineSyncSnapshot,
+  buildOfflineSyncSnapshotFromBase,
   buildOfflineSyncSnapshotForPaths,
   readOfflineSyncFileContentChunk,
   type OfflineSyncApplyFileContentChunkResult,
   type OfflineSyncApplyChangesetResult,
   type OfflineSyncFileContentChunk,
+  type OfflineSyncFileState,
   type OfflineSyncSnapshot,
 } from "./offline-sync.js";
 import {
@@ -619,6 +621,8 @@ export interface EngramAccessOfflineSyncSnapshotRequest {
   principal?: string;
   includeTranscripts?: boolean;
   includeContent?: boolean;
+  baseCapturedAt?: Date;
+  baseFiles?: OfflineSyncFileState[];
 }
 
 export interface EngramAccessOfflineSyncFilesRequest {
@@ -655,6 +659,7 @@ export interface EngramAccessOfflineSyncApplyRequest {
   namespace?: string;
   principal?: string;
   changeset: unknown;
+  returnCurrentFiles?: boolean;
 }
 
 export interface EngramAccessOfflineSyncSnapshotResponse extends OfflineSyncSnapshot {
@@ -5602,12 +5607,19 @@ export class EngramAccessService {
     const resolvedNamespace = this.resolveReadableNamespace(options.namespace, options.principal);
     const storage = await this.orchestrator.getStorage(resolvedNamespace);
     const storageHash = createHash("sha256").update(storage.dir).digest("hex").slice(0, 16);
-    const snapshot = await buildOfflineSyncSnapshot({
+    const snapshotBuilder = options.includeContent === false && options.baseFiles && options.baseFiles.length > 0
+      ? buildOfflineSyncSnapshotFromBase
+      : buildOfflineSyncSnapshot;
+    const snapshot = await snapshotBuilder({
       root: storage.dir,
       sourceId: `remnic:${resolvedNamespace}:${storageHash}`,
+      ...(options.baseFiles && options.baseFiles.length > 0 ? { baseFiles: options.baseFiles } : {}),
+      // Client clocks are not authoritative for server-side ctime reuse. A
+      // future client timestamp can hide same-size, preserved-mtime rewrites.
       includeContent: options.includeContent !== false,
       includeTranscripts: options.includeTranscripts !== false,
       readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+      readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
     });
     return {
       namespace: resolvedNamespace,
@@ -5702,6 +5714,7 @@ export class EngramAccessService {
         content: options.content,
         includeTranscripts: options.includeTranscripts !== false,
         readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+        readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
         writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
         writeStagingFile: async ({ filePath, content }) => storage.writeOfflineSyncStagingFile(filePath, content),
         writeFileChunks: async ({ filePath, chunks }) => storage.writeOfflineSyncFileChunks(filePath, chunks),
@@ -5743,7 +5756,9 @@ export class EngramAccessService {
       const result = await applyOfflineSyncChangeset({
         root: storage.dir,
         changeset: options.changeset,
+        returnCurrentFiles: options.returnCurrentFiles,
         readFile: async ({ filePath }) => storage.readOfflineSyncFile(filePath),
+        readFileDigest: async ({ filePath }) => storage.digestOfflineSyncFile(filePath),
         writeFile: async ({ filePath, content }) => storage.writeOfflineSyncFile(filePath, content),
         deleteFile: async ({ filePath }) => storage.deleteOfflineSyncFile(filePath),
       });

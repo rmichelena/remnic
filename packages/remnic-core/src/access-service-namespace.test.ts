@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -180,6 +181,60 @@ test("offlineSyncFiles reports symlink requested paths as input errors", async (
         error instanceof EngramAccessInputError &&
         /buildOfflineSyncSnapshotForPaths: record path targets a symlink/.test(error.message),
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("offlineSyncSnapshot ignores client capture time for server fast-base scans", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-offline-snapshot-client-clock-"));
+  try {
+    const relPath = "facts/a.md";
+    const filePath = path.join(root, relPath);
+    const oldContent = Buffer.from("alpha");
+    const newContent = Buffer.from("bravo");
+    const mtimeMs = 1_700_000_000_000;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, oldContent);
+    await utimes(filePath, mtimeMs / 1000, mtimeMs / 1000);
+    const baseFile = {
+      path: relPath,
+      sha256: createHash("sha256").update(oldContent).digest("hex"),
+      bytes: oldContent.byteLength,
+      mtimeMs,
+    };
+    await writeFile(filePath, newContent);
+    await utimes(filePath, mtimeMs / 1000, mtimeMs / 1000);
+
+    const { service } = makeService();
+    (service as unknown as {
+      orchestrator: {
+        config: PluginConfig;
+        getStorage(namespace: string): Promise<StorageManager>;
+      };
+    }).orchestrator.getStorage = async () => ({
+      dir: root,
+      async readOfflineSyncFile(targetPath: string) {
+        return readFile(targetPath);
+      },
+      async digestOfflineSyncFile(targetPath: string) {
+        const content = await readFile(targetPath);
+        return {
+          sha256: createHash("sha256").update(content).digest("hex"),
+          bytes: content.byteLength,
+        };
+      },
+    } as unknown as StorageManager);
+
+    const snapshot = await service.offlineSyncSnapshot({
+      namespace: "team",
+      principal: "reader",
+      includeContent: false,
+      baseFiles: [baseFile],
+      baseCapturedAt: new Date(Date.now() + 60_000),
+    });
+
+    assert.equal(snapshot.files[0]?.sha256, createHash("sha256").update(newContent).digest("hex"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

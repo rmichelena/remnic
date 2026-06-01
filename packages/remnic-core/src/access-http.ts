@@ -12,6 +12,7 @@ import { validateRequest, type SchemaName, type SchemaTypeFor } from "./access-s
 import {
   OFFLINE_SYNC_APPLY_MAX_BODY_BYTES,
   OFFLINE_SYNC_FILE_CONTENT_MAX_CHUNK_BYTES,
+  OFFLINE_SYNC_SNAPSHOT_BASE_MAX_BODY_BYTES,
 } from "./offline-sync.js";
 import type { RecallDisclosure, RecallPlanMode } from "./types.js";
 import { isRecallDisclosure } from "./types.js";
@@ -125,6 +126,16 @@ function parseTrustZoneFilter(raw: string | null): TrustZoneName | undefined {
   throw new HttpError(400, "zone must be one of quarantine|working|trusted", "invalid_zone_filter");
 }
 
+function summarizeHttpRequest(req: IncomingMessage): string {
+  const method = req.method ?? "UNKNOWN";
+  try {
+    const parsed = new URL(req.url ?? "/", "http://localhost");
+    return `${method} ${parsed.pathname}`;
+  } catch {
+    return `${method} ${(req.url ?? "/").split("?")[0]}`;
+  }
+}
+
 /**
  * Decode a `:peerId` URL path segment, converting malformed percent-encoded
  * input (e.g., `%E0%A4%A`) into a 400 client error rather than letting
@@ -217,6 +228,10 @@ export class EngramAccessHttpServer {
             res.destroy(err as Error);
             return;
           }
+          log.error(
+            `engram access HTTP internal error [${correlationId}] ${summarizeHttpRequest(req)}`,
+            err,
+          );
           this.respondJson(res, 500, { error: "internal_error", code: "internal_error" });
         });
       });
@@ -632,6 +647,27 @@ export class EngramAccessHttpServer {
 
     if (
       req.method === "POST" &&
+      (pathname === "/engram/v1/offline-sync/snapshot" || pathname === "/remnic/v1/offline-sync/snapshot")
+    ) {
+      const body = await this.readValidatedBody(
+        req,
+        "offlineSyncSnapshot",
+        OFFLINE_SYNC_SNAPSHOT_BASE_MAX_BODY_BYTES,
+      );
+      const result = await this.service.offlineSyncSnapshot({
+        namespace: this.resolveNamespace(req, body.namespace),
+        principal: this.resolveRequestPrincipal(req),
+        includeTranscripts: body.includeTranscripts,
+        includeContent: body.includeContent,
+        baseFiles: body.baseFiles,
+        ...(body.baseCapturedAt ? { baseCapturedAt: new Date(body.baseCapturedAt) } : {}),
+      });
+      this.respondJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
       (pathname === "/engram/v1/offline-sync/files" || pathname === "/remnic/v1/offline-sync/files")
     ) {
       const body = await this.readValidatedBody(req, "offlineSyncFiles");
@@ -717,6 +753,7 @@ export class EngramAccessHttpServer {
         namespace: this.resolveNamespace(req, body.namespace),
         principal: this.resolveRequestPrincipal(req),
         changeset: body.changeset,
+        returnCurrentFiles: body.returnCurrentFiles,
       });
       this.respondJson(res, 200, result);
       return;
