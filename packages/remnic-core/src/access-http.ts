@@ -646,6 +646,42 @@ export class EngramAccessHttpServer {
     }
 
     if (
+      req.method === "GET" &&
+      (pathname === "/engram/v1/offline-sync/snapshot-stream" ||
+        pathname === "/remnic/v1/offline-sync/snapshot-stream")
+    ) {
+      const includeTranscriptsRaw = parsed.searchParams.get("include_transcripts");
+      const includeContentRaw = parsed.searchParams.get("content");
+      if (
+        includeTranscriptsRaw !== null &&
+        includeTranscriptsRaw !== "true" &&
+        includeTranscriptsRaw !== "false"
+      ) {
+        throw new EngramAccessInputError(
+          `include_transcripts must be one of: true, false (got: ${includeTranscriptsRaw})`,
+        );
+      }
+      if (
+        includeContentRaw !== null &&
+        includeContentRaw !== "false"
+      ) {
+        throw new EngramAccessInputError("snapshot-stream content must be false");
+      }
+      const namespaceParam = parsed.searchParams.get("namespace");
+      const result = await this.service.offlineSyncSnapshotStream({
+        namespace: this.resolveNamespace(
+          req,
+          namespaceParam && namespaceParam.length > 0 ? namespaceParam : undefined,
+        ),
+        principal: this.resolveRequestPrincipal(req),
+        includeTranscripts: includeTranscriptsRaw !== "false",
+        includeContent: false,
+      });
+      await this.respondOfflineSnapshotStream(res, result);
+      return;
+    }
+
+    if (
       req.method === "POST" &&
       (pathname === "/engram/v1/offline-sync/snapshot" || pathname === "/remnic/v1/offline-sync/snapshot")
     ) {
@@ -1903,6 +1939,62 @@ export class EngramAccessHttpServer {
       res.setHeader("x-request-id", cid);
     }
     res.end(body);
+  }
+
+  private async respondOfflineSnapshotStream(
+    res: ServerResponse,
+    snapshot: Awaited<ReturnType<EngramAccessService["offlineSyncSnapshotStream"]>>,
+  ): Promise<void> {
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    const cid = correlationIdStore.getStore();
+    if (cid) {
+      res.setHeader("x-request-id", cid);
+    }
+    const waitForDrainOrClose = async (): Promise<boolean> => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        res.off("drain", onDrain);
+        res.off("close", onClose);
+        res.off("error", onError);
+      };
+      const onDrain = () => {
+        cleanup();
+        resolve(true);
+      };
+      const onClose = () => {
+        cleanup();
+        resolve(false);
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      res.once("drain", onDrain);
+      res.once("close", onClose);
+      res.once("error", onError);
+    });
+    const writeLine = async (payload: unknown): Promise<boolean> => {
+      if (res.destroyed || res.writableEnded) return false;
+      if (res.write(`${JSON.stringify(payload)}\n`)) return true;
+      if (res.destroyed || res.writableEnded) return false;
+      return waitForDrainOrClose();
+    };
+    if (!await writeLine({
+      type: "snapshot",
+      namespace: snapshot.namespace,
+      format: snapshot.format,
+      schemaVersion: snapshot.schemaVersion,
+      createdAt: snapshot.createdAt,
+      sourceId: snapshot.sourceId,
+      includeTranscripts: snapshot.includeTranscripts,
+    })) return;
+    for await (const file of snapshot.files) {
+      if (!await writeLine({ type: "file", file })) return;
+    }
+    if (!res.destroyed && !res.writableEnded) {
+      res.end();
+    }
   }
 
   private respondBinary(
