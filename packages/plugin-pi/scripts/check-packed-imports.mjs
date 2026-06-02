@@ -15,6 +15,7 @@ try {
   const tarballPath = packPackage();
   packedFiles = new Set(listPackedFiles(tarballPath));
   assertPublishableDependencyRanges(tarballPath);
+  assertPiExtensionEntriesResolveFromPackedPackage(tarballPath);
 } finally {
   fs.rmSync(packRoot, { recursive: true, force: true });
 }
@@ -84,6 +85,69 @@ function assertPublishableDependencyRanges(tarballPath) {
         throw new Error(`Packed @remnic/plugin-pi ${section}.${name} uses non-publishable range ${range}`);
       }
     }
+  }
+}
+
+function assertPiExtensionEntriesResolveFromPackedPackage(tarballPath) {
+  const packageJson = JSON.parse(
+    execFileSync("tar", ["-xOf", tarballPath, "package/package.json"], { encoding: "utf8" })
+  );
+  const extensions = packageJson?.pi?.extensions;
+  if (!Array.isArray(extensions)) return;
+
+  const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-plugin-pi-resolve-"));
+  try {
+    const installRoot = path.join(tempProject, "node_modules", ...packageJson.name.split("/"));
+    fs.mkdirSync(installRoot, { recursive: true });
+    execFileSync("tar", ["-xzf", tarballPath, "-C", installRoot, "--strip-components=1"]);
+
+    for (const extensionPath of extensions) {
+      const specifier = piManifestPathToPackageSpecifier(packageJson.name, extensionPath);
+      assertPackageSpecifierResolves(tempProject, specifier);
+    }
+  } finally {
+    fs.rmSync(tempProject, { recursive: true, force: true });
+  }
+}
+
+function piManifestPathToPackageSpecifier(packageName, manifestPath) {
+  if (typeof manifestPath !== "string" || manifestPath.length === 0) {
+    throw new Error(`Packed @remnic/plugin-pi pi.extensions entry must be a non-empty string: ${manifestPath}`);
+  }
+  if (manifestPath === ".") return packageName;
+  if (manifestPath.startsWith("!") || hasGlobPattern(manifestPath)) {
+    throw new Error(`Packed @remnic/plugin-pi pi.extensions entry must be an exact package path: ${manifestPath}`);
+  }
+  if (path.isAbsolute(manifestPath) || manifestPath.startsWith("..")) {
+    throw new Error(`Packed @remnic/plugin-pi pi.extensions entry must stay inside the package: ${manifestPath}`);
+  }
+
+  const packagePath = manifestPath.startsWith("./") ? manifestPath.slice(2) : manifestPath;
+  if (!packagePath || packagePath.startsWith("../") || packagePath.includes("/../")) {
+    throw new Error(`Packed @remnic/plugin-pi pi.extensions entry must stay inside the package: ${manifestPath}`);
+  }
+  return `${packageName}/${packagePath}`;
+}
+
+function hasGlobPattern(value) {
+  return /[*?[\]{}]/.test(value);
+}
+
+function assertPackageSpecifierResolves(cwd, specifier) {
+  try {
+    execFileSync(
+      process.execPath,
+      ["--input-type=module", "-e", "console.log(import.meta.resolve(process.env.SPECIFIER))"],
+      {
+        cwd,
+        env: { ...process.env, SPECIFIER: specifier },
+        encoding: "utf8",
+      }
+    );
+  } catch (err) {
+    throw new Error(`Packed @remnic/plugin-pi pi.extensions entry is not exported by package.json: ${specifier}`, {
+      cause: err,
+    });
   }
 }
 
