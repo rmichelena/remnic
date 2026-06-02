@@ -794,6 +794,8 @@ export { coerceInstallExtension } from "./connectors/coerce.js";
 export {
   CONNECTOR_ID_PATTERN,
   isValidConnectorId,
+  persistableConnectorConfig,
+  redactConnectorConfigSecrets,
   LiveConnectorRegistry,
   LiveConnectorRegistryError,
   listConnectorStates,

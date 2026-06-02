@@ -643,6 +643,14 @@ export function createNotionConnector(
       return validateNotionConfig(raw) as unknown as ConnectorConfig;
     },
 
+    persistConfig(validated: ConnectorConfig): ConnectorConfig {
+      const config = validateNotionConfig(validated);
+      return Object.freeze({
+        databaseIds: config.databaseIds,
+        pollIntervalMs: config.pollIntervalMs,
+      });
+    },
+
     async syncIncremental(args: SyncIncrementalArgs): Promise<SyncIncrementalResult> {
       const config = validateNotionConfig(args.config);
       throwIfAborted(args.abortSignal);
