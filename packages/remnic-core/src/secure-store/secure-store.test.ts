@@ -14,11 +14,11 @@
  * silently regress them.
  */
 
-import { PassThrough } from "node:stream";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import {
@@ -32,6 +32,7 @@ import {
   parseEnvelope,
   seal,
 } from "./cipher.js";
+import { renderInitReport, renderLockReport, renderStatusReport, renderUnlockReport } from "./cli-renderer.js";
 import {
   HEADER_FORMAT,
   HEADER_FORMAT_VERSION,
@@ -40,30 +41,18 @@ import {
   validateHeader,
 } from "./header.js";
 import {
-  FILE_FORMAT_FLAGS,
-  FILE_FORMAT_VERSION,
-  MAGIC_BYTES,
-  SecureStoreDecryptError,
-  decryptFileBody,
-  decryptMemoryDirToPlaintext,
-  encryptFileBody,
-  filePathAad,
-  migrateMemoryDirToEncrypted,
-  readMaybeEncryptedFile,
-} from "./secure-fs.js";
-import {
+  type Argon2idParams,
   DEFAULT_ARGON2ID_PARAMS,
   DEFAULT_SCRYPT_PARAMS,
   KDF_KEY_LENGTH,
   KDF_SALT_LENGTH,
+  type ScryptParams,
   constantTimeEqual,
   deriveKey,
   deriveKeyArgon2id,
   deriveKeyScrypt,
   validateArgon2idParams,
   validateScryptParams,
-  type Argon2idParams,
-  type ScryptParams,
 } from "./kdf.js";
 import {
   METADATA_FORMAT,
@@ -76,11 +65,18 @@ import {
 } from "./metadata.js";
 import { createPassphraseReader } from "./passphrase-reader.js";
 import {
-  renderInitReport,
-  renderLockReport,
-  renderStatusReport,
-  renderUnlockReport,
-} from "./cli-renderer.js";
+  FILE_FORMAT_FLAGS,
+  FILE_FORMAT_VERSION,
+  MAGIC_BYTES,
+  SecureStoreDecryptError,
+  decryptFileBody,
+  decryptMemoryDirToPlaintext,
+  encryptFileBody,
+  filePathAad,
+  isEncryptedFile,
+  migrateMemoryDirToEncrypted,
+  readMaybeEncryptedFile,
+} from "./secure-fs.js";
 
 /** Cheap scrypt params for tests — still hex-correct but ~milliseconds. */
 const FAST_SCRYPT: ScryptParams = {
@@ -153,7 +149,7 @@ test("secure-store CLI renderers describe process-local unlock scope, not daemon
       unlockedAt: "2026-05-21T00:00:01.000Z",
       algorithm: "scrypt",
     }),
-    /unlocked in this process/,
+    /unlocked in this process/
   );
   assert.match(renderLockReport({ ok: true, cleared: true }), /this process's in-memory keyring/);
   assert.match(
@@ -169,7 +165,7 @@ test("secure-store CLI renderers describe process-local unlock scope, not daemon
         salt: Buffer.alloc(KDF_SALT_LENGTH, 0x22).toString("hex"),
       },
     }),
-    /lockedInThisProcess: no/,
+    /lockedInThisProcess: no/
   );
 });
 
@@ -179,10 +175,7 @@ test("deriveKeyScrypt rejects empty passphrase", () => {
 });
 
 test("deriveKeyScrypt rejects too-short salt", () => {
-  assert.throws(
-    () => deriveKeyScrypt("pw", Buffer.alloc(4, 0), FAST_SCRYPT),
-    /salt/,
-  );
+  assert.throws(() => deriveKeyScrypt("pw", Buffer.alloc(4, 0), FAST_SCRYPT), /salt/);
 });
 
 test("deriveKey('scrypt') dispatches to scryptSync", () => {
@@ -219,29 +212,14 @@ test("deriveKey('argon2id') dispatches to Argon2id", () => {
 });
 
 test("validateArgon2idParams rejects invalid values", () => {
-  assert.throws(
-    () => validateArgon2idParams({ ...FAST_ARGON2ID, memoryKiB: 0 }),
-    /memoryKiB/,
-  );
-  assert.throws(
-    () => validateArgon2idParams({ ...FAST_ARGON2ID, iterations: 0 }),
-    /iterations/,
-  );
-  assert.throws(
-    () => validateArgon2idParams({ ...FAST_ARGON2ID, parallelism: 0 }),
-    /parallelism/,
-  );
-  assert.throws(
-    () => validateArgon2idParams({ ...FAST_ARGON2ID, keyLength: 16 }),
-    /keyLength/,
-  );
+  assert.throws(() => validateArgon2idParams({ ...FAST_ARGON2ID, memoryKiB: 0 }), /memoryKiB/);
+  assert.throws(() => validateArgon2idParams({ ...FAST_ARGON2ID, iterations: 0 }), /iterations/);
+  assert.throws(() => validateArgon2idParams({ ...FAST_ARGON2ID, parallelism: 0 }), /parallelism/);
+  assert.throws(() => validateArgon2idParams({ ...FAST_ARGON2ID, keyLength: 16 }), /keyLength/);
 });
 
 test("validateScryptParams rejects non-power-of-2 N", () => {
-  assert.throws(
-    () => validateScryptParams({ ...FAST_SCRYPT, N: 1000 }),
-    /power of 2/,
-  );
+  assert.throws(() => validateScryptParams({ ...FAST_SCRYPT, N: 1000 }), /power of 2/);
 });
 
 test("validateScryptParams rejects N < 2", () => {
@@ -312,7 +290,7 @@ test("decryptFileBody reports truncated envelopes as structural errors", () => {
       assert.equal(error instanceof SecureStoreDecryptError, false);
       assert.match(error.message, /envelope too short/);
       return true;
-    },
+    }
   );
 });
 
@@ -335,10 +313,7 @@ test("seal envelope layout matches the documented format", () => {
   const sealed = seal(key, salt, Buffer.from("payload"));
   assert.equal(sealed[ENVELOPE_LAYOUT.version], ENVELOPE_VERSION);
   // Salt bytes round-trip exactly.
-  const saltSlice = sealed.subarray(
-    ENVELOPE_LAYOUT.salt,
-    ENVELOPE_LAYOUT.salt + ENVELOPE_SALT_LENGTH,
-  );
+  const saltSlice = sealed.subarray(ENVELOPE_LAYOUT.salt, ENVELOPE_LAYOUT.salt + ENVELOPE_SALT_LENGTH);
   assert.ok(saltSlice.equals(salt));
   // Total length = header + ciphertext("payload" is 7 bytes).
   assert.equal(sealed.length, ENVELOPE_HEADER_SIZE + 7);
@@ -419,10 +394,7 @@ test("open fails when AAD is mismatched", () => {
 
 test("seal rejects key of wrong length", () => {
   const salt = generateSalt();
-  assert.throws(
-    () => seal(Buffer.alloc(16), salt, Buffer.from("x")),
-    /AES-256-GCM/,
-  );
+  assert.throws(() => seal(Buffer.alloc(16), salt, Buffer.from("x")), /AES-256-GCM/);
 });
 
 test("seal rejects salt of wrong length", () => {
@@ -494,10 +466,7 @@ test("buildMetadata defaults createdAt to a parseable ISO string when omitted", 
 });
 
 test("buildMetadata rejects salt of wrong length", () => {
-  assert.throws(
-    () => buildMetadata({ algorithm: "scrypt", salt: Buffer.alloc(8) }),
-    /salt/,
-  );
+  assert.throws(() => buildMetadata({ algorithm: "scrypt", salt: Buffer.alloc(8) }), /salt/);
 });
 
 test("parseMetadata rejects non-JSON input", () => {
@@ -600,11 +569,8 @@ test("serializeMetadata produces stable top-level key order", () => {
   const kdfIdx = json.indexOf('"kdf"');
   const createdAtIdx = json.indexOf('"createdAt"');
   assert.ok(
-    formatIdx >= 0 &&
-      formatIdx < formatVersionIdx &&
-      formatVersionIdx < kdfIdx &&
-      kdfIdx < createdAtIdx,
-    `unexpected top-level key order in: ${json}`,
+    formatIdx >= 0 && formatIdx < formatVersionIdx && formatVersionIdx < kdfIdx && kdfIdx < createdAtIdx,
+    `unexpected top-level key order in: ${json}`
   );
 });
 
@@ -641,10 +607,7 @@ test("secure-store migration keeps namespaced file AAD readable through memory r
 
     assert.equal(migrated.encrypted, 1);
     assert.deepEqual(migrated.errors, []);
-    assert.equal(
-      await readMaybeEncryptedFile(filePath, key, memoryDir),
-      "namespaced fact",
-    );
+    assert.equal(await readMaybeEncryptedFile(filePath, key, memoryDir), "namespaced fact");
 
     const decrypted = await decryptMemoryDirToPlaintext(memoryDir, key);
     assert.equal(decrypted.decrypted, 1);
@@ -652,6 +615,117 @@ test("secure-store migration keeps namespaced file AAD readable through memory r
     assert.equal(await readFile(filePath, "utf8"), "namespaced fact");
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("secure-store migration treats missing memory roots as empty", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-missing-root-"));
+  try {
+    const missingMemoryDir = path.join(tempRoot, "missing-memory");
+    const key = deriveKeyScrypt("missing-root", Buffer.alloc(KDF_SALT_LENGTH, 0x55), FAST_SCRYPT);
+
+    const migrated = await migrateMemoryDirToEncrypted(missingMemoryDir, key);
+    assert.deepEqual(migrated, { encrypted: 0, skipped: 0, errors: [] });
+
+    const decrypted = await decryptMemoryDirToPlaintext(missingMemoryDir, key);
+    assert.deepEqual(decrypted, { decrypted: 0, skipped: 0, errors: [] });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("secure-store migration scans the normalized root for symlink dot-dot paths", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-root-dotdot-"));
+  try {
+    const baseDir = path.join(tempRoot, "base");
+    const outsideParent = path.join(tempRoot, "outside-parent");
+    const outsideTarget = path.join(outsideParent, "target");
+    const memoryLink = path.join(baseDir, "memory-link");
+    const traversalRoot = `${memoryLink}${path.sep}..`;
+    const insideFilePath = path.join(baseDir, "facts", "note.md");
+    const outsideFilePath = path.join(outsideParent, "facts", "note.md");
+    await mkdir(path.dirname(insideFilePath), { recursive: true });
+    await mkdir(path.dirname(outsideFilePath), { recursive: true });
+    await mkdir(outsideTarget, { recursive: true });
+    await writeFile(insideFilePath, "inside fact", "utf8");
+    await writeFile(outsideFilePath, "outside fact", "utf8");
+    await symlink(outsideTarget, memoryLink, "dir");
+
+    const key = deriveKeyScrypt("dotdot-root-symlink", Buffer.alloc(KDF_SALT_LENGTH, 0x56), FAST_SCRYPT);
+    const migrated = await migrateMemoryDirToEncrypted(traversalRoot, key);
+
+    assert.equal(migrated.encrypted, 1);
+    assert.equal(isEncryptedFile(await readFile(insideFilePath)), true);
+    assert.equal(await readFile(outsideFilePath, "utf8"), "outside fact");
+
+    const decrypted = await decryptMemoryDirToPlaintext(traversalRoot, key);
+    assert.equal(decrypted.decrypted, 1);
+    assert.equal(await readFile(insideFilePath, "utf8"), "inside fact");
+    assert.equal(await readFile(outsideFilePath, "utf8"), "outside fact");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("secure-store migration rejects symlinked memory roots without rewriting the target", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-root-symlink-"));
+  try {
+    const outsideDir = path.join(tempRoot, "outside");
+    const memoryDir = path.join(tempRoot, "memory-link");
+    const filePath = path.join(outsideDir, "facts", "note.md");
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, "outside fact", "utf8");
+    await symlink(outsideDir, memoryDir, "dir");
+
+    const key = deriveKeyScrypt("root-symlink", Buffer.alloc(KDF_SALT_LENGTH, 0x66), FAST_SCRYPT);
+    await assert.rejects(
+      () => migrateMemoryDirToEncrypted(`${memoryDir}${path.sep}`, key),
+      /root must not be a symlink/
+    );
+    await assert.rejects(
+      () => migrateMemoryDirToEncrypted(`${memoryDir}${path.sep}.`, key),
+      /root must not be a symlink/
+    );
+
+    assert.equal(await readFile(filePath, "utf8"), "outside fact");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("secure-store plaintext migration rejects symlinked memory roots without rewriting the target", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-decrypt-root-symlink-"));
+  try {
+    const outsideDir = path.join(tempRoot, "outside");
+    const memoryDir = path.join(tempRoot, "memory-link");
+    const realFilePath = path.join(outsideDir, "facts", "note.md");
+    const linkedFilePath = path.join(memoryDir, "facts", "note.md");
+    await mkdir(path.dirname(realFilePath), { recursive: true });
+    await symlink(outsideDir, memoryDir, "dir");
+
+    const key = deriveKeyScrypt("decrypt-root-symlink", Buffer.alloc(KDF_SALT_LENGTH, 0x77), FAST_SCRYPT);
+    await writeFile(
+      realFilePath,
+      encryptFileBody("outside encrypted fact", key, filePathAad(linkedFilePath, memoryDir))
+    );
+
+    await assert.rejects(
+      () => decryptMemoryDirToPlaintext(`${memoryDir}${path.sep}`, key),
+      /root must not be a symlink/
+    );
+    await assert.rejects(
+      () => decryptMemoryDirToPlaintext(`${memoryDir}${path.sep}.`, key),
+      /root must not be a symlink/
+    );
+
+    const stillEncrypted = await readFile(realFilePath);
+    assert.equal(isEncryptedFile(stillEncrypted), true);
+    assert.equal(
+      decryptFileBody(stillEncrypted, key, filePathAad(linkedFilePath, memoryDir)).toString("utf8"),
+      "outside encrypted fact"
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
   }
 });
 
@@ -663,17 +737,10 @@ test("secure-store can recover namespaced files encrypted with legacy namespace 
     await mkdir(path.dirname(filePath), { recursive: true });
 
     const key = deriveKeyScrypt("legacy-namespace-aad", Buffer.alloc(KDF_SALT_LENGTH, 0x55), FAST_SCRYPT);
-    const legacyEncrypted = encryptFileBody(
-      "legacy namespaced fact",
-      key,
-      filePathAad(filePath, namespaceRoot),
-    );
+    const legacyEncrypted = encryptFileBody("legacy namespaced fact", key, filePathAad(filePath, namespaceRoot));
     await writeFile(filePath, legacyEncrypted);
 
-    assert.equal(
-      await readMaybeEncryptedFile(filePath, key, memoryDir),
-      "legacy namespaced fact",
-    );
+    assert.equal(await readMaybeEncryptedFile(filePath, key, memoryDir), "legacy namespaced fact");
 
     const decrypted = await decryptMemoryDirToPlaintext(memoryDir, key);
     assert.equal(decrypted.decrypted, 1);
@@ -703,7 +770,7 @@ test("metadata rejects keyLength != 32 (codex P2 — match cipher AES-256)", () 
   meta.kdf.params.keyLength = 16;
   assert.throws(
     () => validateMetadata(meta as unknown as Parameters<typeof validateMetadata>[0]),
-    /keyLength must be 32/,
+    /keyLength must be 32/
   );
 });
 
@@ -722,16 +789,11 @@ test("parseHeader rejects odd-length verifier hex (thread 6 — even-length guar
   const badJson = JSON.stringify({
     format: HEADER_FORMAT,
     formatVersion: HEADER_FORMAT_VERSION,
-    metadata: JSON.parse(
-      JSON.stringify(header.metadata),
-    ),
+    metadata: JSON.parse(JSON.stringify(header.metadata)),
     verifier: header.verifier.slice(0, -1), // odd length
     createdAt: header.createdAt,
   });
-  assert.throws(
-    () => parseHeader(badJson),
-    /even length|even/i,
-  );
+  assert.throws(() => parseHeader(badJson), /even length|even/i);
 });
 
 test("validateHeader rejects odd-length verifier hex (thread 6 — even-length guard)", () => {
@@ -743,10 +805,7 @@ test("validateHeader rejects odd-length verifier hex (thread 6 — even-length g
     params: { N: 1 << 10, r: 8, p: 1, keyLength: 32, maxmem: 64 * 1024 * 1024 },
   });
   const bad = { ...header, verifier: header.verifier.slice(0, -1) }; // odd length
-  assert.throws(
-    () => validateHeader(bad),
-    /even length|even/i,
-  );
+  assert.throws(() => validateHeader(bad), /even length|even/i);
 });
 
 test("parseHeader rejects non-hex characters in verifier (thread 6)", () => {
@@ -761,13 +820,10 @@ test("parseHeader rejects non-hex characters in verifier (thread 6)", () => {
     format: HEADER_FORMAT,
     formatVersion: HEADER_FORMAT_VERSION,
     metadata: JSON.parse(JSON.stringify(header.metadata)),
-    verifier: "zz" + header.verifier.slice(2), // non-hex prefix
+    verifier: `zz${header.verifier.slice(2)}`, // non-hex prefix
     createdAt: header.createdAt,
   });
-  assert.throws(
-    () => parseHeader(badJson),
-    /hex/i,
-  );
+  assert.throws(() => parseHeader(badJson), /hex/i);
 });
 
 // ─── passphrase-reader.ts — Thread 5: prompts to stderr (#737) ──────────
@@ -800,13 +856,10 @@ test("non-TTY prompt is written to errorStream, not output (thread 5)", async ()
   // The prompt must appear on stderr, not stdout.
   const stderr = stderrChunks.join("");
   const stdout = stdoutChunks.join("");
-  assert.ok(
-    stderr.includes("Enter passphrase: "),
-    `expected prompt on stderr but got: ${JSON.stringify(stderr)}`,
-  );
+  assert.ok(stderr.includes("Enter passphrase: "), `expected prompt on stderr but got: ${JSON.stringify(stderr)}`);
   assert.ok(
     !stdout.includes("Enter passphrase: "),
-    `prompt must not appear on stdout but got: ${JSON.stringify(stdout)}`,
+    `prompt must not appear on stdout but got: ${JSON.stringify(stdout)}`
   );
 });
 
@@ -850,11 +903,7 @@ test("backspace removes full non-BMP (emoji) code point atomically (thread 7)", 
 
   const result = await readPromise;
 
-  assert.equal(
-    result,
-    "a",
-    `expected 'a' after backspace removed the emoji, but got: ${JSON.stringify(result)}`,
-  );
+  assert.equal(result, "a", `expected 'a' after backspace removed the emoji, but got: ${JSON.stringify(result)}`);
 });
 
 test("backspace on BMP character removes exactly one character (thread 7 — regression)", async () => {
