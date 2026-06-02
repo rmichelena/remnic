@@ -241,8 +241,7 @@ export async function readMaybeEncryptedFileBuffer(
         "Run `remnic secure-store unlock` to decrypt.",
     );
   }
-  const aad = filePathAad(filePath, memoryDir);
-  return decryptFileBody(buf, key, aad);
+  return decryptFileBodyForPath(buf, key, filePath, memoryDir);
 }
 
 export async function readMaybeEncryptedFile(
@@ -498,8 +497,7 @@ export async function decryptMemoryDirToPlaintext(
         continue;
       }
 
-      const aad = filePathAad(filePath, dir);
-      const plaintext = decryptFileBody(buf, key, aad);
+      const plaintext = decryptFileBodyForPath(buf, key, filePath, dir);
       const tempPath = uniqueAtomicTempPath(filePath, "dec-tmp");
       try {
         await writeFile(tempPath, plaintext, { mode: 0o600 });
@@ -530,6 +528,42 @@ export async function decryptMemoryDirToPlaintext(
 
 function uniqueAtomicTempPath(filePath: string, label: string): string {
   return `${filePath}.${label}-${process.pid}-${Date.now()}-${randomUUID()}`;
+}
+
+function decryptFileBodyForPath(
+  buf: Buffer,
+  key: Buffer,
+  filePath: string,
+  memoryDir?: string,
+): Buffer {
+  const aad = filePathAad(filePath, memoryDir);
+  try {
+    return decryptFileBody(buf, key, aad);
+  } catch (err) {
+    if (!(err instanceof SecureStoreDecryptError)) {
+      throw err;
+    }
+    const legacyRoot = legacyNamespaceAadRootForFile(filePath, memoryDir);
+    if (!legacyRoot) {
+      throw err;
+    }
+    try {
+      return decryptFileBody(buf, key, filePathAad(filePath, legacyRoot));
+    } catch {
+      throw err;
+    }
+  }
+}
+
+function legacyNamespaceAadRootForFile(filePath: string, memoryDir?: string): string | null {
+  if (!memoryDir || !path.isAbsolute(filePath)) return null;
+  const rel = path.relative(memoryDir, filePath);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts[0] === "namespaces" && parts.length >= 3 && parts[1]) {
+    return path.join(memoryDir, "namespaces", parts[1]);
+  }
+  return null;
 }
 
 /**

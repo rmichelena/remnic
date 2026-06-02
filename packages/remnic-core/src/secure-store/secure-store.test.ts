@@ -46,6 +46,8 @@ import {
   SecureStoreDecryptError,
   decryptFileBody,
   decryptMemoryDirToPlaintext,
+  encryptFileBody,
+  filePathAad,
   migrateMemoryDirToEncrypted,
   readMaybeEncryptedFile,
 } from "./secure-fs.js";
@@ -648,6 +650,35 @@ test("secure-store migration keeps namespaced file AAD readable through memory r
     assert.equal(decrypted.decrypted, 1);
     assert.deepEqual(decrypted.errors, []);
     assert.equal(await readFile(filePath, "utf8"), "namespaced fact");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("secure-store can recover namespaced files encrypted with legacy namespace AAD", async () => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-legacy-aad-"));
+  try {
+    const namespaceRoot = path.join(memoryDir, "namespaces", "project-a");
+    const filePath = path.join(namespaceRoot, "facts", "note.md");
+    await mkdir(path.dirname(filePath), { recursive: true });
+
+    const key = deriveKeyScrypt("legacy-namespace-aad", Buffer.alloc(KDF_SALT_LENGTH, 0x55), FAST_SCRYPT);
+    const legacyEncrypted = encryptFileBody(
+      "legacy namespaced fact",
+      key,
+      filePathAad(filePath, namespaceRoot),
+    );
+    await writeFile(filePath, legacyEncrypted);
+
+    assert.equal(
+      await readMaybeEncryptedFile(filePath, key, memoryDir),
+      "legacy namespaced fact",
+    );
+
+    const decrypted = await decryptMemoryDirToPlaintext(memoryDir, key);
+    assert.equal(decrypted.decrypted, 1);
+    assert.deepEqual(decrypted.errors, []);
+    assert.equal(await readFile(filePath, "utf8"), "legacy namespaced fact");
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
   }
