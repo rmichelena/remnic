@@ -443,7 +443,7 @@ export async function migrateMemoryDirToEncrypted(
         }
       }
       const content = buf.toString("utf8");
-      const aad = filePathAad(filePath, storageAadRootForFile(filePath, dir));
+      const aad = filePathAad(filePath, dir);
       const encrypted = encryptFileBody(content, key, aad);
 
       // Atomic write: temp → rename (gotcha #54).
@@ -498,7 +498,7 @@ export async function decryptMemoryDirToPlaintext(
         continue;
       }
 
-      const aad = filePathAad(filePath, storageAadRootForFile(filePath, dir));
+      const aad = filePathAad(filePath, dir);
       const plaintext = decryptFileBody(buf, key, aad);
       const tempPath = uniqueAtomicTempPath(filePath, "dec-tmp");
       try {
@@ -609,16 +609,6 @@ function normalizeStorageRelativePath(rel: string): string {
     return parts.slice(2).join("/");
   }
   return normalized;
-}
-
-function storageAadRootForFile(filePath: string, rootDir: string): string {
-  const rel = path.relative(rootDir, filePath);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return rootDir;
-  const parts = rel.split(path.sep);
-  if (parts[0] === "namespaces" && parts.length >= 3 && parts[1]) {
-    return path.join(rootDir, "namespaces", parts[1]);
-  }
-  return rootDir;
 }
 
 const ENCRYPTABLE_MARKDOWN_STORAGE_ROOTS = new Set([
