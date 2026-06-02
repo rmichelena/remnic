@@ -303,6 +303,9 @@ importers:
       '@remnic/core':
         specifier: workspace:^
         version: link:../remnic-core
+      '@sinclair/typebox':
+        specifier: ^0.34.0
+        version: 0.34.49
       openai:
         specifier: ^6.0.0
         version: 6.33.0(zod@4.0.0)

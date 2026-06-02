@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -9,9 +9,7 @@ const sourceRoot = path.join(packageRoot, "src");
 test("OpenClaw plugin imports Remnic core through package exports", async () => {
   const violations: string[] = [];
   const forbiddenCoreSourcePattern = new RegExp(
-    String.raw`(?:^|['"])` +
-      String.raw`(?:\.\./)+` +
-      String.raw`(?:packages/)?remnic-core/src(?:/|\.|['"])`,
+    String.raw`(?:^|['"])` + String.raw`(?:\.\./)+` + String.raw`(?:packages/)?remnic-core/src(?:/|\.|['"])`
   );
 
   for (const filePath of await listTypeScriptFiles(sourceRoot)) {
@@ -25,44 +23,44 @@ test("OpenClaw plugin imports Remnic core through package exports", async () => 
 });
 
 test("OpenClaw plugin type-check config resolves @remnic/core to one source surface", async () => {
-  const tsconfig = await readFile(
-    path.join(packageRoot, "tsconfig.check.json"),
-    "utf8",
-  );
+  const tsconfig = await readFile(path.join(packageRoot, "tsconfig.check.json"), "utf8");
   const config = JSON.parse(tsconfig) as {
     compilerOptions?: { paths?: Record<string, unknown> };
   };
   const paths = config.compilerOptions?.paths ?? {};
-  assert.deepEqual(paths["@remnic/core"], [
-    "packages/remnic-core/src/index.ts",
-  ]);
-  assert.deepEqual(paths["@remnic/core/*"], [
-    "packages/remnic-core/src/*",
-  ]);
+  assert.deepEqual(paths["@remnic/core"], ["packages/remnic-core/src/index.ts"]);
+  assert.deepEqual(paths["@remnic/core/*"], ["packages/remnic-core/src/*"]);
 
   for (const [key, value] of Object.entries(paths)) {
     if (key === "@remnic/core" || key.startsWith("@remnic/core/")) {
       assert.ok(
         Array.isArray(value) &&
-          value.every((entry) =>
-            typeof entry === "string" &&
-            entry.startsWith("packages/remnic-core/src/"),
-          ),
+          value.every((entry) => typeof entry === "string" && entry.startsWith("packages/remnic-core/src/"))
       );
     }
   }
 });
 
 test("OpenClaw plugin source manifest keeps @remnic/core workspace-linked", async () => {
-  const manifest = JSON.parse(
-    await readFile(path.join(packageRoot, "package.json"), "utf8"),
-  ) as {
+  const manifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
   };
 
   assert.equal(manifest.dependencies?.["@remnic/core"], "workspace:^");
   assert.equal(manifest.devDependencies?.["@remnic/core"], "workspace:^");
+});
+
+test("OpenClaw plugin declares runtime schema dependencies", async () => {
+  const manifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const shapesSource = await readFile(path.join(sourceRoot, "openclaw-tools", "shapes.ts"), "utf8");
+
+  assert.match(shapesSource, /from "@sinclair\/typebox"/);
+  assert.equal(manifest.dependencies?.["@sinclair/typebox"], "^0.34.0");
+  assert.equal(manifest.devDependencies?.["@sinclair/typebox"], undefined);
 });
 
 async function listTypeScriptFiles(directory: string): Promise<string[]> {
@@ -77,7 +75,7 @@ async function listTypeScriptFiles(directory: string): Promise<string[]> {
         return [entryPath];
       }
       return [];
-    }),
+    })
   );
   return files.flat().sort();
 }
