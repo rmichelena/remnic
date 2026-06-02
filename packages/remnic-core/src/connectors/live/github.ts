@@ -514,6 +514,16 @@ export function createGitHubConnector(
       return validateGitHubConfig(raw) as unknown as ConnectorConfig;
     },
 
+    persistConfig(validated: ConnectorConfig): ConnectorConfig {
+      const config = validateGitHubConfig(validated);
+      return Object.freeze({
+        userLogin: config.userLogin,
+        repos: config.repos,
+        pollIntervalMs: config.pollIntervalMs,
+        includeDiscussions: config.includeDiscussions,
+      });
+    },
+
     async syncIncremental(args: SyncIncrementalArgs): Promise<SyncIncrementalResult> {
       const config = validateGitHubConfig(args.config);
       throwIfAborted(args.abortSignal);

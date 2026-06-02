@@ -848,6 +848,16 @@ export function createGmailConnector(
       return validateGmailConfig(raw) as unknown as ConnectorConfig;
     },
 
+    persistConfig(validated: ConnectorConfig): ConnectorConfig {
+      const config = validateGmailConfig(validated);
+      return Object.freeze({
+        clientId: config.clientId,
+        userId: config.userId,
+        query: config.query,
+        pollIntervalMs: config.pollIntervalMs,
+      });
+    },
+
     async syncIncremental(args: SyncIncrementalArgs): Promise<SyncIncrementalResult> {
       const config = validateGmailConfig(args.config);
       throwIfAborted(args.abortSignal);

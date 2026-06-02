@@ -397,14 +397,22 @@ export function createGoogleDriveConnector(
 
     validateConfig(raw: unknown): ConnectorConfig {
       // Cast to ConnectorConfig (Record<string, unknown>) per framework
-      // contract. The frozen object survives JSON round-trips through the
-      // state store.
+      // contract. Persist only `persistConfig()` output; this runtime object
+      // carries hydrated credentials.
       return validateGoogleDriveConfig(raw) as unknown as ConnectorConfig;
     },
 
+    persistConfig(validated: ConnectorConfig): ConnectorConfig {
+      const config = validateGoogleDriveConfig(validated);
+      return Object.freeze({
+        clientId: config.clientId,
+        pollIntervalMs: config.pollIntervalMs,
+        folderIds: config.folderIds,
+      });
+    },
+
     async syncIncremental(args: SyncIncrementalArgs): Promise<SyncIncrementalResult> {
-      // Re-validate on every pass: the framework persists raw config, and
-      // a JS caller could mutate it between passes.
+      // Re-validate on every pass: a JS caller could mutate it between passes.
       const config = validateGoogleDriveConfig(args.config);
       throwIfAborted(args.abortSignal);
 

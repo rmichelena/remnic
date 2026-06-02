@@ -6,6 +6,10 @@ import test from "node:test";
 
 import {
   CONNECTOR_ID_PATTERN,
+  createGitHubConnector,
+  createGmailConnector,
+  createGoogleDriveConnector,
+  createNotionConnector,
   type ConnectorConfig,
   type ConnectorCursor,
   type ConnectorDocument,
@@ -13,6 +17,8 @@ import {
   type LiveConnector,
   LiveConnectorRegistry,
   LiveConnectorRegistryError,
+  persistableConnectorConfig,
+  redactConnectorConfigSecrets,
   type SyncIncrementalArgs,
   type SyncIncrementalResult,
   isValidConnectorId,
@@ -21,6 +27,10 @@ import {
   withConnectorStateLock,
   writeConnectorState,
 } from "./index.js";
+import {
+  persistableConnectorConfig as persistableConnectorConfigFromRoot,
+  redactConnectorConfigSecrets as redactConnectorConfigSecretsFromRoot,
+} from "../../index.js";
 import {
   _connectorStatePathForTest,
   _refreshConnectorLockForTest,
@@ -120,6 +130,137 @@ test("isValidConnectorId rejects malformed ids", () => {
 test("CONNECTOR_ID_PATTERN matches isValidConnectorId", () => {
   assert.ok(CONNECTOR_ID_PATTERN.test("drive"));
   assert.ok(!CONNECTOR_ID_PATTERN.test("Drive"));
+});
+
+test("redactConnectorConfigSecrets removes nested secret-shaped keys", () => {
+  assert.deepEqual(
+    redactConnectorConfigSecrets({
+      endpoint: "https://example.invalid",
+      authorization: "Bearer synthetic-token",
+      authHeader: "Basic synthetic-credentials",
+      authorName: "kept",
+      nested: {
+        accessToken: "synthetic-token",
+        cookieHeader: "sid=synthetic-session",
+        publicLabel: "kept",
+      },
+      list: [
+        { clientSecret: "synthetic-secret", sessionCookie: "synthetic-cookie", label: "kept" },
+      ],
+    }),
+    {
+      endpoint: "https://example.invalid",
+      authorName: "kept",
+      nested: {
+        publicLabel: "kept",
+      },
+      list: [{ label: "kept" }],
+    }
+  );
+});
+
+test("persisted-config helpers are exported from the package root", () => {
+  assert.equal(persistableConnectorConfigFromRoot, persistableConnectorConfig);
+  assert.equal(redactConnectorConfigSecretsFromRoot, redactConnectorConfigSecrets);
+});
+
+test("built-in live connectors expose persistable config without credential material", () => {
+  const cases: Array<{
+    connector: LiveConnector;
+    raw: ConnectorConfig;
+    secretKeys: readonly string[];
+    secretValues: readonly string[];
+    expected: ConnectorConfig;
+  }> = [
+    {
+      connector: createGitHubConnector(),
+      raw: {
+        token: "synthetic-github-token",
+        userLogin: "octocat",
+        repos: ["owner/repo"],
+        pollIntervalMs: 300_000,
+        includeDiscussions: true,
+      },
+      secretKeys: ["token"],
+      secretValues: ["synthetic-github-token"],
+      expected: {
+        userLogin: "octocat",
+        repos: ["owner/repo"],
+        pollIntervalMs: 300_000,
+        includeDiscussions: true,
+      },
+    },
+    {
+      connector: createGmailConnector(),
+      raw: {
+        clientId: "synthetic-gmail-client-id",
+        clientSecret: "synthetic-gmail-client-secret",
+        refreshToken: "synthetic-gmail-refresh-token",
+        userId: "me",
+        query: "in:inbox",
+        pollIntervalMs: 300_000,
+      },
+      secretKeys: ["clientSecret", "refreshToken"],
+      secretValues: ["synthetic-gmail-client-secret", "synthetic-gmail-refresh-token"],
+      expected: {
+        clientId: "synthetic-gmail-client-id",
+        userId: "me",
+        query: "in:inbox",
+        pollIntervalMs: 300_000,
+      },
+    },
+    {
+      connector: createGoogleDriveConnector(),
+      raw: {
+        clientId: "synthetic-drive-client-id",
+        clientSecret: "synthetic-drive-client-secret",
+        refreshToken: "synthetic-drive-refresh-token",
+        folderIds: ["folder_12345678"],
+        pollIntervalMs: 300_000,
+      },
+      secretKeys: ["clientSecret", "refreshToken"],
+      secretValues: ["synthetic-drive-client-secret", "synthetic-drive-refresh-token"],
+      expected: {
+        clientId: "synthetic-drive-client-id",
+        folderIds: ["folder_12345678"],
+        pollIntervalMs: 300_000,
+      },
+    },
+    {
+      connector: createNotionConnector(),
+      raw: {
+        token: "secret_synthetic-notion-token",
+        databaseIds: ["0123456789abcdef0123456789abcdef"],
+        pollIntervalMs: 300_000,
+      },
+      secretKeys: ["token"],
+      secretValues: ["secret_synthetic-notion-token"],
+      expected: {
+        databaseIds: ["0123456789abcdef0123456789abcdef"],
+        pollIntervalMs: 300_000,
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const runtimeConfig = testCase.connector.validateConfig(testCase.raw);
+    for (const key of testCase.secretKeys) {
+      assert.ok(key in runtimeConfig, `${testCase.connector.id} runtime config should keep ${key}`);
+    }
+
+    const persisted = persistableConnectorConfig(testCase.connector, runtimeConfig);
+    assert.deepEqual(persisted, testCase.expected);
+    const persistedJson = JSON.stringify(persisted);
+    for (const key of testCase.secretKeys) {
+      assert.ok(!(key in persisted), `${testCase.connector.id} persisted config should omit ${key}`);
+    }
+    for (const value of testCase.secretValues) {
+      assert.ok(
+        !persistedJson.includes(value),
+        `${testCase.connector.id} persisted config leaked ${value}`,
+      );
+    }
+  }
 });
 
 // ───────────────────────────────────────────────────────────────────────────

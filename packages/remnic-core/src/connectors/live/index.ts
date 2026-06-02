@@ -13,6 +13,8 @@
 export {
   CONNECTOR_ID_PATTERN,
   isValidConnectorId,
+  persistableConnectorConfig,
+  redactConnectorConfigSecrets,
   type ConnectorConfig,
   type ConnectorCursor,
   type ConnectorDocument,

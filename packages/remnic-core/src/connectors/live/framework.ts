@@ -20,14 +20,60 @@
 
 /**
  * Free-form connector configuration. Validated by each connector's
- * `validateConfig` implementation. Stored alongside the cursor in the state
- * store. MUST be JSON-serializable: no functions, no class instances, no
+ * `validateConfig` implementation and passed to `syncIncremental` for runtime
+ * use. MUST be JSON-serializable: no functions, no class instances, no
  * circular references.
  *
- * Connectors MUST NOT persist secrets here — credentials belong in OS keychain
- * / OAuth token storage (PR 2 design).
+ * Runtime configs may contain hydrated credentials. Do not persist a runtime
+ * config directly. Any code that needs to store connector settings must call
+ * `persistableConnectorConfig()` so credentials are stripped or replaced by
+ * connector-owned references.
  */
 export type ConnectorConfig = Record<string, unknown>;
+
+const DEFAULT_SECRET_KEY_PARTS = [
+  "token",
+  "secret",
+  "password",
+  "credential",
+  "apikey",
+  "accesskey",
+  "privatekey",
+  "authorization",
+  "authheader",
+  "cookie",
+] as const;
+
+/**
+ * Redact secret-looking keys from a JSON-serializable connector config.
+ * Built-in connectors provide explicit projections, but this default keeps
+ * third-party connectors from accidentally persisting obvious credentials.
+ */
+export function redactConnectorConfigSecrets(config: ConnectorConfig): ConnectorConfig {
+  return redactConnectorConfigValue(config) as ConnectorConfig;
+}
+
+function redactConnectorConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactConnectorConfigValue(item));
+  }
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (isConnectorSecretConfigKey(key)) {
+      continue;
+    }
+    out[key] = redactConnectorConfigValue(nested);
+  }
+  return out;
+}
+
+function isConnectorSecretConfigKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9]/giu, "").toLowerCase();
+  return DEFAULT_SECRET_KEY_PARTS.some((part) => normalized.includes(part));
+}
 
 /**
  * Opaque cursor describing "where the last sync left off". Each connector
@@ -135,16 +181,35 @@ export interface LiveConnector {
 
   /**
    * Validate raw user-supplied config. MUST throw on malformed input — never
-   * silently default. The returned object is what gets persisted and passed
-   * back to `syncIncremental`. Connectors SHOULD strip unknown fields.
+   * silently default. The returned object is the runtime config passed back to
+   * `syncIncremental`; it may contain hydrated credentials and MUST NOT be
+   * persisted directly. Connectors SHOULD strip unknown fields.
    */
   validateConfig(raw: unknown): ConnectorConfig;
+
+  /**
+   * Return the subset of validated config that may be written to disk. Use this
+   * for state/config persistence instead of `validateConfig()`. Connectors that
+   * need credentials should omit the raw values here and store only non-secret
+   * scope/schedule fields plus any connector-owned secret references.
+   */
+  persistConfig?(validated: ConnectorConfig): ConnectorConfig;
 
   /**
    * Run one incremental sync pass. See `SyncIncrementalArgs` /
    * `SyncIncrementalResult` for the contract.
    */
   syncIncremental(args: SyncIncrementalArgs): Promise<SyncIncrementalResult>;
+}
+
+export function persistableConnectorConfig(
+  connector: Pick<LiveConnector, "persistConfig">,
+  validated: ConnectorConfig,
+): ConnectorConfig {
+  if (typeof connector.persistConfig === "function") {
+    return connector.persistConfig(validated);
+  }
+  return redactConnectorConfigSecrets(validated);
 }
 
 /**
