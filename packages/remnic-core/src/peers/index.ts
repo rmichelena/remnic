@@ -26,6 +26,7 @@ export {
   assertValidPeerId,
   readPeer,
   writePeer,
+  writePeerIfAbsent,
   deletePeer,
   forgetPeer,
   listPeers,
