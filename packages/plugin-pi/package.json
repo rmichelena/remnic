@@ -1,6 +1,6 @@
 {
   "name": "@remnic/plugin-pi",
-  "version": "9.3.522",
+  "version": "9.3.523",
   "description": "Remnic memory extension for Pi Coding Agent",
   "type": "module",
   "main": "dist/index.js",
@@ -15,11 +15,23 @@
       "types": "./dist/publisher.d.ts"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
-  "keywords": ["remnic", "pi-package", "pi", "memory", "ai-agent", "coding-agent"],
+  "keywords": [
+    "remnic",
+    "pi-package",
+    "pi",
+    "memory",
+    "ai-agent",
+    "coding-agent"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
