@@ -160,7 +160,7 @@ export function decryptFileBody(buf: Buffer, key: Buffer, aad?: Buffer): Buffer 
   const version = buf.readUInt8(MAGIC_BYTES.length);
   if (version !== FILE_FORMAT_VERSION) {
     throw new Error(
-      `decryptFileBody: unsupported file format version ${version} (this build supports ${FILE_FORMAT_VERSION})`,
+      `decryptFileBody: unsupported file format version ${version} (this build supports ${FILE_FORMAT_VERSION})`
     );
   }
   const flags = buf.readUInt8(MAGIC_BYTES.length + 1);
@@ -173,9 +173,7 @@ export function decryptFileBody(buf: Buffer, key: Buffer, aad?: Buffer): Buffer 
     return openEnvelope(key, envelope, aad ? { aad } : {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new SecureStoreDecryptError(
-      `secure-store decryption failed: ${msg}`,
-    );
+    throw new SecureStoreDecryptError(`secure-store decryption failed: ${msg}`);
   }
 }
 
@@ -227,7 +225,7 @@ export function filePathAad(filePath: string, memoryDir?: string): Buffer {
 export async function readMaybeEncryptedFileBuffer(
   filePath: string,
   key: Buffer | null,
-  memoryDir?: string,
+  memoryDir?: string
 ): Promise<Buffer> {
   const buf = await readFile(filePath);
   if (!isEncryptedFile(buf)) {
@@ -237,8 +235,7 @@ export async function readMaybeEncryptedFileBuffer(
   // Encrypted — key required.
   if (key === null) {
     throw new SecureStoreLockedError(
-      `secure-store is locked — cannot read encrypted file at ${filePath}. ` +
-        "Run `remnic secure-store unlock` to decrypt.",
+      `secure-store is locked — cannot read encrypted file at ${filePath}. Run \`remnic secure-store unlock\` to decrypt.`
     );
   }
   return decryptFileBodyForPath(buf, key, filePath, memoryDir);
@@ -247,7 +244,7 @@ export async function readMaybeEncryptedFileBuffer(
 export async function readMaybeEncryptedFile(
   filePath: string,
   key: Buffer | null,
-  memoryDir?: string,
+  memoryDir?: string
 ): Promise<string> {
   return (await readMaybeEncryptedFileBuffer(filePath, key, memoryDir)).toString("utf8");
 }
@@ -280,7 +277,7 @@ export async function writeMaybeEncryptedFile(
   content: string | Buffer,
   key: Buffer | null,
   options: WriteMaybeEncryptedFileOptions = {},
-  memoryDir?: string,
+  memoryDir?: string
 ): Promise<void> {
   const { mode = 0o600, atomic = true } = options;
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -317,7 +314,7 @@ export async function writeMaybeEncryptedFileFromChunks(
   chunks: AsyncIterable<Buffer>,
   key: Buffer | null,
   options: WriteMaybeEncryptedFileOptions = {},
-  memoryDir?: string,
+  memoryDir?: string
 ): Promise<void> {
   const { mode = 0o600, atomic = true } = options;
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -350,12 +347,7 @@ export async function writeMaybeEncryptedFileFromChunks(
         const final = cipher.final();
         if (final.length > 0) await handle.write(final);
         const authTag = cipher.getAuthTag();
-        await handle.write(
-          authTag,
-          0,
-          authTag.length,
-          MAGIC_HEADER_SIZE + ENVELOPE_LAYOUT.authTag,
-        );
+        await handle.write(authTag, 0, authTag.length, MAGIC_HEADER_SIZE + ENVELOPE_LAYOUT.authTag);
       } else {
         for await (const chunk of chunks) {
           if (chunk.length > 0) await handle.write(chunk);
@@ -421,7 +413,7 @@ export interface DecryptResult {
 export async function migrateMemoryDirToEncrypted(
   dir: string,
   key: Buffer,
-  onBeforeEncrypt?: (filePath: string) => Promise<void>,
+  onBeforeEncrypt?: (filePath: string) => Promise<void>
 ): Promise<MigrateResult> {
   const result: MigrateResult = { encrypted: 0, skipped: 0, errors: [] };
 
@@ -482,10 +474,7 @@ export async function migrateMemoryDirToEncrypted(
  * each plaintext replacement via temp-file + rename so a per-file failure
  * leaves the ciphertext intact.
  */
-export async function decryptMemoryDirToPlaintext(
-  dir: string,
-  key: Buffer,
-): Promise<DecryptResult> {
+export async function decryptMemoryDirToPlaintext(dir: string, key: Buffer): Promise<DecryptResult> {
   const result: DecryptResult = { decrypted: 0, skipped: 0, errors: [] };
 
   const files = await collectStorageManagedFiles(dir, isDecryptableStoragePath);
@@ -530,12 +519,7 @@ function uniqueAtomicTempPath(filePath: string, label: string): string {
   return `${filePath}.${label}-${process.pid}-${Date.now()}-${randomUUID()}`;
 }
 
-function decryptFileBodyForPath(
-  buf: Buffer,
-  key: Buffer,
-  filePath: string,
-  memoryDir?: string,
-): Buffer {
+function decryptFileBodyForPath(buf: Buffer, key: Buffer, filePath: string, memoryDir?: string): Buffer {
   const aad = filePathAad(filePath, memoryDir);
   try {
     return decryptFileBody(buf, key, aad);
@@ -613,18 +597,26 @@ async function collectEncryptableStorageFiles(dir: string, rootDir = dir): Promi
 async function collectStorageManagedFiles(
   dir: string,
   includeFile: (filePath: string, rootDir: string) => boolean,
-  rootDir = dir,
+  rootDir = dir
 ): Promise<string[]> {
   const results: string[] = [];
+  let scanDir = dir;
+  let scanRootDir = rootDir;
+  if (path.resolve(dir) === path.resolve(rootDir)) {
+    const normalizedRoot = await resolveStorageManagedRootForScan(dir);
+    if (!normalizedRoot) return results;
+    scanDir = normalizedRoot;
+    scanRootDir = normalizedRoot;
+  }
   let names: string[];
   try {
-    names = await readdir(dir, { encoding: "utf8" });
+    names = await readdir(scanDir, { encoding: "utf8" });
   } catch {
     return results;
   }
   for (const name of names) {
     if (name.startsWith(".secure-store")) continue;
-    const full = path.join(dir, name);
+    const full = path.join(scanDir, name);
     let isDir = false;
     let isFile = false;
     try {
@@ -636,13 +628,51 @@ async function collectStorageManagedFiles(
       continue;
     }
     if (isDir) {
-      const sub = await collectStorageManagedFiles(full, includeFile, rootDir);
+      const sub = await collectStorageManagedFiles(full, includeFile, scanRootDir);
       results.push(...sub);
-    } else if (isFile && includeFile(full, rootDir)) {
+    } else if (isFile && includeFile(full, scanRootDir)) {
       results.push(full);
     }
   }
   return results;
+}
+
+async function resolveStorageManagedRootForScan(dir: string): Promise<string | null> {
+  const lstatPath = normalizePathForLstat(dir);
+  let stat: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stat = await lstat(lstatPath);
+  } catch (error) {
+    if (isFsErrorWithCode(error, "ENOENT")) return null;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`secure-store migration root must not be a symlink: ${dir}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`secure-store migration root must be a directory: ${dir}`);
+  }
+  return lstatPath;
+}
+
+function normalizePathForLstat(filePath: string): string {
+  return stripTrailingPathSeparators(path.normalize(filePath));
+}
+
+function isFsErrorWithCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === code;
+}
+
+function stripTrailingPathSeparators(filePath: string): string {
+  const root = path.parse(filePath).root;
+  let end = filePath.length;
+  while (
+    end > root.length &&
+    (filePath[end - 1] === path.sep || filePath[end - 1] === path.posix.sep || filePath[end - 1] === path.win32.sep)
+  ) {
+    end -= 1;
+  }
+  return end === filePath.length ? filePath : filePath.slice(0, end);
 }
 
 function isEncryptableStoragePath(filePath: string, rootDir: string): boolean {
@@ -710,9 +740,4 @@ function isEncryptableSummarySidecar(normalized: string): boolean {
   return normalized.startsWith("summaries/") && normalized.endsWith(".json");
 }
 
-const DECRYPTABLE_SIDECAR_ROOTS = new Set([
-  "state",
-  "indexes",
-  "index",
-  "provenance",
-]);
+const DECRYPTABLE_SIDECAR_ROOTS = new Set(["state", "indexes", "index", "provenance"]);
