@@ -289,3 +289,36 @@ test("symlinked identity parent directory is silently skipped (P1 codex fix)", a
   assert.equal(result.written, true, "migration should still succeed with no notes");
   assert.equal(result.peer.notes, undefined, "no notes from symlinked parent source");
 });
+
+test("migration rejects symlinked peers root without writing outside memoryDir", async () => {
+  const dir = await makeTempDir();
+  const outside = await makeTempDir();
+  await fs.symlink(outside, path.join(dir, "peers"));
+
+  await assert.rejects(
+    () => migrateFromIdentityAnchor({ memoryDir: dir }),
+    /peers root .*symlink/,
+  );
+
+  await assert.rejects(
+    () => fs.stat(path.join(outside, "self", "identity.md")),
+    /ENOENT/,
+  );
+});
+
+test("migration rejects symlinked peer directory without writing outside memoryDir", async () => {
+  const dir = await makeTempDir();
+  const outside = await makeTempDir();
+  await fs.mkdir(path.join(dir, "peers"), { recursive: true });
+  await fs.symlink(outside, path.join(dir, "peers", "self"));
+
+  await assert.rejects(
+    () => migrateFromIdentityAnchor({ memoryDir: dir }),
+    /peer directory "self" is a symlink/,
+  );
+
+  await assert.rejects(
+    () => fs.stat(path.join(outside, "identity.md")),
+    /ENOENT/,
+  );
+});

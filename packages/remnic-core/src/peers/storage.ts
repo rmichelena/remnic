@@ -96,6 +96,39 @@ async function writeFileNoFollow(file: string, data: string): Promise<void> {
   }
 }
 
+/**
+ * Create a file only when absent, refusing symlinks and non-regular existing
+ * targets. Returns false only for an existing regular file.
+ */
+async function writeFileNoFollowIfAbsent(file: string, data: string): Promise<boolean> {
+  await assertParentDirInodeStable(file);
+  let fh: import("node:fs/promises").FileHandle;
+  try {
+    fh = await openNoFollow(
+      file,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw err;
+    }
+    const existing = await fs.lstat(file);
+    if (existing.isSymbolicLink()) {
+      throw new Error(`refusing to create "${file}": target is a symlink`);
+    }
+    if (!existing.isFile()) {
+      throw new Error(`refusing to create "${file}": target is not a regular file`);
+    }
+    return false;
+  }
+  try {
+    await fh.writeFile(data, "utf8");
+  } finally {
+    await fh.close();
+  }
+  return true;
+}
+
 /** Append to a file, refusing to follow symlinks AND verifying parent
  * inode stability (codex P1 round 9). */
 async function appendFileNoFollow(file: string, data: string): Promise<void> {
@@ -470,6 +503,28 @@ function emitPeerIdentity(peer: Peer): string {
   return out + "\n";
 }
 
+function assertWritablePeer(peer: Peer): void {
+  assertValidPeerId(peer.id);
+  assertValidKind(peer.kind);
+  if (typeof peer.displayName !== "string") {
+    throw new Error("peer.displayName must be a string");
+  }
+  if (typeof peer.createdAt !== "string" || peer.createdAt === "") {
+    throw new Error("peer.createdAt must be a non-empty ISO-8601 string");
+  }
+  if (typeof peer.updatedAt !== "string" || peer.updatedAt === "") {
+    throw new Error("peer.updatedAt must be a non-empty ISO-8601 string");
+  }
+  // Codex P2 round 8: reject non-string `peer.notes`. Without this,
+  // an untyped JS caller passing an object/number would silently
+  // coerce to "[object Object]"/"42" via lines.push(notes ?? "")
+  // and corrupt user-authored identity content. Notes are optional;
+  // omit by passing undefined (NOT null).
+  if (peer.notes !== undefined && typeof peer.notes !== "string") {
+    throw new Error("peer.notes must be a string when provided");
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Public storage API
 // ──────────────────────────────────────────────────────────────────────
@@ -555,25 +610,7 @@ export async function readPeer(
  * later PRs — for the schema slice we simply write the file.
  */
 export async function writePeer(memoryDir: string, peer: Peer): Promise<void> {
-  assertValidPeerId(peer.id);
-  assertValidKind(peer.kind);
-  if (typeof peer.displayName !== "string") {
-    throw new Error("peer.displayName must be a string");
-  }
-  if (typeof peer.createdAt !== "string" || peer.createdAt === "") {
-    throw new Error("peer.createdAt must be a non-empty ISO-8601 string");
-  }
-  if (typeof peer.updatedAt !== "string" || peer.updatedAt === "") {
-    throw new Error("peer.updatedAt must be a non-empty ISO-8601 string");
-  }
-  // Codex P2 round 8: reject non-string `peer.notes`. Without this,
-  // an untyped JS caller passing an object/number would silently
-  // coerce to "[object Object]"/"42" via lines.push(notes ?? "")
-  // and corrupt user-authored identity content. Notes are optional;
-  // omit by passing undefined (NOT null).
-  if (peer.notes !== undefined && typeof peer.notes !== "string") {
-    throw new Error("peer.notes must be a string when provided");
-  }
+  assertWritablePeer(peer);
   // Codex P1 round 13: atomic root validation. Open the peers root
   // (or its parent if peers doesn't exist yet) with O_DIRECTORY|
   // O_NOFOLLOW BEFORE the mkdir. This holds a kernel handle on the
@@ -587,6 +624,25 @@ export async function writePeer(memoryDir: string, peer: Peer): Promise<void> {
   // Codex P1 #2: reject if identity.md exists as a symlink so we
   // don't follow it on overwrite.
   await writeFileNoFollow(file, emitPeerIdentity(peer));
+}
+
+/**
+ * Create a peer identity only if it is absent, applying the same root,
+ * peer-directory, parent-inode, and O_NOFOLLOW guards as writePeer.
+ *
+ * Returns true when this call created the identity file and false when a
+ * regular identity file already existed. Symlinked roots, peer directories,
+ * identity paths, and non-regular identity paths are rejected.
+ */
+export async function writePeerIfAbsent(
+  memoryDir: string,
+  peer: Peer,
+): Promise<boolean> {
+  assertWritablePeer(peer);
+  await mkdirPeerDirAtomic(memoryDir, peer.id);
+  await assertPeerDirNotEscaped(memoryDir, peer.id);
+  const file = identityPath(memoryDir, peer.id);
+  return await writeFileNoFollowIfAbsent(file, emitPeerIdentity(peer));
 }
 
 /**

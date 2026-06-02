@@ -22,6 +22,7 @@ import {
   readPeer,
   readPeerProfile,
   writePeer,
+  writePeerIfAbsent,
   writePeerProfile,
   type Peer,
   type PeerInteractionLogEntry,
@@ -64,6 +65,52 @@ test("writePeer + readPeer round-trips identity", async () => {
   assert.equal(loaded.createdAt, peer.createdAt);
   assert.equal(loaded.updatedAt, peer.updatedAt);
   assert.equal(loaded.notes, "Initial identity kernel.");
+});
+
+test("writePeerIfAbsent creates once without overwriting existing identity", async () => {
+  const dir = await makeTempDir();
+  const first = samplePeer({ id: "self", displayName: "First" });
+  const second = samplePeer({ id: "self", displayName: "Second" });
+
+  assert.equal(await writePeerIfAbsent(dir, first), true);
+  assert.equal(await writePeerIfAbsent(dir, second), false);
+
+  const loaded = await readPeer(dir, "self");
+  assert.ok(loaded);
+  assert.equal(loaded.displayName, "First");
+});
+
+test("writePeerIfAbsent rejects symlinked peers root without writing outside memoryDir", async () => {
+  const dir = await makeTempDir();
+  const outside = await makeTempDir();
+  await fs.symlink(outside, path.join(dir, "peers"));
+
+  await assert.rejects(
+    () => writePeerIfAbsent(dir, samplePeer({ id: "self" })),
+    /peers root .*symlink/,
+  );
+
+  await assert.rejects(
+    () => fs.stat(path.join(outside, "self", "identity.md")),
+    /ENOENT/,
+  );
+});
+
+test("writePeerIfAbsent rejects symlinked peer directories", async () => {
+  const dir = await makeTempDir();
+  const outside = await makeTempDir();
+  await fs.mkdir(path.join(dir, "peers"), { recursive: true });
+  await fs.symlink(outside, path.join(dir, "peers", "self"));
+
+  await assert.rejects(
+    () => writePeerIfAbsent(dir, samplePeer({ id: "self" })),
+    /peer directory "self" is a symlink/,
+  );
+
+  await assert.rejects(
+    () => fs.stat(path.join(outside, "identity.md")),
+    /ENOENT/,
+  );
 });
 
 test("readPeer round-trips peers with quote/backslash characters in displayName", async () => {

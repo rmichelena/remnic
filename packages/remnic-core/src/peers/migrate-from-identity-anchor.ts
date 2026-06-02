@@ -47,13 +47,13 @@
  * All file reads use `path.join` relative to the caller-supplied
  * `memoryDir`. The migration never follows symlinks for the source files
  * (uses `lstat` to detect + skip them). Writes go through the standard
- * `writePeer` helper which enforces all path-traversal and symlink guards.
+ * peer storage helpers which enforce path-traversal and symlink guards.
  */
 
 import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
 
-import { readPeer, writePeer, PEERS_DIR_NAME } from "./storage.js";
+import { readPeer, writePeerIfAbsent } from "./storage.js";
 import type { Peer } from "./types.js";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -288,55 +288,22 @@ export async function migrateFromIdentityAnchor(
     ...(notes !== undefined ? { notes } : {}),
   };
 
-  // 4. Write (unless dry-run).
-  //
-  // P2 (codex): the previous readPeer-then-writePeer pattern had a
-  // check-then-act TOCTOU race: two concurrent `remnic peer migrate`
-  // processes could both observe "missing" and the later write would
-  // overwrite the file, violating the non-destructive / idempotent
-  // guarantee.
-  //
-  // Mitigation: before calling writePeer we attempt to exclusively create
-  // (O_CREAT | O_EXCL | O_NOFOLLOW) the identity file path. If the open
-  // succeeds we are the sole creator; close the handle immediately and let
-  // writePeer fill in the real content (it mkdirs + rewrites atomically).
-  // If O_EXCL fails with EEXIST, another process won the race — re-read the
-  // file and return `skipped`. The window between our exclusive open and the
-  // writePeer overwrite is deliberate: we've already locked out concurrent
-  // migrate calls via EEXIST, and `peer set self` targeting the same file
-  // path will succeed (it is a legitimate overwrite, not a migrate race).
+  // 4. Write (unless dry-run). Use the peer storage create-if-absent helper so
+  // migration gets the same root, peer-directory, parent-inode, and O_NOFOLLOW
+  // guards as writePeer while preserving the non-overwrite migration contract.
   if (!dryRun) {
-    const selfPeerDir = path.join(memoryDir, PEERS_DIR_NAME, "self");
-    await fs.mkdir(selfPeerDir, { recursive: true });
-    const identityFilePath = path.join(selfPeerDir, "identity.md");
-    let exclusiveFh: import("node:fs/promises").FileHandle | null = null;
-    try {
-      exclusiveFh = await fs.open(
-        identityFilePath,
-        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-      );
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") {
-        // Another process created the file between our readPeer check and
-        // now. Re-read and return skipped.
-        const raceWinner = await readPeer(memoryDir, "self");
-        return {
-          peer: raceWinner ?? peer,
-          written: false,
-          skipped: true,
-          dryRun,
-          identityAnchorSource: null,
-          identityMdSource: null,
-        };
-      }
-      throw err;
-    } finally {
-      if (exclusiveFh !== null) await exclusiveFh.close();
+    const created = await writePeerIfAbsent(memoryDir, peer);
+    if (!created) {
+      const raceWinner = await readPeer(memoryDir, "self");
+      return {
+        peer: raceWinner ?? peer,
+        written: false,
+        skipped: true,
+        dryRun,
+        identityAnchorSource: null,
+        identityMdSource: null,
+      };
     }
-    // We hold the exclusive-create claim. Now writePeer fills in the
-    // real content (it calls mkdirPeerDirAtomic + writeFileNoFollow).
-    await writePeer(memoryDir, peer);
   }
 
   return {
