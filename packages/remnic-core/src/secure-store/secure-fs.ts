@@ -544,15 +544,44 @@ function decryptFileBodyForPath(
       throw err;
     }
     const legacyRoot = legacyNamespaceAadRootForFile(filePath, memoryDir);
-    if (!legacyRoot) {
-      throw err;
+    if (legacyRoot) {
+      try {
+        return decryptFileBody(buf, key, filePathAad(filePath, legacyRoot));
+      } catch {
+        // Fall through to the namespace-reader fallback below.
+      }
     }
-    try {
-      return decryptFileBody(buf, key, filePathAad(filePath, legacyRoot));
-    } catch {
-      throw err;
+
+    const topLevelRoot = topLevelAadRootForNamespaceReader(filePath, memoryDir);
+    if (topLevelRoot) {
+      try {
+        return decryptFileBody(buf, key, filePathAad(filePath, topLevelRoot));
+      } catch {
+        // Preserve the caller-facing error from the canonical decrypt attempt.
+      }
     }
+
+    throw err;
   }
+}
+
+function topLevelAadRootForNamespaceReader(filePath: string, memoryDir?: string): string | null {
+  if (!memoryDir || !path.isAbsolute(filePath)) return null;
+  const resolvedMemoryDir = path.resolve(memoryDir);
+  const rel = path.relative(resolvedMemoryDir, filePath);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = resolvedMemoryDir.split(path.sep);
+  if (parts.length < 3 || parts.at(-2) !== "namespaces" || !parts.at(-1)) return null;
+  const topLevelRoot = parts.slice(0, -2).join(path.sep) || path.sep;
+  const topRel = path.relative(topLevelRoot, filePath);
+  if (topRel === "" || topRel.startsWith("..") || path.isAbsolute(topRel)) {
+    return null;
+  }
+  const topParts = topRel.split(path.sep);
+  if (topParts[0] !== "namespaces" || topParts[1] !== parts.at(-1)) {
+    return null;
+  }
+  return topLevelRoot;
 }
 
 function legacyNamespaceAadRootForFile(filePath: string, memoryDir?: string): string | null {
