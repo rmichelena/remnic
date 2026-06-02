@@ -1,6 +1,6 @@
 {
   "name": "@remnic/plugin-pi",
-  "version": "9.3.523",
+  "version": "9.3.524",
   "description": "Remnic memory extension for Pi Coding Agent",
   "type": "module",
   "main": "dist/index.js",
