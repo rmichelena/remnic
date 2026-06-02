@@ -15,6 +15,9 @@
  */
 
 import { PassThrough } from "node:stream";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -42,6 +45,11 @@ import {
   MAGIC_BYTES,
   SecureStoreDecryptError,
   decryptFileBody,
+  decryptMemoryDirToPlaintext,
+  encryptFileBody,
+  filePathAad,
+  migrateMemoryDirToEncrypted,
+  readMaybeEncryptedFile,
 } from "./secure-fs.js";
 import {
   DEFAULT_ARGON2ID_PARAMS,
@@ -619,6 +627,61 @@ test("end-to-end: build metadata → derive key → seal → open round-trip", (
   const sealed = seal(key, recoveredSalt, Buffer.from("end-to-end"));
   const opened = open(key, sealed);
   assert.equal(opened.toString("utf8"), "end-to-end");
+});
+
+test("secure-store migration keeps namespaced file AAD readable through memory root", async () => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-aad-"));
+  try {
+    const filePath = path.join(memoryDir, "namespaces", "project-a", "facts", "note.md");
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, "namespaced fact", "utf8");
+
+    const key = deriveKeyScrypt("namespace-aad", Buffer.alloc(KDF_SALT_LENGTH, 0x44), FAST_SCRYPT);
+    const migrated = await migrateMemoryDirToEncrypted(memoryDir, key);
+
+    assert.equal(migrated.encrypted, 1);
+    assert.deepEqual(migrated.errors, []);
+    assert.equal(
+      await readMaybeEncryptedFile(filePath, key, memoryDir),
+      "namespaced fact",
+    );
+
+    const decrypted = await decryptMemoryDirToPlaintext(memoryDir, key);
+    assert.equal(decrypted.decrypted, 1);
+    assert.deepEqual(decrypted.errors, []);
+    assert.equal(await readFile(filePath, "utf8"), "namespaced fact");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("secure-store can recover namespaced files encrypted with legacy namespace AAD", async () => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "remnic-secure-store-legacy-aad-"));
+  try {
+    const namespaceRoot = path.join(memoryDir, "namespaces", "project-a");
+    const filePath = path.join(namespaceRoot, "facts", "note.md");
+    await mkdir(path.dirname(filePath), { recursive: true });
+
+    const key = deriveKeyScrypt("legacy-namespace-aad", Buffer.alloc(KDF_SALT_LENGTH, 0x55), FAST_SCRYPT);
+    const legacyEncrypted = encryptFileBody(
+      "legacy namespaced fact",
+      key,
+      filePathAad(filePath, namespaceRoot),
+    );
+    await writeFile(filePath, legacyEncrypted);
+
+    assert.equal(
+      await readMaybeEncryptedFile(filePath, key, memoryDir),
+      "legacy namespaced fact",
+    );
+
+    const decrypted = await decryptMemoryDirToPlaintext(memoryDir, key);
+    assert.equal(decrypted.decrypted, 1);
+    assert.deepEqual(decrypted.errors, []);
+    assert.equal(await readFile(filePath, "utf8"), "legacy namespaced fact");
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
 });
 
 test("tampered envelope salt fails decryption (codex P1 — header AAD)", () => {

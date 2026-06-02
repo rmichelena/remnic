@@ -241,8 +241,7 @@ export async function readMaybeEncryptedFileBuffer(
         "Run `remnic secure-store unlock` to decrypt.",
     );
   }
-  const aad = filePathAad(filePath, memoryDir);
-  return decryptFileBody(buf, key, aad);
+  return decryptFileBodyForPath(buf, key, filePath, memoryDir);
 }
 
 export async function readMaybeEncryptedFile(
@@ -443,7 +442,7 @@ export async function migrateMemoryDirToEncrypted(
         }
       }
       const content = buf.toString("utf8");
-      const aad = filePathAad(filePath, storageAadRootForFile(filePath, dir));
+      const aad = filePathAad(filePath, dir);
       const encrypted = encryptFileBody(content, key, aad);
 
       // Atomic write: temp → rename (gotcha #54).
@@ -498,8 +497,7 @@ export async function decryptMemoryDirToPlaintext(
         continue;
       }
 
-      const aad = filePathAad(filePath, storageAadRootForFile(filePath, dir));
-      const plaintext = decryptFileBody(buf, key, aad);
+      const plaintext = decryptFileBodyForPath(buf, key, filePath, dir);
       const tempPath = uniqueAtomicTempPath(filePath, "dec-tmp");
       try {
         await writeFile(tempPath, plaintext, { mode: 0o600 });
@@ -530,6 +528,71 @@ export async function decryptMemoryDirToPlaintext(
 
 function uniqueAtomicTempPath(filePath: string, label: string): string {
   return `${filePath}.${label}-${process.pid}-${Date.now()}-${randomUUID()}`;
+}
+
+function decryptFileBodyForPath(
+  buf: Buffer,
+  key: Buffer,
+  filePath: string,
+  memoryDir?: string,
+): Buffer {
+  const aad = filePathAad(filePath, memoryDir);
+  try {
+    return decryptFileBody(buf, key, aad);
+  } catch (err) {
+    if (!(err instanceof SecureStoreDecryptError)) {
+      throw err;
+    }
+    const legacyRoot = legacyNamespaceAadRootForFile(filePath, memoryDir);
+    if (legacyRoot) {
+      try {
+        return decryptFileBody(buf, key, filePathAad(filePath, legacyRoot));
+      } catch {
+        // Fall through to the namespace-reader fallback below.
+      }
+    }
+
+    const topLevelRoot = topLevelAadRootForNamespaceReader(filePath, memoryDir);
+    if (topLevelRoot) {
+      try {
+        return decryptFileBody(buf, key, filePathAad(filePath, topLevelRoot));
+      } catch {
+        // Preserve the caller-facing error from the canonical decrypt attempt.
+      }
+    }
+
+    throw err;
+  }
+}
+
+function topLevelAadRootForNamespaceReader(filePath: string, memoryDir?: string): string | null {
+  if (!memoryDir || !path.isAbsolute(filePath)) return null;
+  const resolvedMemoryDir = path.resolve(memoryDir);
+  const rel = path.relative(resolvedMemoryDir, filePath);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = resolvedMemoryDir.split(path.sep);
+  if (parts.length < 3 || parts.at(-2) !== "namespaces" || !parts.at(-1)) return null;
+  const topLevelRoot = parts.slice(0, -2).join(path.sep) || path.sep;
+  const topRel = path.relative(topLevelRoot, filePath);
+  if (topRel === "" || topRel.startsWith("..") || path.isAbsolute(topRel)) {
+    return null;
+  }
+  const topParts = topRel.split(path.sep);
+  if (topParts[0] !== "namespaces" || topParts[1] !== parts.at(-1)) {
+    return null;
+  }
+  return topLevelRoot;
+}
+
+function legacyNamespaceAadRootForFile(filePath: string, memoryDir?: string): string | null {
+  if (!memoryDir || !path.isAbsolute(filePath)) return null;
+  const rel = path.relative(memoryDir, filePath);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts[0] === "namespaces" && parts.length >= 3 && parts[1]) {
+    return path.join(memoryDir, "namespaces", parts[1]);
+  }
+  return null;
 }
 
 /**
@@ -609,16 +672,6 @@ function normalizeStorageRelativePath(rel: string): string {
     return parts.slice(2).join("/");
   }
   return normalized;
-}
-
-function storageAadRootForFile(filePath: string, rootDir: string): string {
-  const rel = path.relative(rootDir, filePath);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return rootDir;
-  const parts = rel.split(path.sep);
-  if (parts[0] === "namespaces" && parts.length >= 3 && parts[1]) {
-    return path.join(rootDir, "namespaces", parts[1]);
-  }
-  return rootDir;
 }
 
 const ENCRYPTABLE_MARKDOWN_STORAGE_ROOTS = new Set([
