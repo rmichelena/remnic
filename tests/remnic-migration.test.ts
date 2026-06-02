@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { chmod, mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, symlinkSync } from "node:fs";
 import {
   migrateFromEngram,
   rollbackFromEngramMigration,
@@ -12,6 +13,11 @@ import {
 
 async function makeTempHome(prefix: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+function rollbackBackupPathForTarget(homeDir: string, targetPath: string): string {
+  const digest = createHash("sha256").update(targetPath).digest("hex").slice(0, 12);
+  return path.join(homeDir, ".remnic", ".backup", "mcp", `${digest}.json`);
 }
 
 async function makeExitedPid(): Promise<number> {
@@ -845,6 +851,63 @@ test("rollbackFromEngramMigration restores backed up connector configs and remov
   await assertFileMode(claudeConfig, 0o644);
 });
 
+test("rollbackFromEngramMigration restores repo connector configs from a different cwd", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-repo-rollback-home-");
+  const rollbackCwd = await makeTempHome("remnic-migrate-repo-rollback-other-cwd-");
+  const repoRoot = path.join(homeDir, "repo");
+  const migrationCwd = path.relative(process.cwd(), repoRoot);
+  const externalConfig = path.join(repoRoot, "packages", "plugin-codex", ".mcp.json");
+  const legacyRoot = path.join(homeDir, ".engram");
+
+  await mkdir(legacyRoot, { recursive: true });
+  await mkdir(path.dirname(externalConfig), { recursive: true });
+  await writeFile(path.join(legacyRoot, "tokens.json"), JSON.stringify({ tokens: [] }), "utf8");
+  await writeFile(
+    externalConfig,
+    JSON.stringify({
+      mcpServers: {
+        engram: {
+          headers: {
+            Authorization: "Bearer {{ENGRAM_TOKEN}}",
+          },
+        },
+      },
+    }),
+    "utf8",
+  );
+
+  await migrateFromEngram({
+    homeDir,
+    cwd: migrationCwd,
+    quiet: true,
+  });
+
+  const manifest = JSON.parse(await readFile(path.join(homeDir, ".remnic", ".rollback.json"), "utf8")) as {
+    entries: Array<{ targetPath: string; backupPath?: string }>;
+  };
+  const configEntry = manifest.entries.find((entry) => entry.targetPath === externalConfig);
+  assert.ok(configEntry?.backupPath, "expected connector config backup in rollback manifest");
+
+  const migratedConfig = JSON.parse(await readFile(externalConfig, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+  assert.ok(migratedConfig.mcpServers.remnic);
+  assert.equal(migratedConfig.mcpServers.engram, undefined);
+
+  const rollback = await rollbackFromEngramMigration({
+    homeDir,
+    cwd: rollbackCwd,
+    quiet: true,
+  });
+
+  assert.ok(rollback.restored.includes(externalConfig));
+  const restoredConfig = JSON.parse(await readFile(externalConfig, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+  assert.ok(restoredConfig.mcpServers.engram);
+  assert.equal(restoredConfig.mcpServers.remnic, undefined);
+});
+
 test("rollbackFromEngramMigration removes files created from first-run legacy copies", async () => {
   const homeDir = await makeTempHome("remnic-migrate-created-rollback-");
   const legacyRoot = path.join(homeDir, ".engram");
@@ -911,6 +974,418 @@ test("rollbackFromEngramMigration removes files created from first-run legacy co
   assert.equal(existsSync(remnicLogPath), false);
   assert.equal(existsSync(remnicConfig), false);
   assert.equal(existsSync(path.join(homeDir, ".remnic", ".migrated-from-engram")), false);
+});
+
+test("rollbackFromEngramMigration rejects forged targets outside migration-owned paths before side effects", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-forged-rollback-");
+  const outsideDir = await makeTempHome("remnic-migrate-forged-target-");
+  const outsideFile = path.join(outsideDir, "keep.txt");
+  const remnicPlist = path.join(homeDir, "Library", "LaunchAgents", "ai.remnic.daemon.plist");
+  const execCalls: Array<{ command: string; args: string[] }> = [];
+
+  await mkdir(path.join(homeDir, ".remnic"), { recursive: true });
+  await mkdir(path.dirname(remnicPlist), { recursive: true });
+  await writeFile(outsideFile, "keep\n", "utf8");
+  await writeFile(remnicPlist, "<plist>ai.remnic.daemon</plist>", "utf8");
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: outsideFile, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({
+      homeDir,
+      quiet: true,
+      platform: "darwin",
+      execCommand: (command, args) => execCalls.push({ command, args }),
+    }),
+    /rollback manifest target is outside migration-owned paths/,
+  );
+
+  assert.equal(await readFile(outsideFile, "utf8"), "keep\n");
+  assert.equal(existsSync(remnicPlist), true);
+  assert.deepEqual(execCalls, []);
+});
+
+test("rollbackFromEngramMigration rejects forged root directory removals before side effects", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-root-rollback-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const remnicData = path.join(remnicRoot, "tokens.json");
+  const remnicPlist = path.join(homeDir, "Library", "LaunchAgents", "ai.remnic.daemon.plist");
+  const execCalls: Array<{ command: string; args: string[] }> = [];
+
+  await mkdir(remnicRoot, { recursive: true });
+  await mkdir(path.dirname(remnicPlist), { recursive: true });
+  await writeFile(remnicData, "keep\n", "utf8");
+  await writeFile(remnicPlist, "<plist>ai.remnic.daemon</plist>", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: remnicRoot, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({
+      homeDir,
+      quiet: true,
+      platform: "darwin",
+      execCommand: (command, args) => execCalls.push({ command, args }),
+    }),
+    /rollback manifest target is outside migration-owned paths/,
+  );
+
+  assert.equal(await readFile(remnicData, "utf8"), "keep\n");
+  assert.equal(existsSync(remnicPlist), true);
+  assert.deepEqual(execCalls, []);
+});
+
+test("rollbackFromEngramMigration skips unhashed created-file removals", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-forged-created-file-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const remnicTokens = path.join(remnicRoot, "tokens.json");
+
+  await mkdir(remnicRoot, { recursive: true });
+  await writeFile(remnicTokens, "keep\n", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: remnicTokens, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const rollback = await rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true });
+
+  assert.equal(await readFile(remnicTokens, "utf8"), "keep\n");
+  assert.deepEqual(rollback.removed, []);
+});
+
+test("rollbackFromEngramMigration rejects created-file removals with mismatched hashes", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-created-hash-mismatch-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const remnicTokens = path.join(remnicRoot, "tokens.json");
+
+  await mkdir(remnicRoot, { recursive: true });
+  await writeFile(remnicTokens, "keep\n", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{
+        targetPath: remnicTokens,
+        createdByMigration: true,
+        contentHash: "0".repeat(64),
+      }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest created target content does not match migration record/,
+  );
+
+  assert.equal(await readFile(remnicTokens, "utf8"), "keep\n");
+});
+
+test("rollbackFromEngramMigration rejects entries that both restore and remove a target", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-restore-remove-rollback-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const targetPath = path.join(remnicRoot, "tokens.json");
+  const backupPath = path.join(remnicRoot, ".backup", "mcp", "tokens.json");
+
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await writeFile(targetPath, "keep\n", "utf8");
+  await writeFile(backupPath, "backup\n", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath, backupPath, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest entry cannot restore and remove the same target/,
+  );
+
+  assert.equal(await readFile(targetPath, "utf8"), "keep\n");
+});
+
+test("rollbackFromEngramMigration rejects created directory rollback targets", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-created-dir-rollback-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const remnicLogs = path.join(remnicRoot, "logs");
+  const remnicLog = path.join(remnicLogs, "daemon.log");
+
+  await mkdir(remnicLogs, { recursive: true });
+  await writeFile(remnicLog, "keep\n", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: remnicLogs, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest created target must be a file path/,
+  );
+
+  assert.equal(await readFile(remnicLog, "utf8"), "keep\n");
+});
+
+test("rollbackFromEngramMigration skips missing created rollback targets", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-missing-created-rollback-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const missingLog = path.join(remnicRoot, "logs", "daemon.log");
+
+  await mkdir(remnicRoot, { recursive: true });
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: missingLog, createdByMigration: true }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const rollback = await rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true });
+
+  assert.deepEqual(rollback.removed, []);
+  assert.equal(existsSync(path.join(remnicRoot, ".rollback.json")), false);
+});
+
+test("rollbackFromEngramMigration rejects symlinked rollback backup paths", {
+  skip: process.platform === "win32",
+}, async () => {
+  const homeDir = await makeTempHome("remnic-migrate-backup-symlink-");
+  const targetConfig = path.join(homeDir, ".claude.json");
+  const outsideBackup = path.join(homeDir, "outside-backup.json");
+  const backupLink = rollbackBackupPathForTarget(homeDir, targetConfig);
+
+  await mkdir(path.dirname(backupLink), { recursive: true });
+  await writeFile(targetConfig, "current\n", "utf8");
+  await writeFile(outsideBackup, "forged\n", "utf8");
+  await symlink(outsideBackup, backupLink);
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: targetConfig, backupPath: backupLink }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest backup must not contain symlink segments/,
+  );
+
+  assert.equal(await readFile(targetConfig, "utf8"), "current\n");
+});
+
+test("rollbackFromEngramMigration rejects rollback backups paired with the wrong target", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-backup-pairing-");
+  const targetConfig = path.join(homeDir, ".claude.json");
+  const otherConfig = path.join(homeDir, ".claude", ".mcp.json");
+  const mismatchedBackup = rollbackBackupPathForTarget(homeDir, otherConfig);
+
+  await mkdir(path.dirname(otherConfig), { recursive: true });
+  await mkdir(path.dirname(mismatchedBackup), { recursive: true });
+  await writeFile(targetConfig, "current\n", "utf8");
+  await writeFile(otherConfig, "other-current\n", "utf8");
+  await writeFile(mismatchedBackup, "other-backup\n", "utf8");
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: targetConfig, backupPath: mismatchedBackup }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest backup does not match target/,
+  );
+
+  assert.equal(await readFile(targetConfig, "utf8"), "current\n");
+  assert.equal(await readFile(otherConfig, "utf8"), "other-current\n");
+});
+
+test("rollbackFromEngramMigration rejects forged Remnic-root restore targets", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-forged-remnic-restore-");
+  const remnicRoot = path.join(homeDir, ".remnic");
+  const targetPath = path.join(remnicRoot, "arbitrary.json");
+  const backupPath = rollbackBackupPathForTarget(homeDir, targetPath);
+
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await writeFile(targetPath, "current\n", "utf8");
+  await writeFile(backupPath, "forged\n", "utf8");
+  await writeFile(
+    path.join(remnicRoot, ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath, backupPath }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest target is outside migration-owned paths/,
+  );
+
+  assert.equal(await readFile(targetPath, "utf8"), "current\n");
+});
+
+test("rollbackFromEngramMigration rechecks backup paths before restoring", {
+  skip: process.platform === "win32",
+}, async () => {
+  const homeDir = await makeTempHome("remnic-migrate-backup-race-");
+  const targetConfig = path.join(homeDir, ".claude.json");
+  const backupPath = rollbackBackupPathForTarget(homeDir, targetConfig);
+  const outsideBackup = path.join(homeDir, "outside-backup.json");
+  const remnicPlist = path.join(homeDir, "Library", "LaunchAgents", "ai.remnic.daemon.plist");
+
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await mkdir(path.dirname(remnicPlist), { recursive: true });
+  await writeFile(targetConfig, "current\n", "utf8");
+  await writeFile(outsideBackup, "forged\n", "utf8");
+  await writeFile(remnicPlist, "plist\n", "utf8");
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: targetConfig, backupPath }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({
+      homeDir,
+      cwd: homeDir,
+      platform: "darwin",
+      quiet: true,
+      execCommand: () => {
+        if (!existsSync(backupPath)) {
+          symlinkSync(outsideBackup, backupPath);
+        }
+      },
+    }),
+    /rollback manifest backup must not contain symlink segments/,
+  );
+
+  assert.equal(await readFile(targetConfig, "utf8"), "current\n");
+});
+
+test("rollbackFromEngramMigration rejects rollback targets with missing parent segments", async () => {
+  const homeDir = await makeTempHome("remnic-migrate-target-missing-parent-");
+  const cwd = await makeTempHome("remnic-migrate-missing-parent-repo-");
+  const targetConfig = path.join(cwd, "packages", "plugin-codex", ".mcp.json");
+  const backupPath = rollbackBackupPathForTarget(homeDir, targetConfig);
+
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await writeFile(backupPath, "backup\n", "utf8");
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: targetConfig, backupPath }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd, quiet: true }),
+    /rollback manifest target must not contain missing parent segments/,
+  );
+
+  assert.equal(existsSync(targetConfig), false);
+});
+
+test("rollbackFromEngramMigration rejects symlinked cwd connector target segments", {
+  skip: process.platform === "win32",
+}, async () => {
+  const homeDir = await makeTempHome("remnic-migrate-target-segment-symlink-");
+  const cwd = await makeTempHome("remnic-migrate-repo-");
+  const attackerRoot = path.join(homeDir, "attacker-packages");
+  const attackerConfig = path.join(attackerRoot, "plugin-codex", ".mcp.json");
+  const targetConfig = path.join(cwd, "packages", "plugin-codex", ".mcp.json");
+  const backupPath = path.join(homeDir, ".remnic", ".backup", "mcp", "forged.json");
+
+  await mkdir(path.dirname(attackerConfig), { recursive: true });
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await writeFile(attackerConfig, "attacker-current\n", "utf8");
+  await writeFile(backupPath, "forged-backup\n", "utf8");
+  await symlink(attackerRoot, path.join(cwd, "packages"));
+  await writeFile(
+    path.join(homeDir, ".remnic", ".rollback.json"),
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [{ targetPath: targetConfig, backupPath }],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd, quiet: true }),
+    /rollback manifest target must not contain symlink segments/,
+  );
+
+  assert.equal(await readFile(attackerConfig, "utf8"), "attacker-current\n");
+});
+
+test("rollbackFromEngramMigration rejects symlinked rollback manifests", {
+  skip: process.platform === "win32",
+}, async () => {
+  const homeDir = await makeTempHome("remnic-migrate-manifest-symlink-");
+  const externalManifest = path.join(homeDir, "external-rollback.json");
+  const rollbackManifest = path.join(homeDir, ".remnic", ".rollback.json");
+
+  await mkdir(path.dirname(rollbackManifest), { recursive: true });
+  await writeFile(
+    externalManifest,
+    `${JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entries: [],
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  await symlink(externalManifest, rollbackManifest);
+
+  await assert.rejects(
+    () => rollbackFromEngramMigration({ homeDir, cwd: homeDir, quiet: true }),
+    /rollback manifest must not be a symlink/,
+  );
 });
 
 test("migration retry preserves rollback entries created before a failed first run", async () => {

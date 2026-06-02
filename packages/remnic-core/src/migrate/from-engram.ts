@@ -29,12 +29,19 @@ interface RollbackManifestEntry {
   targetPath: string;
   backupPath?: string;
   createdByMigration?: boolean;
+  contentHash?: string;
 }
 
 interface RollbackManifest {
   version: 1;
   createdAt: string;
   entries: RollbackManifestEntry[];
+}
+
+interface ValidatedRollbackManifestEntry extends RollbackManifestEntry {
+  targetPath: string;
+  backupPath?: string;
+  contentHash?: string;
 }
 
 export interface MigrationOptions {
@@ -134,6 +141,14 @@ function defaultRollbackCommand(): string {
   return "remnic migrate --rollback";
 }
 
+function resolveMigrationCwd(options?: MigrationOptions): string {
+  return path.resolve(options?.cwd ?? process.cwd());
+}
+
+function resolveConnectorConfigPath(candidate: string, cwd: string): string {
+  return path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(cwd, candidate);
+}
+
 async function ensureParent(filePath: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
 }
@@ -145,6 +160,10 @@ async function secureTokenFilePermissions(filePath: string): Promise<void> {
 async function writeOwnerOnlyFile(filePath: string, content: string): Promise<void> {
   await writeFile(filePath, content, { encoding: "utf8", mode: TOKEN_STORE_MODE });
   await chmod(filePath, TOKEN_STORE_MODE);
+}
+
+async function fileContentHash(filePath: string): Promise<string> {
+  return createHash("sha256").update(await readFile(filePath)).digest("hex");
 }
 
 async function writeTokenStoreFile(filePath: string, content: string): Promise<void> {
@@ -271,6 +290,221 @@ function parseTokenEntries(raw: unknown): TokenEntry[] {
 
 function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseRollbackManifestEntry(raw: unknown, index: number): RollbackManifestEntry {
+  if (!isPlainJsonObject(raw)) {
+    throw new Error(`rollback manifest entry ${index} must be an object`);
+  }
+  if (typeof raw.targetPath !== "string" || raw.targetPath.length === 0 || !path.isAbsolute(raw.targetPath)) {
+    throw new Error(`rollback manifest entry ${index} has an invalid targetPath`);
+  }
+  if (raw.backupPath !== undefined && (typeof raw.backupPath !== "string" || raw.backupPath.length === 0 || !path.isAbsolute(raw.backupPath))) {
+    throw new Error(`rollback manifest entry ${index} has an invalid backupPath`);
+  }
+  if (raw.createdByMigration !== undefined && typeof raw.createdByMigration !== "boolean") {
+    throw new Error(`rollback manifest entry ${index} has an invalid createdByMigration flag`);
+  }
+  if (raw.contentHash !== undefined && (typeof raw.contentHash !== "string" || !/^[a-f0-9]{64}$/u.test(raw.contentHash))) {
+    throw new Error(`rollback manifest entry ${index} has an invalid contentHash`);
+  }
+  return {
+    targetPath: raw.targetPath,
+    ...(raw.backupPath === undefined ? {} : { backupPath: raw.backupPath }),
+    ...(raw.createdByMigration === undefined ? {} : { createdByMigration: raw.createdByMigration }),
+    ...(raw.contentHash === undefined ? {} : { contentHash: raw.contentHash }),
+  };
+}
+
+function parseRollbackManifest(raw: unknown, manifestPath: string): RollbackManifest {
+  if (!isPlainJsonObject(raw)) {
+    throw new Error(`rollback manifest must be an object: ${manifestPath}`);
+  }
+  if (raw.version !== 1) {
+    throw new Error(`rollback manifest has unsupported version: ${manifestPath}`);
+  }
+  if (typeof raw.createdAt !== "string") {
+    throw new Error(`rollback manifest has an invalid createdAt: ${manifestPath}`);
+  }
+  if (!Array.isArray(raw.entries)) {
+    throw new Error(`rollback manifest entries must be an array: ${manifestPath}`);
+  }
+  return {
+    version: 1,
+    createdAt: raw.createdAt,
+    entries: raw.entries.map(parseRollbackManifestEntry),
+  };
+}
+
+function isPathInside(parentPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isPathDescendant(parentPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function hasConnectorConfigShape(targetPath: string, homeDir: string): boolean {
+  const relative = path.relative(path.resolve(homeDir), path.resolve(targetPath));
+  if (relative === ".claude.json" || relative === path.join(".claude", ".mcp.json")) {
+    return true;
+  }
+
+  return hasRepoConnectorConfigShape(relative);
+}
+
+function hasRepoConnectorConfigShape(relativePath: string): boolean {
+  const parts = relativePath.split(path.sep);
+  const last = parts.at(-1);
+  const packageName = parts.at(-2);
+  const packagesDir = parts.at(-3);
+  return last === ".mcp.json" &&
+    packagesDir === "packages" &&
+    (packageName === "plugin-claude-code" || packageName === "plugin-codex");
+}
+
+function connectorBackupPathForTarget(targetPath: string, homeDir: string): string {
+  const digest = createHash("sha256").update(targetPath).digest("hex").slice(0, 12);
+  return path.join(backupRoot(homeDir), "mcp", `${digest}.json`);
+}
+
+function isRollbackTargetAllowed(
+  entry: RollbackManifestEntry,
+  targetPath: string,
+  homeDir: string,
+  options?: MigrationOptions,
+): boolean {
+  const resolvedTarget = path.resolve(targetPath);
+  if (isPathDescendant(remnicRoot(homeDir), resolvedTarget)) {
+    if (entry.createdByMigration && !entry.backupPath) return true;
+    return Boolean(entry.backupPath) && isRemnicTokenStorePath(resolvedTarget, homeDir);
+  }
+  if (isPathDescendant(path.join(homeDir, ".config", "remnic"), resolvedTarget)) {
+    return entry.createdByMigration === true && !entry.backupPath;
+  }
+
+  const serviceTargets = new Set([
+    path.resolve(path.join(homeDir, "Library", "LaunchAgents", "ai.remnic.daemon.plist")),
+    path.resolve(path.join(homeDir, ".config", "systemd", "user", "remnic.service")),
+  ]);
+  if (serviceTargets.has(resolvedTarget)) return true;
+
+  const cwd = resolveMigrationCwd(options);
+  const allowedConnectorPaths = new Set(
+    [
+      ...defaultConnectorConfigPaths(homeDir, cwd),
+      ...(options?.connectorConfigPaths ?? []),
+    ].map((candidate) => resolveConnectorConfigPath(candidate, cwd)),
+  );
+  if (allowedConnectorPaths.has(resolvedTarget)) return true;
+
+  return isPathInside(homeDir, resolvedTarget) && hasConnectorConfigShape(resolvedTarget, homeDir);
+}
+
+function isRollbackBackupAllowed(backupPath: string, homeDir: string): boolean {
+  return isPathInside(backupRoot(homeDir), backupPath);
+}
+
+async function assertNoSymlinkPathSegments(filePath: string, trustedRoot: string, label: string): Promise<void> {
+  const resolvedPath = path.resolve(filePath);
+  const resolvedRoot = path.resolve(trustedRoot);
+  if (!isPathInside(resolvedRoot, resolvedPath)) {
+    throw new Error(`${label} is outside the trusted rollback root: ${filePath}`);
+  }
+  const segments = path.relative(resolvedRoot, resolvedPath).split(path.sep).filter(Boolean);
+  let current = resolvedRoot;
+
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    try {
+      const currentStat = await lstat(current);
+      if (currentStat.isSymbolicLink()) {
+        throw new Error(`${label} must not contain symlink segments: ${filePath}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && index === segments.length - 1) return;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`${label} must not contain missing parent segments: ${filePath}`);
+      }
+      throw error;
+    }
+  }
+}
+
+function rollbackTargetSymlinkRoot(targetPath: string, homeDir: string, options?: MigrationOptions): string {
+  if (isPathInside(homeDir, targetPath)) return homeDir;
+
+  const cwd = resolveMigrationCwd(options);
+  if (isPathInside(cwd, targetPath)) return cwd;
+
+  return path.parse(targetPath).root;
+}
+
+async function validateRollbackManifestEntries(
+  manifest: RollbackManifest,
+  homeDir: string,
+  options?: MigrationOptions,
+): Promise<ValidatedRollbackManifestEntry[]> {
+  const validated: ValidatedRollbackManifestEntry[] = [];
+
+  for (const entry of manifest.entries) {
+    const targetPath = path.resolve(entry.targetPath);
+    if (!isRollbackTargetAllowed(entry, targetPath, homeDir, options)) {
+      throw new Error(`rollback manifest target is outside migration-owned paths: ${entry.targetPath}`);
+    }
+    if (entry.backupPath && entry.createdByMigration) {
+      throw new Error(`rollback manifest entry cannot restore and remove the same target: ${entry.targetPath}`);
+    }
+    const targetExists = await pathExistsNoFollow(targetPath);
+    if (!entry.createdByMigration || targetExists) {
+      const targetSymlinkRoot = rollbackTargetSymlinkRoot(targetPath, homeDir, options);
+      await assertNoSymlinkPathSegments(targetPath, targetSymlinkRoot, "rollback manifest target");
+    }
+    if (entry.createdByMigration && targetExists) {
+      await assertCreatedRollbackTargetMatchesRecord(entry, targetPath);
+    }
+
+    let backupPath: string | undefined;
+    if (entry.backupPath) {
+      backupPath = path.resolve(entry.backupPath);
+      if (!isRollbackBackupAllowed(backupPath, homeDir)) {
+        throw new Error(`rollback manifest backup is outside migration backup storage: ${entry.backupPath}`);
+      }
+      if (await pathExistsNoFollow(backupPath)) {
+        await assertNoSymlinkPathSegments(backupPath, homeDir, "rollback manifest backup");
+        await assertExistingRegularFileNoFollow(backupPath, "rollback manifest backup");
+      }
+      if (backupPath !== connectorBackupPathForTarget(targetPath, homeDir)) {
+        throw new Error(`rollback manifest backup does not match target: ${entry.targetPath}`);
+      }
+    }
+
+    validated.push({
+      targetPath,
+      ...(backupPath === undefined ? {} : { backupPath }),
+      ...(entry.createdByMigration === undefined ? {} : { createdByMigration: entry.createdByMigration }),
+      ...(entry.contentHash === undefined ? {} : { contentHash: entry.contentHash }),
+    });
+  }
+
+  return validated;
+}
+
+async function assertCreatedRollbackTargetMatchesRecord(
+  entry: RollbackManifestEntry,
+  targetPath: string,
+): Promise<boolean> {
+  const targetStat = await lstat(targetPath);
+  if (targetStat.isDirectory()) {
+    throw new Error(`rollback manifest created target must be a file path: ${entry.targetPath}`);
+  }
+  if (!targetStat.isFile() || !entry.contentHash) return false;
+  if (await fileContentHash(targetPath) !== entry.contentHash) {
+    throw new Error(`rollback manifest created target content does not match migration record: ${entry.targetPath}`);
+  }
+  return true;
 }
 
 async function rewriteTokensIfPresent(filePath: string): Promise<number> {
@@ -461,8 +695,7 @@ async function backupFile(
   if (manifest.entries.some((entry) => entry.targetPath === targetPath && entry.backupPath)) {
     return;
   }
-  const digest = createHash("sha256").update(targetPath).digest("hex").slice(0, 12);
-  const backupPath = path.join(backupRoot(homeDir), "mcp", `${digest}.json`);
+  const backupPath = connectorBackupPathForTarget(targetPath, homeDir);
   await ensureParent(backupPath);
   if (isRemnicTokenStorePath(targetPath, homeDir)) {
     await writeOwnerOnlyFile(backupPath, originalContent);
@@ -481,7 +714,24 @@ async function recordCreatedPath(
   persistManifest?: PersistRollbackManifest,
 ): Promise<void> {
   if (manifest.entries.some((entry) => entry.targetPath === filePath)) return;
-  manifest.entries.push({ targetPath: filePath, createdByMigration: true });
+  manifest.entries.push({
+    targetPath: filePath,
+    createdByMigration: true,
+    contentHash: await fileContentHash(filePath),
+  });
+  await persistManifest?.();
+}
+
+async function refreshCreatedPathHash(
+  filePath: string,
+  manifest: RollbackManifest,
+  persistManifest?: PersistRollbackManifest,
+): Promise<void> {
+  const entry = manifest.entries.find((candidate) =>
+    candidate.targetPath === filePath && candidate.createdByMigration
+  );
+  if (!entry) return;
+  entry.contentHash = await fileContentHash(filePath);
   await persistManifest?.();
 }
 
@@ -504,8 +754,9 @@ async function updateConnectorConfigs(
   const updated: string[] = [];
   const candidates = options?.connectorConfigPaths ?? defaultConnectorConfigPaths(homeDir, cwd);
   for (const targetPath of candidates) {
-    if (await rewriteJsonFile(targetPath, homeDir, manifest, persistManifest)) {
-      updated.push(targetPath);
+    const resolvedTarget = resolveConnectorConfigPath(targetPath, cwd);
+    if (await rewriteJsonFile(resolvedTarget, homeDir, manifest, persistManifest)) {
+      updated.push(resolvedTarget);
     }
   }
   return updated;
@@ -616,12 +867,26 @@ async function writeRollbackManifest(homeDir: string, manifest: RollbackManifest
 
 async function readRollbackManifest(homeDir: string): Promise<RollbackManifest | null> {
   const target = rollbackManifestPath(homeDir);
-  if (!existsSync(target)) return null;
+  let targetStat: Awaited<ReturnType<typeof lstat>>;
   try {
-    return JSON.parse(await readFile(target, "utf8")) as RollbackManifest;
+    targetStat = await lstat(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (targetStat.isSymbolicLink()) {
+    throw new Error(`rollback manifest must not be a symlink: ${target}`);
+  }
+  if (!targetStat.isFile()) {
+    throw new Error(`rollback manifest must be a regular file: ${target}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(target, "utf8")) as unknown;
   } catch {
     return null;
   }
+  return parseRollbackManifest(parsed, target);
 }
 
 async function acquireLock(homeDir: string): Promise<() => Promise<void>> {
@@ -699,6 +964,7 @@ export async function rollbackFromEngramMigration(options?: MigrationOptions): P
   const removed: string[] = [];
 
   if (!manifest) return { restored, removed };
+  const entries = await validateRollbackManifestEntries(manifest, homeDir, options);
 
   if (platform === "darwin") {
     const remnicPlist = path.join(homeDir, "Library", "LaunchAgents", "ai.remnic.daemon.plist");
@@ -718,8 +984,10 @@ export async function rollbackFromEngramMigration(options?: MigrationOptions): P
     }
   }
 
-  for (const entry of [...manifest.entries].reverse()) {
-    if (entry.backupPath && existsSync(entry.backupPath)) {
+  for (const entry of [...entries].reverse()) {
+    if (entry.backupPath && await pathExistsNoFollow(entry.backupPath)) {
+      await assertNoSymlinkPathSegments(entry.backupPath, homeDir, "rollback manifest backup");
+      await assertExistingRegularFileNoFollow(entry.backupPath, "rollback manifest backup");
       await ensureParent(entry.targetPath);
       await copyFile(entry.backupPath, entry.targetPath);
       if (isRemnicTokenStorePath(entry.targetPath, homeDir)) {
@@ -729,6 +997,9 @@ export async function rollbackFromEngramMigration(options?: MigrationOptions): P
       continue;
     }
     if (entry.createdByMigration && existsSync(entry.targetPath)) {
+      const targetSymlinkRoot = rollbackTargetSymlinkRoot(entry.targetPath, homeDir, options);
+      await assertNoSymlinkPathSegments(entry.targetPath, targetSymlinkRoot, "rollback manifest target");
+      if (!await assertCreatedRollbackTargetMatchesRecord(entry, entry.targetPath)) continue;
       await rm(entry.targetPath, { recursive: true, force: true });
       removed.push(entry.targetPath);
     }
@@ -749,7 +1020,7 @@ export async function rollbackFromEngramMigration(options?: MigrationOptions): P
 
 export async function migrateFromEngram(options?: MigrationOptions): Promise<MigrationResult> {
   const homeDir = resolveMigrationHome(options);
-  const cwd = options?.cwd ?? process.cwd();
+  const cwd = resolveMigrationCwd(options);
   const logger = resolveLogger(options);
   const copied: string[] = [];
   let tokensRegenerated = 0;
@@ -806,6 +1077,7 @@ export async function migrateFromEngram(options?: MigrationOptions): Promise<Mig
     const remnicTokens = path.join(remnicRoot(homeDir), "tokens.json");
     if (copied.includes(remnicTokens)) {
       tokensRegenerated += await rewriteTokensIfPresent(remnicTokens);
+      await refreshCreatedPathHash(remnicTokens, manifest, persistManifest);
     } else {
       tokensRegenerated += await mergeLegacyTokens(
         legacyTokens,
