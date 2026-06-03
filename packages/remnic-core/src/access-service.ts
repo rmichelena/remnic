@@ -2208,7 +2208,16 @@ export class EngramAccessService {
         ? snapshot
         : null;
     })();
-    const namespace = requestedNamespace ?? readableSnapshot?.namespace ?? this.orchestrator.config.defaultNamespace;
+    const namespace = (() => {
+      if (requestedNamespace) return requestedNamespace;
+      if (readableSnapshot?.namespace) return readableSnapshot.namespace;
+      const fallbackNamespace = this.orchestrator.config.defaultNamespace;
+      if (!this.orchestrator.config.namespacesEnabled) return fallbackNamespace;
+      return canReadNamespace(principal, fallbackNamespace, this.orchestrator.config)
+        ? fallbackNamespace
+        : null;
+    })();
+    if (!namespace) return { found: false };
     const [intent, graph] = await Promise.all([
       this.orchestrator.getLastIntentSnapshot(namespace),
       this.orchestrator.getLastGraphRecallSnapshot(namespace),
