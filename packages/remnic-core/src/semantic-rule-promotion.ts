@@ -193,7 +193,7 @@ async function writePromotionLockHeartbeat(lockDir: string, token: string): Prom
 async function refreshPromotionLockHeartbeat(lockDir: string, token: string): Promise<boolean> {
   const owner = await readPromotionLockOwner(lockDir);
   if (owner.token !== token) {
-    return pathExists(promotionReapDir(lockDir));
+    return false;
   }
   await writePromotionLockHeartbeat(lockDir, token);
   return true;

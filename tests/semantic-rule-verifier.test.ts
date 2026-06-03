@@ -245,7 +245,7 @@ test("semantic rule promotion recovers ownerless lock directories after a short 
   assert.equal(promotion.skipped.length, 0);
 });
 
-test("semantic rule promotion retries when a delayed owner write loses the lock", async () => {
+test("semantic rule promotion retries when a delayed owner write loses the lock", { concurrency: false }, async () => {
   const { memoryDir, storage } = await createSemanticRuleHarness();
   const sourceMemoryId = await storage.writeMemory(
     "fact",
@@ -311,7 +311,7 @@ test("semantic rule promotion retries when a delayed owner write loses the lock"
   }
 });
 
-test("semantic rule promotion does not write after losing the promotion lock", async () => {
+test("semantic rule promotion does not write after losing the promotion lock", { concurrency: false }, async () => {
   const { memoryDir, storage } = await createSemanticRuleHarness();
   const sourceMemoryId = await storage.writeMemory(
     "fact",
@@ -364,44 +364,98 @@ test("semantic rule promotion does not write after losing the promotion lock", a
   }
 });
 
-test("semantic rule promotion keeps a successful result when lock release times out", async () => {
-  const { memoryDir } = await createSemanticRuleHarness();
-  const storage = new StorageManager(memoryDir);
+test("semantic rule promotion does not treat a reap guard as proof of ownership", { concurrency: false }, async () => {
+  const { memoryDir, storage } = await createSemanticRuleHarness();
   const sourceMemoryId = await storage.writeMemory(
     "fact",
-    "IF lock release stalls after promotion THEN report the already written rule.",
+    "IF a promotion lock owner token changes during reap THEN do not write the rule.",
     {
       source: "test",
-      tags: ["pr-loop", "release-timeout"],
+      tags: ["pr-loop", "reap-token-mismatch"],
       confidence: 0.91,
       memoryKind: "episode",
     }
   );
-  let blockReleaseOnce = true;
+  let replaceOwnerOnce = true;
 
   setSemanticRulePromotionTestHooks({
-    lockTimeoutMs: 25,
-    lockRetryMs: 1,
-    beforeLockRelease: async (lockDir) => {
-      if (!blockReleaseOnce) return;
-      blockReleaseOnce = false;
-      await mkdir(`${lockDir}.release`, { recursive: true });
+    beforePromotedRuleWrite: async (lockDir) => {
+      if (!replaceOwnerOnce) return;
+      replaceOwnerOnce = false;
+      await mkdir(`${lockDir}.reap`, { recursive: true });
+      await rm(path.join(lockDir, "owner.json"), { force: true });
+      await writeFile(
+        path.join(lockDir, "owner.json"),
+        JSON.stringify({
+          pid: process.pid,
+          token: "different-owner-token",
+          acquiredAt: new Date().toISOString(),
+        })
+      );
     },
   });
 
   try {
-    const promotion = await promoteSemanticRuleFromMemory({
-      memoryDir,
-      enabled: true,
-      sourceMemoryId,
-    });
+    await assert.rejects(
+      promoteSemanticRuleFromMemory({
+        memoryDir,
+        enabled: true,
+        sourceMemoryId,
+      }),
+      /Semantic rule promotion lock is no longer held/
+    );
+    const rules = (await storage.readAllMemories()).filter(
+      (memory) => memory.frontmatter.category === "rule" && memory.frontmatter.source === "semantic-rule-promotion"
+    );
 
-    assert.equal(promotion.promoted.length, 1);
-    assert.equal(promotion.skipped.length, 0);
+    assert.equal(rules.length, 0);
   } finally {
     setSemanticRulePromotionTestHooks(null);
   }
 });
+
+test(
+  "semantic rule promotion keeps a successful result when lock release times out",
+  { concurrency: false },
+  async () => {
+    const { memoryDir } = await createSemanticRuleHarness();
+    const storage = new StorageManager(memoryDir);
+    const sourceMemoryId = await storage.writeMemory(
+      "fact",
+      "IF lock release stalls after promotion THEN report the already written rule.",
+      {
+        source: "test",
+        tags: ["pr-loop", "release-timeout"],
+        confidence: 0.91,
+        memoryKind: "episode",
+      }
+    );
+    let blockReleaseOnce = true;
+
+    setSemanticRulePromotionTestHooks({
+      lockTimeoutMs: 25,
+      lockRetryMs: 1,
+      beforeLockRelease: async (lockDir) => {
+        if (!blockReleaseOnce) return;
+        blockReleaseOnce = false;
+        await mkdir(`${lockDir}.release`, { recursive: true });
+      },
+    });
+
+    try {
+      const promotion = await promoteSemanticRuleFromMemory({
+        memoryDir,
+        enabled: true,
+        sourceMemoryId,
+      });
+
+      assert.equal(promotion.promoted.length, 1);
+      assert.equal(promotion.skipped.length, 0);
+    } finally {
+      setSemanticRulePromotionTestHooks(null);
+    }
+  }
+);
 
 test("semantic rule promotion recovers abandoned release guards", async () => {
   const { memoryDir, storage } = await createSemanticRuleHarness();
