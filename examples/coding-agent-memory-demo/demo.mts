@@ -41,7 +41,8 @@ const memoryWrites = [
 
 function parseArgs(argv: string[]) {
   let memoryDir = process.env.REMNIC_DEMO_MEMORY_DIR ?? DEFAULT_MEMORY_DIR;
-  let reset = true;
+  let usesDefaultMemoryDir = !process.env.REMNIC_DEMO_MEMORY_DIR;
+  let reset: boolean | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -51,9 +52,12 @@ function parseArgs(argv: string[]) {
         throw new Error("--memory-dir requires a path value");
       }
       memoryDir = value;
+      usesDefaultMemoryDir = false;
       index += 1;
     } else if (arg === "--keep") {
       reset = false;
+    } else if (arg === "--reset") {
+      reset = true;
     } else if (arg === "--help" || arg === "-h") {
       printUsage();
       process.exit(0);
@@ -65,18 +69,19 @@ function parseArgs(argv: string[]) {
   return {
     displayMemoryDir: memoryDir,
     memoryDir: path.resolve(process.cwd(), memoryDir),
-    reset,
+    reset: reset ?? usesDefaultMemoryDir,
   };
 }
 
 function printUsage() {
-  console.log(`Usage: pnpm run demo:coding-agent-memory -- [--memory-dir <path>] [--keep]
+  console.log(`Usage: pnpm run demo:coding-agent-memory -- [--memory-dir <path>] [--keep] [--reset]
 
 Runs a local, no-key Remnic coding-agent memory demo.
 
 Options:
   --memory-dir <path>  Memory directory to seed and recall from
-  --keep               Do not reset the memory directory before seeding`);
+  --keep               Do not reset the built-in demo memory directory before seeding
+  --reset              Explicitly reset the selected memory directory before seeding`);
 }
 
 function createConfig(memoryDir: string) {
@@ -148,6 +153,12 @@ function formatReason(result: {
   return `scope=${scope}; servedBy=${servedBy}; ${retrievalReason}`;
 }
 
+function assertDemoInvariant(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(`demo invariant failed: ${message}`);
+  }
+}
+
 async function runDemo() {
   const options = parseArgs(process.argv.slice(2));
   if (options.reset) {
@@ -194,6 +205,17 @@ async function runDemo() {
 
     const surfacedMarketing = recall.context.includes("marketing-site hero copy");
     const tagFilter = xray.snapshot?.filters.find((filter) => filter.name === "tag-filter");
+    const printableResults = recall.memoryIds.map((memoryId) => {
+      const summary = resultForMemoryId(recall.results, memoryId);
+      const result = resultForMemoryId(xray.snapshot?.results, memoryId);
+      assertDemoInvariant(summary, `missing recall summary for ${memoryId}`);
+      assertDemoInvariant(result, `missing X-ray result for ${memoryId}`);
+      return { memoryId, result, summary };
+    });
+
+    assertDemoInvariant(recall.count === 2, `expected 2 checkout memories, got ${recall.count}`);
+    assertDemoInvariant(printableResults.length === 2, `expected 2 printable memories, got ${printableResults.length}`);
+    assertDemoInvariant(!surfacedMarketing, "marketing namespace memory surfaced in checkout recall");
 
     console.log("Remnic coding-agent memory demo");
     console.log(`memoryDir: ${options.displayMemoryDir}`);
@@ -211,12 +233,7 @@ async function runDemo() {
     console.log(`active namespace: ${CHECKOUT_NAMESPACE}`);
     console.log(`query: ${QUERY}`);
     console.log(`recalled ${recall.count} real Remnic memories`);
-    for (const memoryId of recall.memoryIds) {
-      const summary = resultForMemoryId(recall.results, memoryId);
-      const result = resultForMemoryId(xray.snapshot?.results, memoryId);
-      if (!summary || !result) {
-        continue;
-      }
+    for (const { result, summary } of printableResults) {
       console.log(`- ${summary.category}`);
       console.log(`  content: ${summary.content ?? summary.preview}`);
       console.log(`  why: ${formatReason(result)}`);
@@ -239,6 +256,7 @@ async function runDemo() {
 
 runDemo().catch((error) => {
   const script = path.relative(process.cwd(), fileURLToPath(import.meta.url));
-  console.error(`${script}: ${error instanceof Error ? error.message : String(error)}`);
+  const failureKind = error instanceof Error ? error.name : "UnknownError";
+  console.error(`${script}: demo failed (${failureKind})`);
   process.exitCode = 1;
 });

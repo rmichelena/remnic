@@ -66,7 +66,15 @@ result: PASS - claude-code:session-b recalled checkout-service context written b
 
 The generated demo memory files live under
 `examples/coding-agent-memory-demo/.demo-memory/`, which is gitignored. Delete
-that directory whenever you want a fresh run; the demo also resets it by default.
+that directory whenever you want a fresh run; the demo also resets only that
+built-in directory by default.
+
+Custom memory directories are preserved unless you explicitly pass `--reset`:
+
+```bash
+pnpm run demo:coding-agent-memory -- --memory-dir /tmp/remnic-demo
+pnpm run demo:coding-agent-memory -- --memory-dir /tmp/remnic-demo --reset
+```
 
 ## Smoke test
 
