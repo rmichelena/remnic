@@ -271,7 +271,7 @@ test("readVerifiedDaemonPid accepts a live remnic-server command", () => {
   assert.deepEqual(removed, []);
 });
 
-test("readVerifiedDaemonPid keeps a live pid when command lookup is inconclusive", () => {
+test("readVerifiedDaemonPid rejects a live pid when command lookup is inconclusive", () => {
   const removed: string[] = [];
   const pid = readVerifiedDaemonPid({
     pidFiles: ["/tmp/remnic.pid"],
@@ -290,8 +290,59 @@ test("readVerifiedDaemonPid keeps a live pid when command lookup is inconclusive
     },
   });
 
-  assert.equal(pid, 34567);
+  assert.equal(pid, undefined);
+  assert.deepEqual(removed, ["/tmp/remnic.pid"]);
+});
+
+test("readVerifiedDaemonPid accepts a Windows daemon pid via PowerShell command lookup", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const removed: string[] = [];
+  const pid = readVerifiedDaemonPid({
+    pidFiles: ["C:\\Temp\\remnic.pid"],
+    expectedServerBin: "C:\\repo\\packages\\remnic-server\\bin\\remnic-server.js",
+    platform: "win32",
+    readFileSync: () => "45678\n",
+    processKill: () => true,
+    execFileSync: (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, "powershell.exe");
+      assert.ok(args.includes("-Command"));
+      return "node C:\\repo\\packages\\remnic-server\\bin\\remnic-server.js\n";
+    },
+    unlinkSync: (file) => {
+      removed.push(file);
+    },
+  });
+
+  assert.equal(pid, 45678);
   assert.deepEqual(removed, []);
+  assert.equal(calls[0]?.command, "powershell.exe");
+});
+
+test("readVerifiedDaemonPid falls back to WMIC when PowerShell lookup is unavailable", () => {
+  const calls: string[] = [];
+  const removed: string[] = [];
+  const pid = readVerifiedDaemonPid({
+    pidFiles: ["C:\\Temp\\remnic.pid"],
+    expectedServerBin: "C:\\repo\\packages\\remnic-server\\bin\\remnic-server.js",
+    platform: "win32",
+    readFileSync: () => "56789\n",
+    processKill: () => true,
+    execFileSync: (command) => {
+      calls.push(command);
+      if (command !== "wmic") {
+        throw new Error([command, "unavailable"].join(" "));
+      }
+      return "CommandLine=node C:\\repo\\packages\\remnic-server\\bin\\remnic-server.js\r\n";
+    },
+    unlinkSync: (file) => {
+      removed.push(file);
+    },
+  });
+
+  assert.equal(pid, 56789);
+  assert.deepEqual(removed, []);
+  assert.deepEqual(calls, ["powershell.exe", "powershell", "pwsh", "wmic"]);
 });
 
 test("doesProcessCommandLookLikeRemnicDaemon recognizes package and workspace server paths", () => {

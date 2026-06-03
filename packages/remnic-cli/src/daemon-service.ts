@@ -55,6 +55,7 @@ export interface LaunchctlProcess {
 export interface ReadVerifiedDaemonPidOptions {
   pidFiles: readonly string[];
   expectedServerBin: string;
+  platform?: NodeJS.Platform;
   readFileSync?: (file: string, encoding: BufferEncoding) => string;
   unlinkSync?: (file: string) => void;
   processKill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
@@ -162,6 +163,7 @@ export function readVerifiedDaemonPid(
   const readFileSync = options.readFileSync ?? fs.readFileSync;
   const unlinkSync = options.unlinkSync ?? fs.unlinkSync;
   const processKill = options.processKill ?? process.kill;
+  const platform = options.platform ?? process.platform;
   const execFileSync =
     options.execFileSync ??
     ((command, args, execOptions) =>
@@ -185,9 +187,10 @@ export function readVerifiedDaemonPid(
       continue;
     }
 
-    const command = readProcessCommand(pid, execFileSync);
+    const command = readProcessCommand(pid, execFileSync, platform);
     if (command === undefined) {
-      return pid;
+      removePidFileBestEffort(file, unlinkSync);
+      continue;
     }
     if (
       doesProcessCommandLookLikeRemnicDaemon(command, options.expectedServerBin)
@@ -223,12 +226,64 @@ function parseDaemonPid(raw: string): number | undefined {
 function readProcessCommand(
   pid: number,
   execFileSync: NonNullable<ReadVerifiedDaemonPidOptions["execFileSync"]>,
+  platform: NodeJS.Platform,
+): string | undefined {
+  if (platform === "win32") {
+    return readWindowsProcessCommand(pid, execFileSync);
+  }
+  return readPosixProcessCommand(pid, execFileSync);
+}
+
+function readPosixProcessCommand(
+  pid: number,
+  execFileSync: NonNullable<ReadVerifiedDaemonPidOptions["execFileSync"]>,
 ): string | undefined {
   try {
     return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
       encoding: "utf8",
       stdio: "pipe",
     });
+  } catch {
+    return undefined;
+  }
+}
+
+function readWindowsProcessCommand(
+  pid: number,
+  execFileSync: NonNullable<ReadVerifiedDaemonPidOptions["execFileSync"]>,
+): string | undefined {
+  const powerShellCommand =
+    `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; ` +
+    "if ($null -ne $process) { $process.CommandLine }";
+  for (const command of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const output = execFileSync(
+        command,
+        ["-NoProfile", "-NonInteractive", "-Command", powerShellCommand],
+        {
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      );
+      if (output.trim() !== "") {
+        return output;
+      }
+    } catch {
+      // Try the next Windows command-inspection mechanism.
+    }
+  }
+
+  try {
+    const output = execFileSync(
+      "wmic",
+      ["process", "where", ["processid", String(pid)].join("="), "get", "CommandLine", "/value"],
+      {
+        encoding: "utf8",
+        stdio: "pipe",
+      },
+    );
+    const match = /^CommandLine=(.*)$/m.exec(output);
+    return match?.[1];
   } catch {
     return undefined;
   }
