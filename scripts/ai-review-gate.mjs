@@ -8,7 +8,7 @@ const BAD_CHECK_CONCLUSIONS = new Set([
   "timed_out",
 ]);
 const POSITIVE_CHECK_CONCLUSIONS = new Set(["success", "neutral"]);
-const NEGATIVE_REVIEW_STATES = new Set(["CHANGES_REQUESTED"]);
+const NEGATIVE_REVIEW_STATES = new Set(["CHANGES_REQUESTED", "DISMISSED"]);
 const NEGATIVE_VERDICT_PATTERN =
   /\b(?:changes\s+requested|do\s+not\s+merge|(?:not|no|never|cannot|can['’]?t|isn['’]?t)\s+(?:a\s+)?(?:pass|approved|lgtm))\b/i;
 const POSITIVE_VERDICT_PATTERN = /\b(?:PASS|APPROVED|LGTM)\b/i;
@@ -154,7 +154,7 @@ export function evaluateAiReviewGate({
   }
 
   const positiveByAlias = new Map();
-  const positiveCheckRunAliases = new Set();
+  const positiveCheckRunTimesByAlias = new Map();
   const blockers = [];
   const configuredAliases = new Set(groups.flat());
 
@@ -175,7 +175,7 @@ export function evaluateAiReviewGate({
       continue;
     }
     if (NEGATIVE_REVIEW_STATES.has(review.state)) {
-      blockers.push({ alias: login, kind: "review", state: review.state });
+      blockers.push({ alias: login, kind: "review", state: review.state, time: activityTime(review) });
     }
   }
 
@@ -205,10 +205,14 @@ export function evaluateAiReviewGate({
   for (const checkRun of latestCheckRuns.values()) {
     const conclusion = normalizeLogin(checkRun.conclusion);
     const alias = checkRun.alias;
+    const checkTime = checkRunTime(checkRun);
     if (BAD_CHECK_CONCLUSIONS.has(conclusion)) {
       blockers.push({ alias, kind: "check_run", state: conclusion || "unknown" });
     } else if (POSITIVE_CHECK_CONCLUSIONS.has(conclusion)) {
-      positiveCheckRunAliases.add(alias);
+      const previousPositiveTime = positiveCheckRunTimesByAlias.get(alias);
+      if (previousPositiveTime === undefined || checkTime > previousPositiveTime) {
+        positiveCheckRunTimesByAlias.set(alias, checkTime);
+      }
       positiveByAlias.set(alias, { alias, kind: "check_run", state: conclusion });
     }
   }
@@ -224,9 +228,12 @@ export function evaluateAiReviewGate({
     }
   }
 
-  const effectiveBlockers = blockers.filter(
-    (blocker) => blocker.kind !== "review" || !positiveCheckRunAliases.has(blocker.alias),
-  );
+  const effectiveBlockers = blockers.filter((blocker) => {
+    if (blocker.kind !== "review") return true;
+    if (blocker.state === "DISMISSED") return true;
+    const positiveCheckRunTime = positiveCheckRunTimesByAlias.get(blocker.alias);
+    return positiveCheckRunTime === undefined || positiveCheckRunTime < (blocker.time ?? 0);
+  });
 
   if (effectiveBlockers.length > 0) {
     return {

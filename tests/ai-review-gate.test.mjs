@@ -157,6 +157,32 @@ test("AI review gate uses the latest current-head review state per alias", () =>
   assert.equal(result.blockers[0]?.state, "CHANGES_REQUESTED");
 });
 
+test("AI review gate blocks dismissed current-head review changes", () => {
+  const result = evaluateAiReviewGate({
+    groups: parseReviewerGroups("codex"),
+    headSha,
+    headCommittedAt,
+    reviews: [
+      {
+        user: { login: "codex" },
+        state: "CHANGES_REQUESTED",
+        commit_id: headSha,
+        submitted_at: "2026-05-21T12:00:01.000Z",
+      },
+      {
+        user: { login: "codex" },
+        state: "DISMISSED",
+        commit_id: headSha,
+        submitted_at: "2026-05-21T12:00:02.000Z",
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.blockers[0]?.alias, "codex");
+  assert.equal(result.blockers[0]?.state, "DISMISSED");
+});
+
 test("AI review gate accepts a later current-head approval after changes requested", () => {
   const result = evaluateAiReviewGate({
     groups: parseReviewerGroups("codex"),
@@ -209,6 +235,34 @@ test("AI review gate lets current-head positive check runs clear review blockers
   assert.equal(result.ok, true);
   assert.deepEqual(result.blockers, []);
   assert.equal(result.present[0]?.kind, "check_run");
+});
+
+test("AI review gate does not clear dismissed review blockers with check runs", () => {
+  const result = evaluateAiReviewGate({
+    groups: parseReviewerGroups("cursor"),
+    headSha,
+    headCommittedAt,
+    reviews: [
+      {
+        user: { login: "cursor" },
+        state: "DISMISSED",
+        commit_id: headSha,
+        submitted_at: "2026-05-21T12:00:03.000Z",
+      },
+    ],
+    checkRuns: [
+      {
+        app: { slug: "cursor" },
+        conclusion: "success",
+        head_sha: headSha,
+        completed_at: "2026-05-21T12:00:04.000Z",
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.blockers[0]?.alias, "cursor");
+  assert.equal(result.blockers[0]?.state, "DISMISSED");
 });
 
 test("AI review gate ignores failed check runs from non-reviewer apps", () => {
