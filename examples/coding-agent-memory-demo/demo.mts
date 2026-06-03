@@ -16,8 +16,13 @@ class DemoError extends Error {
   constructor(public readonly safeDetail: string) {
     super("demo failed");
     this.name = "DemoError";
+    lastDemoError = this;
+    lastSafeDemoDetail = safeDetail;
   }
 }
+
+let lastDemoError: DemoError | undefined;
+let lastSafeDemoDetail: string | undefined;
 
 const memoryWrites = [
   {
@@ -57,7 +62,7 @@ function parseArgs(argv: string[]) {
       continue;
     } else if (arg === "--memory-dir") {
       const value = argv[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new DemoError("--memory-dir requires a path value");
       }
       memoryDir = value;
@@ -265,7 +270,7 @@ async function runDemo() {
 
 runDemo().catch((error) => {
   const script = path.relative(process.cwd(), fileURLToPath(import.meta.url));
-  const detail = error instanceof DemoError ? `: ${error.safeDetail}` : "";
-  console.error(`${script}: demo failed${detail}`);
+  const detail = error === lastDemoError && lastSafeDemoDetail ? `: ${lastSafeDemoDetail}` : "";
+  process.stderr.write(`${script}: demo failed${detail}\n`);
   process.exitCode = 1;
 });

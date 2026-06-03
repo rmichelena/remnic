@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -32,6 +32,18 @@ async function removeDirWithRetry(dir) {
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
     }
   }
+}
+
+async function assertPathMissing(filePath) {
+  try {
+    await access(filePath);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  throw new Error(`expected path not to exist: ${filePath}`);
 }
 
 async function walkMarkdownFiles(root) {
@@ -109,6 +121,16 @@ async function main() {
       "\n"
     );
     assertIncludes(tildePersisted, "idempotency keys with a maximum of 3 attempts");
+
+    const invalidFlagDir = "--remnic-demo-invalid-memory-dir";
+    const invalidFlagPath = path.join(repoRoot, invalidFlagDir);
+    await removeDirWithRetry(invalidFlagPath);
+    const invalidFlagResult = runDemoArgs(["--memory-dir", invalidFlagDir]);
+    if (invalidFlagResult.status === 0) {
+      throw new Error(`invalid flag-like memory-dir succeeded\nstdout:\n${invalidFlagResult.stdout}`);
+    }
+    assertIncludes(invalidFlagResult.stderr, "--memory-dir requires a path value");
+    await assertPathMissing(invalidFlagPath);
 
     console.log("PASS coding-agent-memory-demo smoke test");
   } finally {
