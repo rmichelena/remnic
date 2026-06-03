@@ -95,11 +95,11 @@ plugin id.
 ## Compatibility Policy
 
 Remnic supports OpenClaw releases from at least the previous 60 days. As of
-June 2, 2026, that window starts on April 3, 2026. The OpenClaw installer
+June 3, 2026, that window starts on April 4, 2026. The OpenClaw installer
 floor remains the single supported `>=2026.4.1` shape because it is more
 permissive than the active 60-day floor, while the peer and plugin-API
 compatibility ranges explicitly include reviewed prerelease hosts in that
-window. The adapter records `2026.6.2-alpha.2` as the latest reviewed
+window. The adapter records `2026.6.3-alpha.1` as the latest reviewed
 source-tag target.
 
 When OpenClaw adds a new manifest or setup surface, Remnic should add that new
@@ -187,7 +187,7 @@ surfaces:
   diagnostic while preserving older host behavior.
 - `securityDisclosure` is intentionally documented here instead of shipped as a
   manifest field; current OpenClaw native manifests do not list it.
-- OpenClaw 2026.5.20-beta.2 through the reviewed `2026.6.2-alpha.2` source tag
+- OpenClaw 2026.5.20-beta.2 through the reviewed `2026.6.3-alpha.1` source tag
   keep Remnic's SDK hook, tool-contract, memory-slot, ClawHub install, gateway
   model, and security-scan surfaces compatible. Remnic stays on the full
   `definePluginEntry` SDK path instead of the simple `defineToolPlugin` helper
@@ -202,7 +202,7 @@ surfaces:
   `message_received` reply/thread metadata is captured into transcripts when
   available; quoted-reply extraction hints remain opt-in; and channel-envelope
   cleanup uses OpenClaw's canonical prefix list only when that subpath exists.
-  The package metadata records `2026.6.2-alpha.2` as the reviewed OpenClaw
+  The package metadata records `2026.6.3-alpha.1` as the reviewed OpenClaw
   source-tag target while keeping the broad stable and prerelease
   peer/plugin-API range required by Remnic's rolling 60-day support policy.
   `openclaw.install.minHostVersion` remains the single `>=2026.4.1` floor that
@@ -279,6 +279,32 @@ window on June 2, 2026.
   `openclawReplyMetadataCaptureEnabled`,
   `openclawReplyMetadataExtractionHintsEnabled`, and
   `openclawChannelEnvelopeCleaningEnabled`.
+
+### 2026.6.3-alpha.1 Compatibility Sweep
+
+Issue #1312 was reviewed on June 3, 2026 against the upstream
+`v2026.6.3-alpha.1` source tag. The tag exists in the OpenClaw repository, but
+`gh release view v2026.6.3-alpha.1 --repo openclaw/openclaw` did not find a
+GitHub release page at review time.
+
+- Reviewed source diff: from `v2026.6.2-alpha.2` to `v2026.6.3-alpha.1`, the
+  OpenClaw changes relevant to plugins were limited to policy/workboard docs
+  and provider/exec/runtime internals. `v2026.6.1-beta.3` was also reviewed
+  as a current prerelease host; its diff from `v2026.6.1-beta.2` did not touch
+  OpenClaw plugin docs or `src/plugins`.
+- Optional host surfaces: this tag confirms the optional `resolve_exec_env`
+  exec hook, optional CLI backend `ownsNativeCompaction` metadata, and optional
+  `ProviderNormalizeTransportContext.modelId` provider-normalization context.
+- Remnic impact: no runtime behavior change is required. Remnic is a memory
+  plugin, not an exec-environment contributor or CLI backend, and it does not
+  implement provider transport normalization. Do not add static imports or
+  unconditional registrations for these surfaces unless a future Remnic feature
+  actually needs them.
+- Compatibility metadata: peer/plugin-API ranges explicitly include
+  `2026.6.1-beta.3` and `2026.6.3-alpha.1`; `openclaw.build.openclawVersion` and
+  `openclaw.build.pluginSdkVersion` record `2026.6.3-alpha.1` as the reviewed
+  target. `openclaw.install.minHostVersion` remains the more permissive
+  `>=2026.4.1` floor for older supported hosts.
 
 ## Reset Flush Contract
 

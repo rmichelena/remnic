@@ -44,12 +44,12 @@ launchctl kickstart -k gui/501/ai.openclaw.gateway
 ## Compatibility Policy
 
 Remnic supports OpenClaw releases from at least the previous 60 days. For the
-June 2, 2026 compatibility sweep, that means releases back to April 3, 2026.
+June 3, 2026 compatibility sweep, that means releases back to April 4, 2026.
 The package metadata keeps the installer compatibility floor at the single
 `>=2026.4.1` shape OpenClaw setup expects because that older floor is still
 more permissive than the active 60-day requirement. The peer and plugin-API
 compatibility ranges explicitly include reviewed prerelease hosts in that
-window. The adapter separately records `2026.6.2-alpha.2` as the latest
+window. The adapter separately records `2026.6.3-alpha.1` as the latest
 reviewed OpenClaw source-tag target.
 
 When adding newer OpenClaw manifest surfaces, keep older-compatible metadata in
@@ -179,7 +179,7 @@ CI jobs that provision OpenClaw should use
 `npm run check:openclaw-sdk-surface:required` or pass
 `-- --require --package-root <path>` so a missing SDK fails instead of skipping.
 
-Last compatibility sweep: June 2, 2026. The SDK surface check passed against
+Last compatibility sweep: June 3, 2026. The SDK surface check passed against
 `openclaw@2026.5.3`, `openclaw@2026.5.3-1`, `openclaw@2026.5.4-beta.1`,
 `openclaw@2026.5.4-beta.2`, `openclaw@2026.5.4-beta.3`,
 `openclaw@2026.5.4`, `openclaw@2026.5.5`, `openclaw@2026.5.6`,
@@ -197,6 +197,9 @@ Remnic issues #1258, #1259, #1266, and #1271 against OpenClaw tags
 matched (`14 registrars, 22 hooks, 2 manifest contracts`) for each tag.
 `v2026.6.2-alpha.1` and `v2026.6.2-alpha.2` exist as upstream source tags, but
 as of June 2, 2026 they are not GitHub release pages or published npm packages.
+The June 3 sweep reviewed issue #1312 against `v2026.6.1-beta.3` and
+`v2026.6.3-alpha.1`; `v2026.6.3-alpha.1` exists as upstream source but was not
+a GitHub release page at review time.
 
 OpenClaw 2026.5.16 package-entry discovery prefers explicit built runtime
 entries for installed packages. The published Remnic adapter declares
@@ -236,7 +239,7 @@ because the adapter owns mixed memory-slot hooks, lifecycle handlers, slash
 command metadata, public artifacts, and runtime tools rather than only static
 tools.
 
-OpenClaw 2026.5.20-beta.2 through the reviewed `2026.6.2-alpha.2` source tag
+OpenClaw 2026.5.20-beta.2 through the reviewed `2026.6.3-alpha.1` source tag
 keep the Remnic-required plugin install, ClawHub fallback, manifest contract,
 hook, memory-slot, gateway LLM, and plugin security-scan surfaces compatible.
 OpenClaw 2026.5.31-beta.4 added optional `plugin-sdk/chat-channel-ids` and
@@ -260,9 +263,21 @@ surfaces only through compatibility gates:
   canonical channel envelope prefixes when the SDK subpath exists, with the
   legacy OpenClaw-only cleaner preserved for older hosts.
 
-The package metadata now records `2026.6.2-alpha.2` as the reviewed OpenClaw
-source-tag target and keeps the stable `>=2026.4.1` installer floor plus
-reviewed prerelease peer/plugin-API hosts eligible.
+That sweep recorded `2026.6.2-alpha.2` as the reviewed OpenClaw source-tag
+target and kept the stable `>=2026.4.1` installer floor plus reviewed
+prerelease peer/plugin-API hosts eligible.
+
+OpenClaw `2026.6.3-alpha.1` adds no required Remnic memory-adapter behavior.
+The upstream diff from `v2026.6.2-alpha.2` confirms optional provider/exec/CLI
+surfaces: `resolve_exec_env`, CLI backend `ownsNativeCompaction`, and
+`ProviderNormalizeTransportContext.modelId`. Remnic does not register an exec
+environment hook, does not provide a CLI backend, and does not implement
+provider transport normalization, so these remain optional upstream surfaces
+for future gated features. OpenClaw `2026.6.1-beta.3` was also reviewed as a
+current prerelease host and did not change plugin docs or `src/plugins` from
+`v2026.6.1-beta.2`. The package metadata records `2026.6.3-alpha.1` as the
+reviewed target while explicitly accepting both prerelease tags and keeping
+`openclaw.install.minHostVersion` at `>=2026.4.1` for older supported hosts.
 
 OpenClaw 2026.5.31-beta.3 adds explicit command/callback semantics for
 message-presentation controls. Remnic's current memory commands are text-first

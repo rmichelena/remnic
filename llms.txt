@@ -32,8 +32,8 @@ OpenClaw adapter note:
   options. The same config bounds Remnic's internal cold-start init gate for
   recall and day summaries. Default: 30000ms; accepted range: 1000-120000ms.
   Current OpenClaw compatibility target: reviewed source tag
-  2026.6.2-alpha.2, with package metadata floor >=2026.4.1. As of
-  June 2, 2026 the active 60-day floor is April 3, 2026; keep the
+  2026.6.3-alpha.1, with package metadata floor >=2026.4.1. As of
+  June 3, 2026 the active 60-day floor is April 4, 2026; keep the
   more-permissive 2026.4.1 floor unless an upstream breaking change makes it
   impossible. Keep openclaw.install.minHostVersion as one installer floor, and
   put explicit reviewed prerelease versions in
@@ -234,7 +234,7 @@ OPENCLAW PLUGIN COMPATIBILITY
 
   Policy: Remnic supports OpenClaw releases from at least the previous 60 days.
   Recalculate the floor from the current date before changing package metadata.
-  As of June 2, 2026, the active floor is April 3, 2026. Remnic intentionally
+  As of June 3, 2026, the active floor is April 4, 2026. Remnic intentionally
   keeps OpenClaw 2026.4.1 as a more-permissive package metadata floor.
 
   Current manifest shape for OpenClaw 2026.5.31+:
@@ -257,6 +257,19 @@ OPENCLAW PLUGIN COMPATIBILITY
   Remnic's existing embedding, agent_end, and legacy envelope-cleaning paths.
   v2026.6.2-alpha.1 and v2026.6.2-alpha.2 are source tags but were not GitHub
   release pages or npm packages during that sweep.
+
+  June 3, 2026 sweep: issue #1312 was reviewed against OpenClaw source tags
+  v2026.6.1-beta.3 and v2026.6.3-alpha.1. v2026.6.3-alpha.1 exists upstream,
+  but it was not a GitHub release page at review time. The diff from
+  v2026.6.2-alpha.2 touched OpenClaw policy/workboard docs and
+  provider/exec/runtime internals; the v2026.6.1-beta.3 diff from
+  v2026.6.1-beta.2 did not touch plugin docs or src/plugins. Optional surfaces
+  confirmed in this window are resolve_exec_env, CLI backend
+  ownsNativeCompaction, and ProviderNormalizeTransportContext.modelId. Remnic
+  does not register an exec-environment hook, does not provide a CLI backend,
+  and does not implement provider transport normalization, so no runtime
+  behavior change is needed. Keep these surfaces optional and gated if a future
+  feature uses them.
   supports must remain for OpenClaw 2026.4 / early 2026.5 slot and lifecycle
   routing. Top-level securityDisclosure is not a current native manifest field
   and must stay omitted.
