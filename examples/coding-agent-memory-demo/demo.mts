@@ -88,7 +88,7 @@ function createConfig(memoryDir: string) {
   return parseConfig({
     memoryDir,
     workspaceDir: path.join(memoryDir, "workspace"),
-    openaiApiKey: "disabled",
+    openaiApiKey: false,
     qmdEnabled: false,
     queryAwareIndexingEnabled: false,
     embeddingFallbackEnabled: false,
