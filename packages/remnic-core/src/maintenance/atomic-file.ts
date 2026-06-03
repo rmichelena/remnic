@@ -36,7 +36,7 @@ export async function copyExistingFileToBackup(
 
 export async function writeFileAtomically(
   outputPath: string,
-  content: string,
+  content: string | Uint8Array,
   backupPath?: string,
 ): Promise<string | undefined> {
   const dir = path.dirname(outputPath);
@@ -46,7 +46,11 @@ export async function writeFileAtomically(
   let resolvedBackupPath: string | undefined;
   try {
     handle = await open(tempPath, "w");
-    await handle.writeFile(content, "utf-8");
+    if (typeof content === "string") {
+      await handle.writeFile(content, "utf-8");
+    } else {
+      await handle.writeFile(content);
+    }
     await handle.sync();
     await handle.close();
     handle = undefined;

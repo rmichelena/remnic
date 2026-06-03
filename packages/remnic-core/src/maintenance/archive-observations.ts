@@ -1,13 +1,17 @@
 import path from "node:path";
-import { lstat, mkdir, readdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, unlink } from "node:fs/promises";
+import { writeFileAtomically } from "./atomic-file.js";
 
 const DATE_FILE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})\.(jsonl|md)$/;
+
+type ArchiveFileWriter = (archivePath: string, content: Uint8Array) => Promise<void>;
 
 export interface ArchiveObservationsOptions {
   memoryDir: string;
   retentionDays?: number;
   dryRun?: boolean;
   now?: Date;
+  archiveFileWriter?: ArchiveFileWriter;
 }
 
 export interface ArchiveObservationsResult {
@@ -41,6 +45,10 @@ function extractDateFromFilename(name: string): Date | null {
 
 function startOfUtcDay(value: Date): number {
   return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+}
+
+async function writeArchiveFileAtomically(archivePath: string, content: Uint8Array): Promise<void> {
+  await writeFileAtomically(archivePath, content);
 }
 
 async function listFilesRecursive(root: string, relPrefix = ""): Promise<string[]> {
@@ -125,6 +133,7 @@ export async function archiveObservations(
   );
   const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
   const archiveRoot = path.join(options.memoryDir, "archive", "observations", stamp);
+  const archiveFileWriter = options.archiveFileWriter ?? writeArchiveFileAtomically;
   const candidates =
     retentionDays === 0
       ? []
@@ -146,7 +155,11 @@ export async function archiveObservations(
       const candidateInfo = await lstat(candidate.absolutePath).catch(() => null);
       if (!candidateInfo?.isFile() || candidateInfo.isSymbolicLink()) continue;
       const raw = await readFile(candidate.absolutePath);
-      await writeFile(archivePath, raw);
+      await archiveFileWriter(archivePath, raw);
+      const archivedRaw = await readFile(archivePath);
+      if (!archivedRaw.equals(raw)) {
+        throw new Error(`Archive copy verification failed for ${candidate.relativePath}`);
+      }
       await unlink(candidate.absolutePath);
       archivedFiles += 1;
       archivedBytes += raw.byteLength;
