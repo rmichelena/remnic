@@ -12,6 +12,13 @@ const WRITE_SESSION = "codex-cli:session-a";
 const RECALL_SESSION = "claude-code:session-b";
 const QUERY = "payment retry policy decision and change notes";
 
+class DemoError extends Error {
+  constructor(public readonly safeDetail: string) {
+    super("demo failed");
+    this.name = "DemoError";
+  }
+}
+
 const memoryWrites = [
   {
     label: "checkout retry-policy decision",
@@ -46,10 +53,12 @@ function parseArgs(argv: string[]) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--memory-dir") {
+    if (arg === "--") {
+      continue;
+    } else if (arg === "--memory-dir") {
       const value = argv[index + 1];
       if (!value) {
-        throw new Error("--memory-dir requires a path value");
+        throw new DemoError("--memory-dir requires a path value");
       }
       memoryDir = value;
       usesDefaultMemoryDir = false;
@@ -62,7 +71,7 @@ function parseArgs(argv: string[]) {
       printUsage();
       process.exit(0);
     } else {
-      throw new Error(`unknown argument: ${arg}`);
+      throw new DemoError("unknown argument; run with --help for usage");
     }
   }
 
@@ -155,7 +164,7 @@ function formatReason(result: {
 
 function assertDemoInvariant(condition: unknown, message: string): asserts condition {
   if (!condition) {
-    throw new Error(`demo invariant failed: ${message}`);
+    throw new DemoError(`demo invariant failed: ${message}`);
   }
 }
 
@@ -200,7 +209,7 @@ async function runDemo() {
 
     const recall = xray.recall;
     if (!xray.snapshotFound || !recall) {
-      throw new Error("expected recallXray(includeRecall=true) to produce a recall response");
+      throw new DemoError("expected recallXray(includeRecall=true) to produce a recall response");
     }
 
     const surfacedMarketing = recall.context.includes("marketing-site hero copy");
@@ -256,7 +265,7 @@ async function runDemo() {
 
 runDemo().catch((error) => {
   const script = path.relative(process.cwd(), fileURLToPath(import.meta.url));
-  void error;
-  console.error(`${script}: demo failed`);
+  const detail = error instanceof DemoError ? `: ${error.safeDetail}` : "";
+  console.error(`${script}: demo failed${detail}`);
   process.exitCode = 1;
 });

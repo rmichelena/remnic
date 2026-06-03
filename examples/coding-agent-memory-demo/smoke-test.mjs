@@ -47,8 +47,8 @@ async function walkMarkdownFiles(root) {
   return files.sort();
 }
 
-function runDemo(memoryDir, envOverrides = {}) {
-  return spawnSync("pnpm", ["exec", "tsx", "examples/coding-agent-memory-demo/demo.mts", "--memory-dir", memoryDir], {
+function runDemoArgs(args, envOverrides = {}) {
+  return spawnSync("pnpm", ["exec", "tsx", "examples/coding-agent-memory-demo/demo.mts", ...args], {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
@@ -57,6 +57,10 @@ function runDemo(memoryDir, envOverrides = {}) {
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ""}--conditions=remnic-source`,
     },
   });
+}
+
+function runDemo(memoryDir, envOverrides = {}) {
+  return runDemoArgs(["--memory-dir", memoryDir], envOverrides);
 }
 
 async function main() {
@@ -91,7 +95,7 @@ async function main() {
     assertIncludes(persisted, "agent-memory-demo");
     assertIncludes(persisted, "idempotency keys with a maximum of 3 attempts");
 
-    const tildeResult = runDemo("~/remnic-demo-memory", { HOME: tempHome });
+    const tildeResult = runDemoArgs(["--", "--memory-dir", "~/remnic-demo-memory"], { HOME: tempHome });
     if (tildeResult.status !== 0) {
       throw new Error(
         `tilde demo exited ${tildeResult.status}\nstdout:\n${tildeResult.stdout}\nstderr:\n${tildeResult.stderr}`
