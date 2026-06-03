@@ -24,6 +24,7 @@ import { expandTilde } from "./path-utils.js";
 export { IMPORT_LOSSLESS_CLAW_USAGE };
 export { parseImportLosslessClawArgs };
 export type { ImportLosslessClawCmdArgs };
+export type { ImportLosslessClawModule } from "./optional-import-lossless-claw.js";
 
 /**
  * Reject file paths used as directory args (CLAUDE.md gotcha #24), but
@@ -52,9 +53,14 @@ export interface CmdImportLosslessClawIO {
   stderr: (line: string) => void;
 }
 
+export interface CmdImportLosslessClawDeps {
+  loadImportLosslessClawModule?: typeof loadImportLosslessClawModule;
+}
+
 export async function cmdImportLosslessClaw(
   argv: readonly string[],
   io: CmdImportLosslessClawIO,
+  deps: CmdImportLosslessClawDeps = {},
 ): Promise<number> {
   if (argv.includes("--help") || argv.includes("-h") || argv.length === 0) {
     io.stdout(IMPORT_LOSSLESS_CLAW_USAGE);
@@ -79,7 +85,17 @@ export async function cmdImportLosslessClaw(
     const memoryDir = parsed.memoryDir ?? expandTilde(io.resolveMemoryDir());
     assertDirectoryOrAbsent(memoryDir, "--memory-dir");
 
-    const mod = await loadImportLosslessClawModule();
+    const mod = await (
+      deps.loadImportLosslessClawModule ?? loadImportLosslessClawModule
+    )();
+
+    const sourceDb = mod.openSourceDatabase(parsed.src);
+    try {
+      mod.assertLosslessClawSchema(sourceDb);
+    } catch (err) {
+      sourceDb.close();
+      throw err;
+    }
 
     // Dry-run must not mutate destination storage (Codex P2). The dest
     // resolution rules are:
@@ -97,28 +113,21 @@ export async function cmdImportLosslessClaw(
     // Real runs always go through ensureLcmStateDir + openLcmDatabase
     // (which creates the dir + file + schema as needed).
     let destDb: ReturnType<typeof openLcmDatabase>;
-    if (parsed.dryRun) {
-      const lcmPath = path.join(memoryDir, "state", "lcm.sqlite");
-      if (fs.existsSync(lcmPath)) {
-        destDb = mod.openExistingLcmDatabaseReadOnly(lcmPath);
-      } else {
-        destDb = mod.openInMemoryDestinationDatabase();
-        applyLcmSchema(destDb);
-      }
-    } else {
-      await ensureLcmStateDir(memoryDir);
-      destDb = openLcmDatabase(memoryDir);
-    }
-
-    // Open the source DB inside its own try so a failed open (corrupt
-    // SQLite header, permission error, etc.) doesn't leak destDb (Cursor
-    // Bugbot review on PR #797 — `assertFile` catches existence but not
-    // every I/O failure mode).
-    let sourceDb: ReturnType<typeof mod.openSourceDatabase>;
     try {
-      sourceDb = mod.openSourceDatabase(parsed.src);
+      if (parsed.dryRun) {
+        const lcmPath = path.join(memoryDir, "state", "lcm.sqlite");
+        if (fs.existsSync(lcmPath)) {
+          destDb = mod.openExistingLcmDatabaseReadOnly(lcmPath);
+        } else {
+          destDb = mod.openInMemoryDestinationDatabase();
+          applyLcmSchema(destDb);
+        }
+      } else {
+        await ensureLcmStateDir(memoryDir);
+        destDb = openLcmDatabase(memoryDir);
+      }
     } catch (err) {
-      destDb.close();
+      sourceDb.close();
       throw err;
     }
 
