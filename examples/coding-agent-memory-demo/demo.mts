@@ -256,7 +256,7 @@ async function runDemo() {
 
 runDemo().catch((error) => {
   const script = path.relative(process.cwd(), fileURLToPath(import.meta.url));
-  const failureKind = error instanceof Error ? error.name : "UnknownError";
-  console.error(`${script}: demo failed (${failureKind})`);
+  void error;
+  console.error(`${script}: demo failed`);
   process.exitCode = 1;
 });
