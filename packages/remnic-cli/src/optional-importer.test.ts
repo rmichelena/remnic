@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { describe, it, beforeEach } from "node:test";
 
 import {
@@ -14,7 +16,7 @@ describe("optional-importer loader", () => {
     clearImporterModuleCacheForTesting();
   });
 
-  it("SUPPORTED_IMPORTERS lists the five canonical sources in a stable order", () => {
+  it("SUPPORTED_IMPORTERS lists the canonical generic sources in a stable order", () => {
     assert.deepEqual([...SUPPORTED_IMPORTERS], [
       "chatgpt",
       "claude",
@@ -22,6 +24,27 @@ describe("optional-importer loader", () => {
       "mem0",
       "supermemory",
     ]);
+  });
+
+  it("generic importer peers are represented in SUPPORTED_IMPORTERS", () => {
+    const packageJsonPath = path.resolve(import.meta.dirname, "../package.json");
+    const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
+      peerDependencies?: Record<string, string>;
+    };
+    const optionalImporterPeers = Object.keys(manifest.peerDependencies ?? {})
+      .filter((name) => name.startsWith("@remnic/import-"))
+      .map((name) => name.slice("@remnic/import-".length));
+
+    // These optional import packages are CLI runtime companions, but they are
+    // not generic `remnic import --adapter` sources. Lossless-claw has a
+    // dedicated SQLite import command; WeClone is loaded through the
+    // bulk-import source registration path.
+    const nonGenericImporters = new Set(["lossless-claw", "weclone"]);
+    const genericImporterPeers = optionalImporterPeers
+      .filter((name) => !nonGenericImporters.has(name))
+      .sort();
+
+    assert.deepEqual(genericImporterPeers, [...SUPPORTED_IMPORTERS].sort());
   });
 
   it("isSupportedImporterName is false for unknown names", () => {

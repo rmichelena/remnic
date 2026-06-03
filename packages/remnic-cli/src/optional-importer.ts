@@ -35,6 +35,10 @@ export interface ImporterModule {
  * The canonical list of importer sources slice-2+ will land. Slice-1 ships
  * the infrastructure only — so `remnic import --adapter chatgpt` returns a
  * clean install hint until slice-2 merges `@remnic/import-chatgpt`.
+ *
+ * Optional `@remnic/import-*` peers that use non-generic command surfaces are
+ * intentionally excluded here: WeClone uses the bulk-import source registry,
+ * and lossless-claw uses `remnic import-lossless-claw`.
  */
 export const SUPPORTED_IMPORTERS = [
   "chatgpt",
