@@ -61,6 +61,30 @@ test("archiveObservations copies then removes old observation artifacts", async 
   }
 });
 
+test("archiveObservations preserves source when archived copy verification fails", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-archive-observations-partial-"));
+  const oldTranscript = "transcripts/main/default/2026-01-01.jsonl";
+  await createFile(memoryDir, oldTranscript, "{\"role\":\"user\",\"content\":\"keep me\"}\n");
+
+  await assert.rejects(
+    () =>
+      archiveObservations({
+        memoryDir,
+        now: new Date("2026-02-26T00:00:00.000Z"),
+        retentionDays: 14,
+        dryRun: false,
+        archiveFileWriter: async (archivePath, content) => {
+          await mkdir(path.dirname(archivePath), { recursive: true });
+          await writeFile(archivePath, content.subarray(0, 8));
+        },
+      }),
+    /Archive copy verification failed/,
+  );
+
+  const source = await readFile(path.join(memoryDir, oldTranscript), "utf-8");
+  assert.equal(source, "{\"role\":\"user\",\"content\":\"keep me\"}\n");
+});
+
 test("archiveObservations skips symlinked roots outside memoryDir", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-archive-observations-symlink-memory-"));
   const outsideDir = await mkdtemp(path.join(os.tmpdir(), "engram-archive-observations-symlink-outside-"));
