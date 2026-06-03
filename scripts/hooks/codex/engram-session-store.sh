@@ -2,7 +2,7 @@
 # Codex Stop hook: incrementally feed new transcript messages into Engram.
 #
 # Fires after every agent turn (Stop) and also on final exit (stop_hook_active=false).
-# Tracks a cursor per session in /tmp/engram-cursor-<session_id> so only NEW
+# Tracks a cursor per session in a private per-user state directory so only NEW
 # messages are sent each call. When stop_hook_active is false (final stop),
 # the cursor file is also cleaned up.
 # Runs observe in the background — never blocks the stop.
@@ -36,27 +36,174 @@ IS_FINAL_STOP=$( [ "$STOP_HOOK_ACTIVE" = "False" ] && echo "true" || echo "false
 echo '{}'
 
 [ -z "$ENGRAM_TOKEN" ] && exit 0
-[ -z "$SESSION_ID" ] && exit 0
+case "$SESSION_ID" in
+  ""|*[!A-Za-z0-9._-]*)
+    log "stop[$SESSION_ID]: invalid session id"
+    exit 0
+    ;;
+esac
 [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
-CURSOR_FILE="/tmp/engram-cursor-${SESSION_ID}"
-LOCK_FILE="/tmp/engram-lock-${SESSION_ID}"
+STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+STATE_DIR="${STATE_HOME}/remnic/hooks"
+
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+if ! python3 - "$STATE_DIR" <<'PYEOF'
+import os
+import stat
+import sys
+
+state_dir = sys.argv[1]
+try:
+    info = os.lstat(state_dir)
+except OSError:
+    sys.exit(1)
+
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    sys.exit(1)
+if info.st_uid != os.getuid():
+    sys.exit(1)
+if info.st_mode & 0o077:
+    os.chmod(state_dir, 0o700)
+PYEOF
+then
+  log "stop[$SESSION_ID]: unsafe state directory $STATE_DIR"
+  exit 0
+fi
+
+CURSOR_FILE="${STATE_DIR}/engram-cursor-${SESSION_ID}"
+LOCK_DIR="${STATE_DIR}/engram-lock-${SESSION_ID}.d"
+
+validate_cursor_file() {
+  python3 - "$CURSOR_FILE" <<'PYEOF'
+import os
+import stat
+import sys
+
+cursor_file = sys.argv[1]
+try:
+    info = os.lstat(cursor_file)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    sys.exit(1)
+if info.st_uid != os.getuid():
+    sys.exit(1)
+PYEOF
+}
+
+read_cursor_file() {
+  validate_cursor_file || {
+    log "stop[$SESSION_ID]: unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  [ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo 0
+}
+
+write_cursor_file() {
+  NEW_CURSOR_VALUE="$1"
+  validate_cursor_file || {
+    log "stop[$SESSION_ID]: refusing unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  TEMP_CURSOR="$(mktemp "${CURSOR_FILE}.tmp.XXXXXX" 2>/dev/null)" || return 1
+  if ! printf '%s\n' "$NEW_CURSOR_VALUE" > "$TEMP_CURSOR"; then
+    rm -f "$TEMP_CURSOR"
+    return 1
+  fi
+  chmod 600 "$TEMP_CURSOR" 2>/dev/null || true
+  mv -f "$TEMP_CURSOR" "$CURSOR_FILE"
+}
+
+migrate_tmp_cursor_file() {
+  TMP_CURSOR_FILE="/tmp/engram-cursor-${SESSION_ID}"
+  [ ! -e "$TMP_CURSOR_FILE" ] && return 0
+  TMP_CURSOR_VALUE="$(python3 - "$TMP_CURSOR_FILE" <<'PYEOF'
+import os
+import stat
+import sys
+
+cursor_file = sys.argv[1]
+try:
+    info = os.lstat(cursor_file)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        sys.exit(1)
+    if info.st_uid != os.getuid():
+        sys.exit(1)
+    value = open(cursor_file, "r", encoding="utf-8").read().strip()
+    if not value.isdigit():
+        sys.exit(1)
+    print(value, end="")
+except OSError:
+    sys.exit(1)
+PYEOF
+  )" || return 0
+  CURRENT_CURSOR_VALUE=""
+  if validate_cursor_file; then
+    CURRENT_CURSOR_VALUE="$([ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo "")"
+  fi
+  case "$CURRENT_CURSOR_VALUE" in
+    ""|*[!0-9]*) CURRENT_CURSOR_VALUE="-1" ;;
+  esac
+  if [ "$TMP_CURSOR_VALUE" -gt "$CURRENT_CURSOR_VALUE" ]; then
+    write_cursor_file "$TMP_CURSOR_VALUE" || return 0
+  fi
+  rm -f "$TMP_CURSOR_FILE" 2>/dev/null
+}
+
+remove_stale_lock_dir() {
+  python3 - "$LOCK_DIR" <<'PYEOF'
+import os
+import shutil
+import stat
+import sys
+import time
+
+lock_dir = sys.argv[1]
+try:
+    info = os.lstat(lock_dir)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    sys.exit(1)
+if info.st_uid != os.getuid():
+    sys.exit(1)
+if time.time() - info.st_mtime < 10 * 60:
+    sys.exit(0)
+shutil.rmtree(lock_dir)
+PYEOF
+}
+
+remove_cursor_file() {
+  validate_cursor_file || {
+    log "stop[$SESSION_ID]: refusing unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  rm -f "$CURSOR_FILE"
+}
 
 (
   # Acquire exclusive lock to prevent overlapping observe jobs from replaying
   # the same transcript tail when Stop fires in rapid succession.
   # Uses mkdir atomicity (POSIX-portable; flock(1) is Linux-only).
-  LOCK_DIR="${LOCK_FILE}.d"
   ACQUIRED=0
   for _i in $(seq 1 100); do
     if mkdir "$LOCK_DIR" 2>/dev/null; then ACQUIRED=1; break; fi
+    [ "$_i" -eq 1 ] && remove_stale_lock_dir >/dev/null 2>&1
     sleep 0.1
   done
   trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
   [ "$ACQUIRED" -eq 0 ] && exit 0
 
+  migrate_tmp_cursor_file
+
   LAST_COUNT=0
-  [ -f "$CURSOR_FILE" ] && LAST_COUNT="$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)"
+  LAST_COUNT="$(read_cursor_file)" || exit 0
 
   PAYLOAD="$(python3 - "$TRANSCRIPT_PATH" "$SESSION_ID" "$LAST_COUNT" <<'PYEOF'
 import sys, json
@@ -117,14 +264,14 @@ PYEOF
 
   if [ -z "$PAYLOAD" ]; then
     log "stop[$SESSION_ID]: parse failed"
-    [ "$IS_FINAL_STOP" = "true" ] && rm -f "$CURSOR_FILE"
+    [ "$IS_FINAL_STOP" = "true" ] && remove_cursor_file
     exit 0
   fi
 
   if echo "$PAYLOAD" | grep -q "^CURSOR:"; then
     NEW_CURSOR="$(echo "$PAYLOAD" | sed 's/CURSOR://')"
-    echo "$NEW_CURSOR" > "$CURSOR_FILE"
-    [ "$IS_FINAL_STOP" = "true" ] && rm -f "$CURSOR_FILE" && log "stop[$SESSION_ID]: final stop, no new messages, cursor cleaned up"
+    write_cursor_file "$NEW_CURSOR" || log "stop[$SESSION_ID]: cursor write failed"
+    [ "$IS_FINAL_STOP" = "true" ] && remove_cursor_file && log "stop[$SESSION_ID]: final stop, no new messages, cursor cleaned up"
     exit 0
   fi
 
@@ -159,11 +306,11 @@ import json, sys
 d = json.load(sys.stdin)
 print(f\"accepted={d.get('accepted','?')} lcm={d.get('lcmArchived','?')} extraction={d.get('extractionQueued','?')}\")" 2>/dev/null || echo "$RESPONSE" | head -c 80)"
     log "$LABEL[$SESSION_ID]: observe OK — $RESULT"
-    echo "$NEW_COUNT" > "$CURSOR_FILE"
-    [ "$IS_FINAL_STOP" = "true" ] && rm -f "$CURSOR_FILE"
+    write_cursor_file "$NEW_COUNT" || log "$LABEL[$SESSION_ID]: cursor write failed"
+    [ "$IS_FINAL_STOP" = "true" ] && remove_cursor_file
   else
     log "$LABEL[$SESSION_ID]: observe failed (curl=$CURL_EXIT http=$HTTP_STATUS) — cursor not advanced"
-    [ "$IS_FINAL_STOP" = "true" ] && rm -f "$CURSOR_FILE"
+    [ "$IS_FINAL_STOP" = "true" ] && remove_cursor_file
   fi
 ) >> "$LOG" 2>&1 &
 

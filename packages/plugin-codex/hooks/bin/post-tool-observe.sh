@@ -62,31 +62,147 @@ CWD="$(node -e "const d=JSON.parse(process.argv[1]); process.stdout.write(d.cwd|
 TOOL_NAME="$(node -e "const d=JSON.parse(process.argv[1]); process.stdout.write(d.tool_name||'')" "$INPUT" 2>/dev/null || echo "")"
 PROJECT_NAME="$(basename "$CWD" 2>/dev/null || echo "unknown")"
 
-[ -z "$SESSION_ID" ] && exit 0
+case "$SESSION_ID" in
+  ""|*[!A-Za-z0-9._-]*)
+    log "invalid session id: $SESSION_ID"
+    exit 0
+    ;;
+esac
 { [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; } && exit 0
 
-LEGACY_CURSOR_FILE="/tmp/engram-cursor-${SESSION_ID}"
-CURSOR_FILE="/tmp/remnic-cursor-${SESSION_ID}"
-LEGACY_LOCK_DIR="/tmp/engram-lock-${SESSION_ID}.d"
-LOCK_DIR="/tmp/remnic-lock-${SESSION_ID}.d"
+STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+STATE_DIR="${STATE_HOME}/remnic/hooks"
+
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+if ! node - "$STATE_DIR" <<'NODE'
+const fs = require('fs');
+const stateDir = process.argv[2];
+try {
+  const info = fs.lstatSync(stateDir);
+  if (info.isSymbolicLink() || !info.isDirectory()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+  if ((info.mode & 0o077) !== 0) fs.chmodSync(stateDir, 0o700);
+} catch {
+  process.exit(1);
+}
+NODE
+then
+  log "unsafe state directory $STATE_DIR"
+  exit 0
+fi
+
+CURSOR_FILE="${STATE_DIR}/remnic-cursor-${SESSION_ID}"
+LOCK_DIR="${STATE_DIR}/remnic-lock-${SESSION_ID}.d"
+LEGACY_CURSOR_FILE="${STATE_DIR}/engram-cursor-${SESSION_ID}"
+LEGACY_LOCK_DIR="${STATE_DIR}/engram-lock-${SESSION_ID}.d"
 
 if [ ! -f "$CURSOR_FILE" ] && { [ -f "$LEGACY_CURSOR_FILE" ] || [ -d "$LEGACY_LOCK_DIR" ]; }; then
   CURSOR_FILE="$LEGACY_CURSOR_FILE"
   LOCK_DIR="$LEGACY_LOCK_DIR"
 fi
 
+validate_cursor_file() {
+  node - "$CURSOR_FILE" <<'NODE'
+const fs = require('fs');
+const cursorFile = process.argv[2];
+try {
+  const info = fs.lstatSync(cursorFile);
+  if (info.isSymbolicLink() || !info.isFile()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+} catch (error) {
+  if (error && error.code === 'ENOENT') process.exit(0);
+  process.exit(1);
+}
+NODE
+}
+
+read_cursor_file() {
+  validate_cursor_file || {
+    log "unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  [ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo 0
+}
+
+write_cursor_file() {
+  NEW_CURSOR_VALUE="$1"
+  validate_cursor_file || {
+    log "refusing unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  TEMP_CURSOR="$(mktemp "${CURSOR_FILE}.tmp.XXXXXX" 2>/dev/null)" || return 1
+  if ! printf '%s\n' "$NEW_CURSOR_VALUE" > "$TEMP_CURSOR"; then
+    rm -f "$TEMP_CURSOR"
+    return 1
+  fi
+  chmod 600 "$TEMP_CURSOR" 2>/dev/null || true
+  mv -f "$TEMP_CURSOR" "$CURSOR_FILE"
+}
+
+migrate_tmp_cursor_file() {
+  for TMP_CURSOR_FILE in "/tmp/remnic-cursor-${SESSION_ID}" "/tmp/engram-cursor-${SESSION_ID}"; do
+    [ ! -e "$TMP_CURSOR_FILE" ] && continue
+    TMP_CURSOR_VALUE="$(node - "$TMP_CURSOR_FILE" <<'NODE'
+const fs = require('fs');
+const cursorFile = process.argv[2];
+try {
+  const info = fs.lstatSync(cursorFile);
+  if (info.isSymbolicLink() || !info.isFile()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+  const value = fs.readFileSync(cursorFile, 'utf8').trim();
+  if (!/^\d+$/.test(value)) process.exit(1);
+  process.stdout.write(value);
+} catch {
+  process.exit(1);
+}
+NODE
+    )" || continue
+    CURRENT_CURSOR_VALUE=""
+    if validate_cursor_file; then
+      CURRENT_CURSOR_VALUE="$([ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo "")"
+    fi
+    case "$CURRENT_CURSOR_VALUE" in
+      ""|*[!0-9]*) CURRENT_CURSOR_VALUE="-1" ;;
+    esac
+    if [ "$TMP_CURSOR_VALUE" -gt "$CURRENT_CURSOR_VALUE" ]; then
+      write_cursor_file "$TMP_CURSOR_VALUE" || continue
+    fi
+    rm -f "$TMP_CURSOR_FILE" 2>/dev/null
+  done
+}
+
+remove_stale_lock_dir() {
+  node - "$LOCK_DIR" <<'NODE'
+const fs = require('fs');
+const lockDir = process.argv[2];
+try {
+  const info = fs.lstatSync(lockDir);
+  if (info.isSymbolicLink() || !info.isDirectory()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+  if (Date.now() - info.mtimeMs < 10 * 60 * 1000) process.exit(0);
+  fs.rmSync(lockDir, { recursive: true, force: true });
+} catch (error) {
+  if (error && error.code === 'ENOENT') process.exit(0);
+  process.exit(1);
+}
+NODE
+}
+
 (
   # Acquire exclusive lock
   ACQUIRED=0
   for _i in $(seq 1 50); do
     if mkdir "$LOCK_DIR" 2>/dev/null; then ACQUIRED=1; break; fi
+    [ "$_i" -eq 1 ] && remove_stale_lock_dir >/dev/null 2>&1
     sleep 0.1
   done
   trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
   [ "$ACQUIRED" -eq 0 ] && exit 0
 
+  migrate_tmp_cursor_file
+
   LAST_COUNT=0
-  [ -f "$CURSOR_FILE" ] && LAST_COUNT="$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)"
+  LAST_COUNT="$(read_cursor_file)" || exit 0
 
   PAYLOAD="$(node -e "
     const fs = require('fs');
@@ -131,7 +247,7 @@ fi
   [ -z "$PAYLOAD" ] && { log "parse failed for $SESSION_ID"; exit 0; }
 
   if echo "$PAYLOAD" | grep -q "^CURSOR:"; then
-    echo "${PAYLOAD#CURSOR:}" > "$CURSOR_FILE"
+    write_cursor_file "${PAYLOAD#CURSOR:}" || log "cursor write failed for $SESSION_ID"
     exit 0
   fi
 
@@ -154,7 +270,7 @@ fi
 
   if [ $CURL_EXIT -eq 0 ] && [[ "$HTTP_STATUS" =~ ^2 ]]; then
     log "observe OK for $SESSION_ID"
-    echo "$TOTAL" > "$CURSOR_FILE"
+    write_cursor_file "$TOTAL" || log "cursor write failed for $SESSION_ID"
   else
     log "observe failed (curl=$CURL_EXIT http=$HTTP_STATUS) — cursor not advanced"
   fi
