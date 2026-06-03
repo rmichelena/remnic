@@ -1670,7 +1670,7 @@ test("access service recallExplain omits most-recent snapshots without a namespa
   assert.equal(response.found, false);
 });
 
-test("access service recallExplain without a namespace preserves the most recent non-default snapshot", async () => {
+test("access service recallExplain requires identity before exposing the most recent namespace snapshot", async () => {
   const service = new EngramAccessService({
     config: {
       memoryDir: "/tmp/engram",
@@ -1715,8 +1715,80 @@ test("access service recallExplain without a namespace preserves the most recent
 
   const response = await service.recallExplain();
 
-  assert.equal(response.found, true);
-  assert.equal(response.snapshot?.namespace, "shared");
+  assert.equal(response.found, false);
+  assert.equal(response.snapshot, undefined);
+
+  const authenticatedResponse = await service.recallExplain({
+    authenticatedPrincipal: "project-x",
+  });
+
+  assert.equal(authenticatedResponse.found, true);
+  assert.equal(authenticatedResponse.snapshot?.namespace, "shared");
+});
+
+test("access service recallExplain does not fall back to unreadable default namespace state", async () => {
+  let intentSnapshotCalls = 0;
+  let graphSnapshotCalls = 0;
+  const service = new EngramAccessService({
+    config: {
+      memoryDir: "/tmp/engram",
+      namespacesEnabled: true,
+      defaultNamespace: "global",
+      sharedNamespace: "shared",
+      principalFromSessionKeyMode: "prefix",
+      principalFromSessionKeyRules: [],
+      namespacePolicies: [
+        {
+          name: "global",
+          readPrincipals: ["global-admin"],
+          writePrincipals: ["global-admin"],
+        },
+        {
+          name: "shared",
+          readPrincipals: ["project-x"],
+          writePrincipals: [],
+        },
+      ],
+      defaultRecallNamespaces: ["self"],
+      searchBackend: "qmd",
+      qmdEnabled: true,
+      nativeKnowledge: undefined,
+      recallCrossNamespaceBudgetEnabled: false,
+      recallCrossNamespaceBudgetWindowMs: 60_000,
+      recallCrossNamespaceBudgetSoftLimit: 10,
+      recallCrossNamespaceBudgetHardLimit: 30,
+    },
+    recall: async () => "ctx",
+    lastRecall: {
+      get: () => null,
+      getMostRecent: () => null,
+    },
+    getStorage: async () => ({
+      getMemoryById: async () => null,
+      getMemoryTimeline: async () => [],
+    }),
+    getLastIntentSnapshot: async (namespace: string) => {
+      intentSnapshotCalls += 1;
+      assert.equal(namespace, "global");
+      return { namespace, intent: "debug-default" };
+    },
+    getLastGraphRecallSnapshot: async (namespace: string) => {
+      graphSnapshotCalls += 1;
+      assert.equal(namespace, "global");
+      return { namespace, graph: "debug-default" };
+    },
+  } as any);
+
+  const response = await service.recallExplain({
+    authenticatedPrincipal: "project-x",
+  });
+
+  assert.equal(response.found, false);
+  assert.equal(response.snapshot, undefined);
+  assert.equal(response.intent, undefined);
+  assert.equal(response.graph, undefined);
+  assert.equal(intentSnapshotCalls, 0);
+  assert.equal(graphSnapshotCalls, 0);
 });
 
 test("access service recallExplain filters session snapshots by the requested namespace", async () => {

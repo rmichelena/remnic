@@ -134,6 +134,34 @@ test("recallForActiveMemory ignores explicit namespace filters when namespaces a
   assert.deepEqual(receivedNamespaces, ["self-namespace"]);
 });
 
+test("recallForActiveMemory denies blank session keys when namespaces are enabled", async () => {
+  const orchestrator = {
+    config: {
+      namespacesEnabled: true,
+      defaultNamespace: "default",
+      sharedNamespace: "shared",
+      namespacePolicies: [],
+      principalFromSessionKeyMode: "disabled",
+      principalFromSessionKeyRules: [],
+    },
+    searchAcrossNamespaces: async () => {
+      throw new Error("search should not run without an authenticated principal");
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      recallForActiveMemory(orchestrator as never, {
+        query: "api docs",
+        sessionKey: "   ",
+        filters: {
+          namespace: "default",
+        },
+      }),
+    /authentication required/,
+  );
+});
+
 test("recallForActiveMemory marks results truncated when the underlying recall exceeds the requested limit", async () => {
   const orchestrator = {
     resolveSelfNamespace: () => "session-namespace",

@@ -354,6 +354,8 @@ export interface EngramAccessRecallResponse {
 export interface EngramAccessRecallExplainRequest {
   sessionKey?: string;
   namespace?: string;
+  /** Caller principal for namespace access checks. Transport-bound; never from untrusted payloads. */
+  authenticatedPrincipal?: string;
 }
 
 export interface EngramAccessRecallExplainResponse {
@@ -1094,7 +1096,7 @@ export class EngramAccessService {
     return resolved;
   }
 
-  private resolveRequestPrincipal(sessionKey: string | undefined, authenticatedPrincipal?: string): string {
+  private resolveRequestPrincipal(sessionKey: string | undefined, authenticatedPrincipal?: string): string | undefined {
     const trusted = authenticatedPrincipal?.trim();
     if (trusted) return trusted;
     return resolvePrincipal(sessionKey, this.orchestrator.config);
@@ -1763,7 +1765,13 @@ export class EngramAccessService {
     const normalizedRequest = { ...request, query };
     const authenticatedPrincipal = request.authenticatedPrincipal?.trim();
     const principal = this.resolveRequestPrincipal(request.sessionKey, authenticatedPrincipal);
-    return this.withBudgetLock(principal, async () => {
+    if (this.orchestrator.config.namespacesEnabled && !principal) {
+      throw new EngramAccessInputError(
+        "authentication required: namespaces are enabled and no principal was supplied",
+      );
+    }
+    const budgetLockPrincipal = principal ?? "default";
+    return this.withBudgetLock(budgetLockPrincipal, async () => {
       let budgetRecordPrincipal: string | null = null;
       const response = await this.handleIdempotentRead({
         operation: "recall",
@@ -1839,7 +1847,13 @@ export class EngramAccessService {
     // Normalize mode early so that no_recall / invalid modes skip budget
     // accounting (Codex P1: budget recorded before mode validation).
     const mode = this.normalizeRecallMode(request.mode);
-    const principal = this.resolveRequestPrincipal(request.sessionKey, authenticatedPrincipal);
+    const maybePrincipal = this.resolveRequestPrincipal(request.sessionKey, authenticatedPrincipal);
+    if (this.orchestrator.config.namespacesEnabled && !maybePrincipal) {
+      throw new EngramAccessInputError(
+        "authentication required: namespaces are enabled and no principal was supplied",
+      );
+    }
+    const principal = maybePrincipal ?? "default";
     const principalNamespace = defaultNamespaceForPrincipal(principal, this.orchestrator.config);
     // Skip budget checks for modes that never perform a cross-namespace read.
     const modeSkipsBudget = mode === "no_recall";
@@ -2096,7 +2110,7 @@ export class EngramAccessService {
     let auditAnomalies: AccessAuditResult["anomalies"] | undefined;
     if (this.auditAdapter) {
       try {
-        const resolvedAgentId = principal;
+        const resolvedAgentId = principal ?? "__anonymous__";
         const auditEntry = {
           ts: new Date().toISOString(),
           sessionKey: request.sessionKey ?? "",
@@ -2160,11 +2174,19 @@ export class EngramAccessService {
     const requestedNamespace = request.namespace?.trim()
       ? this.resolveNamespace(request.namespace)
       : undefined;
+    const authenticatedPrincipal = request.authenticatedPrincipal?.trim();
+    const principal =
+      authenticatedPrincipal
+      || resolvePrincipal(request.sessionKey, this.orchestrator.config);
     if (requestedNamespace) {
-      const principal = resolvePrincipal(request.sessionKey, this.orchestrator.config);
       if (!canReadNamespace(principal, requestedNamespace, this.orchestrator.config)) {
         return { found: false };
       }
+    } else if (
+      this.orchestrator.config.namespacesEnabled
+      && !principal
+    ) {
+      return { found: false };
     }
     const snapshot = request.sessionKey
       ? (() => {
@@ -2179,13 +2201,29 @@ export class EngramAccessService {
         if (!requestedNamespace) return candidate;
         return candidate.namespace === requestedNamespace ? candidate : null;
       })();
-    const namespace = requestedNamespace ?? snapshot?.namespace ?? this.orchestrator.config.defaultNamespace;
+    const readableSnapshot = (() => {
+      if (!snapshot || !this.orchestrator.config.namespacesEnabled) return snapshot;
+      const snapshotNamespace = snapshot.namespace ?? this.orchestrator.config.defaultNamespace;
+      return canReadNamespace(principal, snapshotNamespace, this.orchestrator.config)
+        ? snapshot
+        : null;
+    })();
+    const namespace = (() => {
+      if (requestedNamespace) return requestedNamespace;
+      if (readableSnapshot?.namespace) return readableSnapshot.namespace;
+      const fallbackNamespace = this.orchestrator.config.defaultNamespace;
+      if (!this.orchestrator.config.namespacesEnabled) return fallbackNamespace;
+      return canReadNamespace(principal, fallbackNamespace, this.orchestrator.config)
+        ? fallbackNamespace
+        : null;
+    })();
+    if (!namespace) return { found: false };
     const [intent, graph] = await Promise.all([
       this.orchestrator.getLastIntentSnapshot(namespace),
       this.orchestrator.getLastGraphRecallSnapshot(namespace),
     ]);
-    if (!snapshot && !intent && !graph) return { found: false };
-    return { found: true, snapshot: snapshot ?? undefined, intent, graph };
+    if (!readableSnapshot && !intent && !graph) return { found: false };
+    return { found: true, snapshot: readableSnapshot ?? undefined, intent, graph };
   }
 
   async recallTierExplain(

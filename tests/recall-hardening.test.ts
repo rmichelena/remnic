@@ -72,8 +72,24 @@ function runtimeQmdFetchLimit(
     : Math.max(
         recallResultLimit,
         Math.min(200, recallResultLimit + recallHeadroom),
-      );
+  );
 }
+
+test("recall rejects missing principals before namespace-enabled retrieval", async () => {
+  const orchestrator = await makeOrchestrator("engram-recall-auth-", {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [],
+    principalFromSessionKeyMode: "disabled",
+    principalFromSessionKeyRules: [],
+  });
+
+  await assert.rejects(
+    () => orchestrator.recall("namespace search", undefined),
+    /authentication required/,
+  );
+});
 
 test("assembleRecallSections preserves memories within the recall budget", async () => {
   const orchestrator = await makeOrchestrator("engram-recall-budget-", {
