@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const demoDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(demoDir, "..", "..");
+const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 
 function assertIncludes(output, expected) {
   if (!output.includes(expected)) {
@@ -48,7 +49,7 @@ async function walkMarkdownFiles(root) {
 }
 
 function runDemoArgs(args, envOverrides = {}) {
-  return spawnSync("pnpm", ["exec", "tsx", "examples/coding-agent-memory-demo/demo.mts", ...args], {
+  return spawnSync(process.execPath, [tsxCli, "examples/coding-agent-memory-demo/demo.mts", ...args], {
     cwd: repoRoot,
     encoding: "utf8",
     env: {

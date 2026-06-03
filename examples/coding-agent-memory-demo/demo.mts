@@ -175,10 +175,10 @@ async function runDemo() {
   }
 
   const orchestrator = new Orchestrator(createConfig(options.memoryDir));
-  await orchestrator.initialize();
-  const service = new EngramAccessService(orchestrator);
-
   try {
+    await orchestrator.initialize();
+    const service = new EngramAccessService(orchestrator);
+
     const writes = [];
     for (const memory of memoryWrites) {
       const response = await service.memoryStore({
