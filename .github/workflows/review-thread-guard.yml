@@ -86,7 +86,12 @@ jobs:
               // Exclude github-advanced-security (CodeQL) threads — these cannot be resolved
               // via the GitHub API and must be addressed through CodeQL configuration.
               const author = t.comments?.nodes?.[0]?.author?.login;
-              if (author === "github-advanced-security") return false;
+              const codeqlAuthorLogins = new Set([
+                "github-advanced-security",
+                "github-advanced-security[bot]",
+                "github-code-scanning[bot]",
+              ]);
+              if (author && codeqlAuthorLogins.has(author)) return false;
               return true;
             });
 
