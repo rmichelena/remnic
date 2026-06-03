@@ -448,3 +448,79 @@ test("Pi publisher refuses a symlinked extension root", async (t) => {
   assert.equal(fs.existsSync(path.join(targetDir, "remnic.config.json")), false);
   assert.equal(fs.existsSync(path.join(targetDir, "index.ts")), false);
 });
+
+test("Pi publisher unpublish removes only Remnic-owned files", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-publisher-unpublish-preserve-"));
+  const home = path.join(root, "home");
+  const piAgentHome = path.join(root, "pi-agent");
+  const extensionRoot = path.join(piAgentHome, "extensions", "remnic");
+  const unrelatedPath = path.join(extensionRoot, "user-note.txt");
+  const tempPath = path.join(extensionRoot, "remnic.config.json.tmp-123-456");
+  const unrelatedTempPath = path.join(extensionRoot, "remnic.config.json.tmp-user-note");
+  fs.mkdirSync(extensionRoot, { recursive: true });
+  fs.mkdirSync(path.join(home, ".remnic"), { recursive: true });
+  fs.writeFileSync(path.join(extensionRoot, "remnic.config.json"), "{}\n");
+  fs.writeFileSync(path.join(extensionRoot, "index.ts"), "export default {};\n");
+  fs.writeFileSync(path.join(extensionRoot, "README.md"), "# Remnic\n");
+  fs.writeFileSync(unrelatedPath, "user-managed content\n");
+  fs.writeFileSync(tempPath, "temporary token-bearing config\n");
+  fs.writeFileSync(unrelatedTempPath, "user-managed temp note\n");
+
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousPiAgentHome = process.env.PI_AGENT_HOME;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.PI_AGENT_HOME = piAgentHome;
+  t.after(() => {
+    restoreEnv("HOME", previousHome);
+    restoreEnv("USERPROFILE", previousUserProfile);
+    restoreEnv("PI_AGENT_HOME", previousPiAgentHome);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const publisher = new PiMemoryExtensionPublisher();
+  await publisher.unpublish();
+
+  assert.equal(fs.existsSync(path.join(extensionRoot, "remnic.config.json")), false);
+  assert.equal(fs.existsSync(path.join(extensionRoot, "index.ts")), false);
+  assert.equal(fs.existsSync(path.join(extensionRoot, "README.md")), false);
+  assert.equal(fs.existsSync(tempPath), false);
+  assert.equal(fs.readFileSync(unrelatedPath, "utf8"), "user-managed content\n");
+  assert.equal(fs.readFileSync(unrelatedTempPath, "utf8"), "user-managed temp note\n");
+});
+
+test("Pi publisher unpublish refuses owned file symlinks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-publisher-unpublish-symlink-"));
+  const home = path.join(root, "home");
+  const piAgentHome = path.join(root, "pi-agent");
+  const extensionRoot = path.join(piAgentHome, "extensions", "remnic");
+  const targetDir = path.join(root, "symlink-target");
+  fs.mkdirSync(extensionRoot, { recursive: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.mkdirSync(path.join(home, ".remnic"), { recursive: true });
+  fs.writeFileSync(path.join(targetDir, "external-wrapper.ts"), "external wrapper\n");
+  fs.writeFileSync(path.join(extensionRoot, "remnic.config.json"), "{}\n");
+  fs.symlinkSync(path.join(targetDir, "external-wrapper.ts"), path.join(extensionRoot, "index.ts"));
+  fs.writeFileSync(path.join(extensionRoot, "README.md"), "# Remnic\n");
+
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousPiAgentHome = process.env.PI_AGENT_HOME;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.PI_AGENT_HOME = piAgentHome;
+  t.after(() => {
+    restoreEnv("HOME", previousHome);
+    restoreEnv("USERPROFILE", previousUserProfile);
+    restoreEnv("PI_AGENT_HOME", previousPiAgentHome);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const publisher = new PiMemoryExtensionPublisher();
+  await assert.rejects(() => publisher.unpublish(), /must not be a symlink/);
+
+  assert.equal(fs.readFileSync(path.join(targetDir, "external-wrapper.ts"), "utf8"), "external wrapper\n");
+  assert.equal(fs.readFileSync(path.join(extensionRoot, "remnic.config.json"), "utf8"), "{}\n");
+  assert.equal(fs.readFileSync(path.join(extensionRoot, "README.md"), "utf8"), "# Remnic\n");
+});

@@ -16,6 +16,8 @@ import {
 import { resolvePiAgentHome, resolvePiExtensionRoot } from "./paths.js";
 
 const DEFAULT_DAEMON_PORT = 4318;
+const PI_EXTENSION_OWNED_FILES = ["remnic.config.json", "index.ts", "README.md"] as const;
+const PI_EXTENSION_OWNED_TEMP_FILE_PATTERN = /^(?:remnic\.config\.json|index\.ts|README\.md)\.tmp-\d+-\d+$/u;
 
 type FileSnapshot = {
   path: string;
@@ -79,9 +81,7 @@ export class PiMemoryExtensionPublisher implements MemoryExtensionPublisher {
 
     ctx.log.info(`Publishing Pi memory extension to ${extensionRoot}`);
 
-    const configPath = path.join(extensionRoot, "remnic.config.json");
-    const wrapperPath = path.join(extensionRoot, "index.ts");
-    const readmePath = path.join(extensionRoot, "README.md");
+    const [configPath, wrapperPath, readmePath] = piExtensionOwnedPaths(extensionRoot);
     const rootExisted = fs.existsSync(extensionRoot);
     const snapshots = snapshotFiles([configPath, wrapperPath, readmePath]);
     const priorTokenEntry =
@@ -154,10 +154,30 @@ export class PiMemoryExtensionPublisher implements MemoryExtensionPublisher {
   async unpublish(): Promise<void> {
     const extensionRoot = await this.resolveExtensionRoot();
     assertSafePiExtensionRoot(extensionRoot, process.env);
-    if (fs.existsSync(extensionRoot)) {
-      fs.rmSync(extensionRoot, { recursive: true, force: true });
+    if (!fs.existsSync(extensionRoot)) {
+      return;
+    }
+
+    const removableFiles = removableOwnedExtensionFiles(piExtensionOwnedUnpublishPaths(extensionRoot));
+    for (const filePath of removableFiles) {
+      fs.rmSync(filePath, { force: true });
+    }
+    removeEmptyDirectory(extensionRoot);
+  }
+}
+
+function piExtensionOwnedPaths(extensionRoot: string): string[] {
+  return PI_EXTENSION_OWNED_FILES.map((fileName) => path.join(extensionRoot, fileName));
+}
+
+function piExtensionOwnedUnpublishPaths(extensionRoot: string): string[] {
+  const ownedPaths = piExtensionOwnedPaths(extensionRoot);
+  for (const fileName of fs.readdirSync(extensionRoot)) {
+    if (PI_EXTENSION_OWNED_TEMP_FILE_PATTERN.test(fileName)) {
+      ownedPaths.push(path.join(extensionRoot, fileName));
     }
   }
+  return ownedPaths;
 }
 
 function resolveDaemonUrl(ctx: PublishContext): string {
@@ -285,6 +305,30 @@ function removeEmptyDirectory(dirPath: string): void {
   if (!stat.isDirectory()) return;
   if (fs.readdirSync(dirPath).length > 0) return;
   fs.rmdirSync(dirPath);
+}
+
+function removableOwnedExtensionFiles(filePaths: string[]): string[] {
+  const removableFiles: string[] = [];
+  for (const filePath of filePaths) {
+    const stat = statOwnedExtensionPath(filePath);
+    if (stat === null) continue;
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Pi extension path must not be a symlink: ${filePath}`);
+    }
+    if (stat.isFile()) removableFiles.push(filePath);
+  }
+  return removableFiles;
+}
+
+function statOwnedExtensionPath(filePath: string): fs.Stats | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return null;
+    throw err;
+  }
+  return stat;
 }
 
 function mkdirPiExtensionRoot(extensionRoot: string, env: NodeJS.ProcessEnv): void {
