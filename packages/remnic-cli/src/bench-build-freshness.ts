@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -122,7 +123,10 @@ function newestMtime(
     if (!existsSync(entryPath)) {
       return;
     }
-    const stat = statSync(entryPath);
+    const stat = lstatSync(entryPath);
+    if (stat.isSymbolicLink()) {
+      return;
+    }
     if (stat.isDirectory()) {
       for (const child of readdirSync(entryPath)) {
         visit(path.join(entryPath, child));
