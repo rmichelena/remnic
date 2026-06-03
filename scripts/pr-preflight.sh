@@ -71,6 +71,7 @@ if [[ "$MODE" == "quick" ]]; then
   run pnpm exec tsx --test tests/register-multi-registry.test.ts
   run pnpm exec tsx --test tests/intent.test.ts
   run pnpm exec tsx --test tests/runtime-input-guards.test.ts
+  run pnpm exec tsx --test tests/build-staleness.test.mjs
   run pnpm exec tsx --test tests/artifact-recall-limit.test.ts
   run pnpm exec tsx --test tests/artifact-status-snapshot.test.ts
   run pnpm exec tsx --test tests/recall-no-recall-short-circuit.test.ts
