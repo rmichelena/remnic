@@ -68,6 +68,7 @@ export default defineConfig({
     "src/namespaces/storage.ts",
     "src/orchestrator.ts",
     "src/qmd.ts",
+    "src/qmd-recall-cache.ts",
     "src/reconstruct.ts",
     "src/replay/normalizers/chatgpt.ts",
     "src/replay/normalizers/claude.ts",

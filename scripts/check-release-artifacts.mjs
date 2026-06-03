@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,9 +40,7 @@ for (const target of Object.values(rootPackageJson.exports ?? {})) {
 }
 requiredFiles.push(...[...exportedDistFiles].sort());
 
-const transferShims = (
-  await readdir(path.join(repoRoot, "src", "transfer"), { withFileTypes: true })
-)
+const transferShims = (await readdir(path.join(repoRoot, "src", "transfer"), { withFileTypes: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
   .map((entry) => entry.name.replace(/\.ts$/, ""))
   .sort();
@@ -58,6 +56,10 @@ await Promise.all(
     "remnic-workspace/migrate/from-engram",
     "remnic-workspace/lcm",
     "remnic-workspace/lcm/engine",
+    "remnic-workspace/qmd",
+    "remnic-workspace/qmd.js",
+    "remnic-workspace/qmd-recall-cache",
+    "remnic-workspace/qmd-recall-cache.js",
     "remnic-workspace/transfer/export-md",
     "remnic-workspace/transfer/capsule-export",
     "remnic-workspace/transfer/import-json",
@@ -66,20 +68,17 @@ await Promise.all(
       throw new Error(`root package subpath import failed for ${specifier}`, {
         cause: err,
       });
-    }),
-  ),
+    })
+  )
 );
 
 const [rootManifest, packageManifest] = await Promise.all([
   readFile(path.join(repoRoot, "openclaw.plugin.json"), "utf8"),
-  readFile(
-    path.join(repoRoot, "packages", "plugin-openclaw", "openclaw.plugin.json"),
-    "utf8",
-  ),
+  readFile(path.join(repoRoot, "packages", "plugin-openclaw", "openclaw.plugin.json"), "utf8"),
 ]);
 
 assert.equal(
   normalizeJson(rootManifest),
   normalizeJson(packageManifest),
-  "root openclaw.plugin.json must stay synced with packages/plugin-openclaw/openclaw.plugin.json",
+  "root openclaw.plugin.json must stay synced with packages/plugin-openclaw/openclaw.plugin.json"
 );
