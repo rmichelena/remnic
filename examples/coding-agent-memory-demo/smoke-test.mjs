@@ -47,21 +47,23 @@ async function walkMarkdownFiles(root) {
   return files.sort();
 }
 
+function runDemo(memoryDir, envOverrides = {}) {
+  return spawnSync("pnpm", ["exec", "tsx", "examples/coding-agent-memory-demo/demo.mts", "--memory-dir", memoryDir], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...envOverrides,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ""}--conditions=remnic-source`,
+    },
+  });
+}
+
 async function main() {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-coding-agent-memory-demo-"));
+  const tempHome = await mkdtemp(path.join(os.tmpdir(), "remnic-coding-agent-memory-demo-home-"));
   try {
-    const result = spawnSync(
-      "pnpm",
-      ["exec", "tsx", "examples/coding-agent-memory-demo/demo.mts", "--memory-dir", memoryDir],
-      {
-        cwd: repoRoot,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          NODE_OPTIONS: `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ""}--conditions=remnic-source`,
-        },
-      }
-    );
+    const result = runDemo(memoryDir);
 
     if (result.status !== 0) {
       throw new Error(`demo exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
@@ -89,9 +91,24 @@ async function main() {
     assertIncludes(persisted, "agent-memory-demo");
     assertIncludes(persisted, "idempotency keys with a maximum of 3 attempts");
 
+    const tildeResult = runDemo("~/remnic-demo-memory", { HOME: tempHome });
+    if (tildeResult.status !== 0) {
+      throw new Error(
+        `tilde demo exited ${tildeResult.status}\nstdout:\n${tildeResult.stdout}\nstderr:\n${tildeResult.stderr}`
+      );
+    }
+
+    const tildeMemoryDir = path.join(tempHome, "remnic-demo-memory");
+    const tildeMarkdownFiles = await walkMarkdownFiles(tildeMemoryDir);
+    const tildePersisted = (await Promise.all(tildeMarkdownFiles.map((filePath) => readFile(filePath, "utf8")))).join(
+      "\n"
+    );
+    assertIncludes(tildePersisted, "idempotency keys with a maximum of 3 attempts");
+
     console.log("PASS coding-agent-memory-demo smoke test");
   } finally {
     await removeDirWithRetry(memoryDir);
+    await removeDirWithRetry(tempHome);
   }
 }
 

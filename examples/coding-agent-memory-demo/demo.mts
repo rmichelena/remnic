@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EngramAccessService, Orchestrator, parseConfig } from "@remnic/core";
+import { EngramAccessService, Orchestrator, expandTildePath, parseConfig } from "@remnic/core";
 
 const DEFAULT_MEMORY_DIR = "examples/coding-agent-memory-demo/.demo-memory";
 const CHECKOUT_NAMESPACE = "project-checkout-service";
@@ -68,7 +68,7 @@ function parseArgs(argv: string[]) {
 
   return {
     displayMemoryDir: memoryDir,
-    memoryDir: path.resolve(process.cwd(), memoryDir),
+    memoryDir: path.resolve(process.cwd(), expandTildePath(memoryDir)),
     reset: reset ?? usesDefaultMemoryDir,
   };
 }
