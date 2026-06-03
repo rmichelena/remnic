@@ -861,6 +861,7 @@ export class EngramAccessHttpServer {
       const response = await this.service.recallExplain({
         sessionKey: body.sessionKey,
         namespace: this.resolveNamespace(req, body.namespace),
+        authenticatedPrincipal: this.resolveRequestPrincipal(req),
       });
       this.respondJson(res, 200, response);
       return;

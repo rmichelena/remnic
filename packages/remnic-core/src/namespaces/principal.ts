@@ -12,13 +12,15 @@ function compileSafePrincipalRegex(pattern: string): RegExp | null {
   }
 }
 
-export function resolvePrincipal(sessionKey: string | undefined, config: PluginConfig): string {
+export function resolvePrincipal(sessionKey: string | undefined, config: PluginConfig): string | undefined {
   if (!config.namespacesEnabled) return "default";
-  const sk = sessionKey ?? "";
+  const sk = typeof sessionKey === "string" && sessionKey.trim().length > 0
+    ? sessionKey
+    : "";
   const mode = config.principalFromSessionKeyMode;
   const rules = config.principalFromSessionKeyRules ?? [];
 
-  if (!sk) return "default";
+  if (!sk) return undefined;
 
   if (mode === "prefix") {
     for (const r of rules) {
@@ -48,15 +50,17 @@ export function resolvePrincipal(sessionKey: string | undefined, config: PluginC
   return "default";
 }
 
-export function canReadNamespace(principal: string, namespace: string, config: PluginConfig): boolean {
+export function canReadNamespace(principal: string | undefined, namespace: string, config: PluginConfig): boolean {
   if (!config.namespacesEnabled) return true;
+  if (!principal) return false;
   const policy = config.namespacePolicies.find((p) => p.name === namespace);
   if (!policy) return namespace === config.defaultNamespace || namespace === config.sharedNamespace;
   return policy.readPrincipals.includes(principal) || policy.readPrincipals.includes("*");
 }
 
-export function canWriteNamespace(principal: string, namespace: string, config: PluginConfig): boolean {
+export function canWriteNamespace(principal: string | undefined, namespace: string, config: PluginConfig): boolean {
   if (!config.namespacesEnabled) return true;
+  if (!principal) return false;
   const policy = config.namespacePolicies.find((p) => p.name === namespace);
   if (!policy) return namespace === config.defaultNamespace;
   return policy.writePrincipals.includes(principal) || policy.writePrincipals.includes("*");
@@ -69,15 +73,17 @@ export function canWriteNamespace(principal: string, namespace: string, config: 
  * - If there's a namespace policy with the same name as the principal, use it.
  * - Otherwise use config.defaultNamespace.
  */
-export function defaultNamespaceForPrincipal(principal: string, config: PluginConfig): string {
+export function defaultNamespaceForPrincipal(principal: string | undefined, config: PluginConfig): string {
   if (!config.namespacesEnabled) return config.defaultNamespace;
+  if (!principal) return config.defaultNamespace;
   const exists = config.namespacePolicies.some((p) => p.name === principal);
   return exists ? principal : config.defaultNamespace;
 }
 
-export function recallNamespacesForPrincipal(principal: string, config: PluginConfig): string[] {
+export function recallNamespacesForPrincipal(principal: string | undefined, config: PluginConfig): string[] {
   const out: string[] = [];
   if (!config.namespacesEnabled) return [config.defaultNamespace];
+  if (!principal) return out;
 
   const selfNs = defaultNamespaceForPrincipal(principal, config);
   if (config.defaultRecallNamespaces.includes("self") && canReadNamespace(principal, selfNs, config)) {

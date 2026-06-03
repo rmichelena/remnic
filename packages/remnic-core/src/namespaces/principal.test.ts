@@ -196,6 +196,26 @@ test("canReadNamespace: namespacesEnabled=true + no policy for namespace → all
   assert.equal(canReadNamespace("alice", "unknown-ns", config), false, "unknown namespace without policy is denied");
 });
 
+test("resolvePrincipal: missing session key cannot read implicit namespaces when namespaces are enabled", () => {
+  const config = makeConfig(true, []);
+
+  const principal = resolvePrincipal(undefined, config);
+
+  assert.equal(principal, undefined);
+  assert.equal(canReadNamespace(principal, "default", config), false);
+  assert.equal(canReadNamespace(principal, "shared", config), false);
+});
+
+test("resolvePrincipal: blank session key cannot read implicit namespaces when namespaces are enabled", () => {
+  const config = makeConfig(true, []);
+
+  const principal = resolvePrincipal("   ", config);
+
+  assert.equal(principal, undefined);
+  assert.equal(canReadNamespace(principal, "default", config), false);
+  assert.equal(canReadNamespace(principal, "shared", config), false);
+});
+
 test("resolvePrincipal: safe regex rules can resolve a principal", () => {
   const config = makeConfig(true, [], {
     principalFromSessionKeyMode: "regex",

@@ -1686,7 +1686,7 @@ export class Orchestrator {
     this._recallWorkspaceOverrides.delete(sessionKey);
   }
 
-  resolvePrincipal(sessionKey?: string): string {
+  resolvePrincipal(sessionKey?: string): string | undefined {
     return resolvePrincipal(sessionKey, this.config);
   }
 
@@ -4841,6 +4841,15 @@ export class Orchestrator {
       options.abortSignal?.addEventListener("abort", onAbort, { once: true });
     }
 
+    const principal =
+      typeof options.principalOverride === "string" &&
+      options.principalOverride.length > 0
+        ? options.principalOverride
+        : resolvePrincipal(sessionKey, this.config);
+    if (this.config.namespacesEnabled && !principal) {
+      throw new Error("authentication required: namespaces are enabled and no principal was supplied");
+    }
+
     // Wait for initialization to complete before attempting recall. The timeout
     // is configurable so OpenClaw's per-hook budget and Remnic's internal init
     // gate can stay aligned during cold starts.
@@ -6451,6 +6460,9 @@ export class Orchestrator {
         && options.principalOverride.length > 0
         ? options.principalOverride
         : resolvePrincipal(sessionKey, this.config);
+    if (this.config.namespacesEnabled && !principal) {
+      throw new Error("authentication required: namespaces are enabled and no principal was supplied");
+    }
     const namespaceOverride = options.namespace?.trim() || undefined;
     const readableRecallNamespaces = recallNamespacesForPrincipal(
       principal,

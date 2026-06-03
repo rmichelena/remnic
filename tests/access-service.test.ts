@@ -1670,7 +1670,7 @@ test("access service recallExplain omits most-recent snapshots without a namespa
   assert.equal(response.found, false);
 });
 
-test("access service recallExplain without a namespace preserves the most recent non-default snapshot", async () => {
+test("access service recallExplain requires identity before exposing the most recent namespace snapshot", async () => {
   const service = new EngramAccessService({
     config: {
       memoryDir: "/tmp/engram",
@@ -1715,8 +1715,15 @@ test("access service recallExplain without a namespace preserves the most recent
 
   const response = await service.recallExplain();
 
-  assert.equal(response.found, true);
-  assert.equal(response.snapshot?.namespace, "shared");
+  assert.equal(response.found, false);
+  assert.equal(response.snapshot, undefined);
+
+  const authenticatedResponse = await service.recallExplain({
+    authenticatedPrincipal: "project-x",
+  });
+
+  assert.equal(authenticatedResponse.found, true);
+  assert.equal(authenticatedResponse.snapshot?.namespace, "shared");
 });
 
 test("access service recallExplain filters session snapshots by the requested namespace", async () => {

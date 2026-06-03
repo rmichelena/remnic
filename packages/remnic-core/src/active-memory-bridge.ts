@@ -38,7 +38,7 @@ export interface ActiveMemoryRecallParams {
 
 interface ActiveMemoryScopedOrchestrator {
   config?: PluginConfig;
-  resolvePrincipal?: (sessionKey?: string) => string;
+  resolvePrincipal?: (sessionKey?: string) => string | undefined;
   resolveSelfNamespace?: (sessionKey?: string) => string;
 }
 
@@ -105,6 +105,9 @@ function resolveActiveMemoryNamespace(
     typeof orchestrator.resolvePrincipal === "function"
       ? orchestrator.resolvePrincipal(sessionKey)
       : resolvePrincipal(sessionKey, config);
+  if (config.namespacesEnabled && !principal) {
+    throw new Error("authentication required: namespaces are enabled and no principal was supplied");
+  }
   if (explicitNamespace) {
     if (!canReadNamespace(principal, explicitNamespace, config)) {
       throw new Error(`namespace ${explicitNamespace} is not readable for principal ${principal}`);
@@ -120,7 +123,7 @@ function resolveActiveMemoryNamespace(
 export async function recallForActiveMemory(
   orchestrator: {
     config?: PluginConfig;
-    resolvePrincipal?: (sessionKey?: string) => string;
+    resolvePrincipal?: (sessionKey?: string) => string | undefined;
     resolveSelfNamespace?: (sessionKey?: string) => string;
     searchAcrossNamespaces: (params: {
       query: string;

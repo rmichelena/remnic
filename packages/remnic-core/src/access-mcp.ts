@@ -2136,6 +2136,7 @@ export class EngramMcpServer {
         return this.service.recallExplain({
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
           namespace: typeof args.namespace === "string" ? args.namespace : undefined,
+          authenticatedPrincipal: effectivePrincipal,
         });
       case "engram.set_coding_context": {
         // Issue #569 PR 7 — MCP tool for clients that don't ship cwd.
