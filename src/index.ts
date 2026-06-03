@@ -2,6 +2,7 @@ export { loadDaySummaryPrompt } from "./day-summary.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import OpenAI from "openai";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { DEFAULT_REASONING_MODEL, parseConfig } from "./config.js";
 import { initLogger } from "./logger.js";
 import { log } from "./logger.js";
@@ -39,7 +40,9 @@ import os from "node:os";
 import { createOpikExporter } from "./opik-exporter.js";
 import { readEnvVar, resolveHomeDir } from "@remnic/core/runtime/env";
 import { migrateFromEngram } from "./migrate/from-engram.js";
-import { cleanUserMessage } from "./user-message-cleaning.js";
+import {
+  createOpenClawUserMessageCleaner,
+} from "./user-message-cleaning.js";
 import { listRemnicPublicArtifacts } from "../packages/plugin-openclaw/src/public-artifacts.js";
 import {
   buildMemoryGetTool,
@@ -80,6 +83,11 @@ import {
   resolveAgentAccessAuthToken,
   expandTildePath,
 } from "@remnic/core";
+import {
+  normalizeHostEmbeddingVector,
+  registerHostEmbeddingProvider,
+  type HostEmbeddingProvider,
+} from "@remnic/core/host-embedding-provider";
 import { findGatewayRuntimeModules } from "./resolve-provider-secret.js";
 import { createDreamsSurface } from "@remnic/core/surfaces/dreams";
 import { createHeartbeatSurface, type HeartbeatEntry } from "@remnic/core/surfaces/heartbeat";
@@ -388,6 +396,8 @@ async function loadOpenClawSecretRefResolver(): Promise<ResolveSecretRefFn | nul
 
 type ServiceKeys = {
   REGISTERED_GUARD: string;
+  HOST_EMBEDDING_UNREGISTER: string;
+  HOST_EMBEDDING_SIGNATURE: string;
   /** Tracks which api objects have already had hooks bound to prevent duplicate handlers. */
   HOOK_APIS: string;
   ACCESS_SERVICE: string;
@@ -414,6 +424,8 @@ function buildServiceKeys(serviceId: string): ServiceKeys {
   const suffix = `::${serviceId}`;
   return {
     REGISTERED_GUARD: `__openclawEngramRegistered${suffix}`,
+    HOST_EMBEDDING_UNREGISTER: `__openclawEngramHostEmbeddingUnregister${suffix}`,
+    HOST_EMBEDDING_SIGNATURE: `__openclawEngramHostEmbeddingSignature${suffix}`,
     HOOK_APIS: `__openclawEngramHookApis${suffix}`,
     ACCESS_SERVICE: `__openclawEngramAccessService${suffix}`,
     ACCESS_HTTP_SERVER: `__openclawEngramAccessHttpServer${suffix}`,
@@ -735,6 +747,313 @@ function tryDefinePluginEntry(def: {
   }
 }
 
+export type OpenClawEmbeddingAdapterKind = "generic" | "memory";
+
+type OpenClawEmbeddingAdapter = {
+  id: string;
+  defaultModel?: string;
+  create: (options: Record<string, unknown>) => Promise<{
+    provider?: unknown;
+    runtime?: unknown;
+  } | null>;
+};
+
+const MAX_OBSERVED_INBOUND_MESSAGE_IDS = 1024;
+const MAX_OBSERVED_INLINE_EXPLICIT_CAPTURE_KEYS = 1024;
+
+function requireOpenClawSdkSubpath<T>(subpath: string): T | null {
+  try {
+    const _require = createRequire(import.meta.url);
+    return _require(subpath) as T;
+  } catch {
+    return null;
+  }
+}
+
+function resolveChannelEnvelopePrefixes(cfg: {
+  openclawChannelEnvelopeCleaningEnabled: boolean;
+}): {
+  prefixes: string[];
+  includeLegacyChannelEnvelopePattern: boolean;
+} {
+  if (!cfg.openclawChannelEnvelopeCleaningEnabled) {
+    return { prefixes: ["OpenClaw"], includeLegacyChannelEnvelopePattern: true };
+  }
+  const sdk = requireOpenClawSdkSubpath<{
+    BUNDLED_CHAT_CHANNEL_ENVELOPE_PREFIXES?: unknown;
+  }>("openclaw/plugin-sdk/chat-channel-ids");
+  const prefixes = sdk?.BUNDLED_CHAT_CHANNEL_ENVELOPE_PREFIXES;
+  if (!Array.isArray(prefixes)) {
+    return { prefixes: ["OpenClaw"], includeLegacyChannelEnvelopePattern: true };
+  }
+  const cleaned = prefixes.filter((value): value is string => typeof value === "string");
+  return {
+    prefixes: cleaned.length > 0 ? cleaned : ["OpenClaw"],
+    includeLegacyChannelEnvelopePattern: false,
+  };
+}
+
+function registerOpenClawHostEmbeddingProvider(params: {
+  api: OpenClawPluginApi;
+  cfg: {
+    memoryDir: string;
+    hostEmbeddingProviderEnabled: boolean;
+    hostEmbeddingProviderId?: string;
+    hostEmbeddingProviderModel?: string;
+  };
+  serviceId: string;
+}): (() => void) | null {
+  const { api, cfg, serviceId } = params;
+  if (cfg.hostEmbeddingProviderEnabled === false) return null;
+
+  const selected = selectOpenClawEmbeddingAdapter(api, cfg.hostEmbeddingProviderId);
+  if (!selected) return null;
+
+  const model =
+    cfg.hostEmbeddingProviderModel ||
+    selected.adapter.defaultModel ||
+    "text-embedding-3-small";
+  const workspaceDir = getOpenClawRuntimeWorkspaceDir(api);
+
+  let providerPromise: Promise<unknown | null> | null = null;
+  let providerInstance: unknown | null = null;
+
+  const resolveProvider = async (): Promise<unknown | null> => {
+    if (providerInstance) return providerInstance;
+    providerPromise ??= selected.adapter
+      .create({
+        config: api.config ?? {},
+        workspaceDir,
+        agentDir: workspaceDir,
+        provider: cfg.hostEmbeddingProviderId || selected.adapter.id,
+        model,
+      })
+      .then((result) => {
+        providerInstance =
+          result && typeof result === "object"
+            ? (result as Record<string, unknown>).provider ?? null
+            : null;
+        if (!providerInstance) {
+          log.debug(
+            `OpenClaw host embedding provider ${selected.adapter.id} did not create a provider; using Remnic fallback embeddings`,
+          );
+        }
+        return providerInstance;
+      })
+      .catch((error) => {
+        log.debug(
+          `OpenClaw host embedding provider ${selected.adapter.id} unavailable: ${error}`,
+        );
+        return null;
+      })
+      .finally(() => {
+        if (!providerInstance) {
+          providerPromise = null;
+        }
+      });
+    return providerPromise;
+  };
+
+  const hostProvider: HostEmbeddingProvider = {
+    id: `openclaw:${selected.kind}:${selected.adapter.id}`,
+    model: `${selected.kind}:${selected.adapter.id}/${model}`,
+    async embed(text, options) {
+      const provider = await resolveProvider();
+      if (!provider) return null;
+      return embedWithOpenClawProvider(selected.kind, provider, text, options);
+    },
+    async embedBatch(texts, options) {
+      const provider = await resolveProvider();
+      if (!provider) return texts.map(() => null);
+      return embedBatchWithOpenClawProvider(selected.kind, provider, texts, options);
+    },
+    async close() {
+      const close = providerInstance && typeof providerInstance === "object"
+        ? (providerInstance as Record<string, unknown>).close
+        : undefined;
+      if (typeof close === "function") {
+        await close.call(providerInstance);
+      }
+    },
+  };
+
+  const unregister = registerHostEmbeddingProvider(cfg.memoryDir, hostProvider);
+  log.info(
+    `registered OpenClaw host embedding provider bridge (${selected.adapter.id}) for ${serviceId}`,
+  );
+  return unregister;
+}
+
+function getOpenClawRuntimeWorkspaceDir(api: OpenClawPluginApi): string | undefined {
+  const runtimeWorkspaceDir = (api as any).runtime?.agent?.workspaceDir;
+  return typeof runtimeWorkspaceDir === "string" && runtimeWorkspaceDir.length > 0
+    ? runtimeWorkspaceDir
+    : undefined;
+}
+
+function stableOpenClawConfigSignature(value: unknown, seen = new WeakSet<object>()): string {
+  if (value === null) return "null";
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "number" || valueType === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (valueType === "bigint") return JSON.stringify(String(value));
+  if (valueType === "undefined" || valueType === "function" || valueType === "symbol") {
+    return JSON.stringify(`[${valueType}]`);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableOpenClawConfigSignature(entry, seen)).join(",")}]`;
+  }
+  if (value && valueType === "object") {
+    if (seen.has(value)) return JSON.stringify("[Circular]");
+    seen.add(value);
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) =>
+        `${JSON.stringify(key)}:${stableOpenClawConfigSignature(
+          (value as Record<string, unknown>)[key],
+          seen,
+        )}`
+      );
+    seen.delete(value);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function openClawHostEmbeddingConfigSignature(cfg: {
+  memoryDir: string;
+  hostEmbeddingProviderEnabled: boolean;
+  hostEmbeddingProviderId?: string;
+  hostEmbeddingProviderModel?: string;
+}, apiConfig: unknown, workspaceDir?: string): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({
+    enabled: cfg.hostEmbeddingProviderEnabled !== false,
+    memoryDir: cfg.memoryDir,
+    providerId: cfg.hostEmbeddingProviderId ?? "",
+    providerModel: cfg.hostEmbeddingProviderModel ?? "",
+    workspaceDir: workspaceDir ?? "",
+    openClawConfig: stableOpenClawConfigSignature(apiConfig),
+  })).digest("hex")}`;
+}
+
+function selectOpenClawEmbeddingAdapter(
+  api: OpenClawPluginApi,
+  requestedId?: string,
+): { kind: OpenClawEmbeddingAdapterKind; adapter: OpenClawEmbeddingAdapter } | null {
+  const memorySdk = loadOpenClawMemoryEmbeddingSdk();
+  const memoryAdapters = memorySdk?.listMemoryEmbeddingProviders?.(api.config) ?? [];
+  const selectedMemory = selectAdapter(memoryAdapters, requestedId);
+  if (selectedMemory) {
+    return { kind: "memory", adapter: selectedMemory };
+  }
+
+  const genericSdk = requireOpenClawSdkSubpath<{
+    listEmbeddingProviders?: (cfg?: unknown) => unknown[];
+  }>("openclaw/plugin-sdk/embedding-providers");
+  const genericAdapters = genericSdk?.listEmbeddingProviders?.(api.config) ?? [];
+  const selectedGeneric = selectAdapter(genericAdapters, requestedId);
+  if (selectedGeneric) {
+    return { kind: "generic", adapter: selectedGeneric };
+  }
+
+  return null;
+}
+
+export function loadOpenClawMemoryEmbeddingSdk(): {
+  listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[];
+} | null {
+  return selectOpenClawMemoryEmbeddingSdk(
+    requireOpenClawSdkSubpath<{
+      listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[];
+    }>("openclaw/plugin-sdk/memory-core-host-engine-embeddings"),
+    requireOpenClawSdkSubpath<{
+      listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[];
+    }>("openclaw/plugin-sdk/memory-core-host-embedding-registry"),
+  );
+}
+
+export function selectOpenClawMemoryEmbeddingSdk(
+  currentSdk: { listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[] } | null,
+  legacySdk: { listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[] } | null,
+): { listMemoryEmbeddingProviders?: (cfg?: unknown) => unknown[] } | null {
+  return currentSdk ?? legacySdk;
+}
+
+function selectAdapter(
+  adapters: unknown[],
+  requestedId?: string,
+): OpenClawEmbeddingAdapter | null {
+  const valid = adapters.filter(isOpenClawEmbeddingAdapter);
+  if (valid.length === 0) return null;
+  if (requestedId) {
+    return valid.find((adapter) => adapter.id === requestedId) ?? null;
+  }
+  return valid[0] ?? null;
+}
+
+function isOpenClawEmbeddingAdapter(value: unknown): value is OpenClawEmbeddingAdapter {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>).id === "string" &&
+    typeof (value as Record<string, unknown>).create === "function"
+  );
+}
+
+export async function embedWithOpenClawProvider(
+  _kind: OpenClawEmbeddingAdapterKind,
+  provider: unknown,
+  text: string,
+  options?: { signal?: AbortSignal; inputType?: string },
+): Promise<number[] | null> {
+  if (!provider || typeof provider !== "object") return null;
+  const record = provider as Record<string, unknown>;
+  if (options?.inputType === "query" && typeof record.embedQuery === "function") {
+    return normalizeHostEmbeddingVector(
+      await record.embedQuery.call(provider, text, { signal: options.signal }),
+    );
+  }
+  if (typeof record.embed === "function") {
+    return normalizeHostEmbeddingVector(
+      await record.embed.call(provider, text, {
+        signal: options?.signal,
+        inputType: options?.inputType,
+      }),
+    );
+  }
+  if (typeof record.embedBatch === "function") {
+    const vectors = await record.embedBatch.call(provider, [text], {
+      signal: options?.signal,
+      inputType: options?.inputType,
+    });
+    return normalizeHostEmbeddingVector(Array.isArray(vectors) ? vectors[0] : null);
+  }
+  return null;
+}
+
+async function embedBatchWithOpenClawProvider(
+  kind: OpenClawEmbeddingAdapterKind,
+  provider: unknown,
+  texts: string[],
+  options?: { signal?: AbortSignal; inputType?: string },
+): Promise<Array<number[] | null>> {
+  if (!provider || typeof provider !== "object") return texts.map(() => null);
+  const record = provider as Record<string, unknown>;
+  if (typeof record.embedBatch === "function") {
+    const vectors = await record.embedBatch.call(provider, texts, {
+      signal: options?.signal,
+      inputType: options?.inputType,
+    });
+    return texts.map((_, index) =>
+      normalizeHostEmbeddingVector(Array.isArray(vectors) ? vectors[index] : null),
+    );
+  }
+  return Promise.all(
+    texts.map((text) => embedWithOpenClawProvider(kind, provider, text, options)),
+  );
+}
+
 /** SDK capabilities detected at register() time — available to later tasks. */
 let sdkCaps: SdkCapabilities | undefined;
 
@@ -849,6 +1168,14 @@ const pluginDefinition = {
         `[remnic] memory slot not assigned to ${serviceId}; running passively`,
       );
     }
+    const channelEnvelopeCleaning = resolveChannelEnvelopePrefixes(cfg);
+    const cleanOpenClawUserMessage = createOpenClawUserMessageCleaner(
+      channelEnvelopeCleaning.prefixes,
+      {
+        includeLegacyChannelEnvelopePattern:
+          channelEnvelopeCleaning.includeLegacyChannelEnvelopePattern,
+      },
+    );
 
     // Singleton guard: the gateway calls register() once per agent (each with a
     // different plugin registry). Reuse the orchestrator (heavy object) but always
@@ -865,6 +1192,45 @@ const pluginDefinition = {
     const orchestrator = existing?.recall ? existing : new Orchestrator(cfg);
     const isFirstRegistration = !(globalThis as any)[keys.REGISTERED_GUARD];
     (globalThis as any)[keys.REGISTERED_GUARD] = true;
+    const unregisterExistingHostEmbeddingProvider = () => {
+      const unregisterHostEmbedding = (globalThis as any)[
+        keys.HOST_EMBEDDING_UNREGISTER
+      ] as (() => void) | undefined;
+      unregisterHostEmbedding?.();
+      delete (globalThis as any)[keys.HOST_EMBEDDING_UNREGISTER];
+      delete (globalThis as any)[keys.HOST_EMBEDDING_SIGNATURE];
+    };
+    if (passiveMode) {
+      unregisterExistingHostEmbeddingProvider();
+    } else {
+      const hostEmbeddingSignature = openClawHostEmbeddingConfigSignature(
+        cfg,
+        api.config,
+        getOpenClawRuntimeWorkspaceDir(api),
+      );
+      const existingHostEmbeddingSignature = (globalThis as any)[
+        keys.HOST_EMBEDDING_SIGNATURE
+      ] as string | undefined;
+      if (
+        (globalThis as any)[keys.HOST_EMBEDDING_UNREGISTER] &&
+        existingHostEmbeddingSignature !== hostEmbeddingSignature
+      ) {
+        unregisterExistingHostEmbeddingProvider();
+      }
+      if (!(globalThis as any)[keys.HOST_EMBEDDING_UNREGISTER]) {
+        const unregisterHostEmbedding = registerOpenClawHostEmbeddingProvider({
+          api,
+          cfg,
+          serviceId,
+        });
+        if (unregisterHostEmbedding) {
+          (globalThis as any)[keys.HOST_EMBEDDING_UNREGISTER] =
+            unregisterHostEmbedding;
+          (globalThis as any)[keys.HOST_EMBEDDING_SIGNATURE] =
+            hostEmbeddingSignature;
+        }
+      }
+    }
 
     // Per-api hook deduplication: if the same api object calls register() twice
     // (e.g., during reload edge cases), skip re-binding hooks to avoid double-
@@ -1236,7 +1602,190 @@ const pluginDefinition = {
     const codexSessionsByThread = new Map<string, Set<string>>();
     const codexSessionsByBufferKey = new Map<string, Set<string>>();
     const codexMessageCountByBufferKey = new Map<string, number>();
+    const observedInboundMessageIds = new Set<string>();
+    const observedInboundMessageIdOrder: string[] = [];
+    const observedInboundContentFingerprints = new Set<string>();
+    const observedInboundContentFingerprintOrder: string[] = [];
+    const pendingSparseInboundContentFingerprints = new Set<string>();
+    const pendingSparseInboundContentFingerprintOrder: string[] = [];
+    const inboundReplyMetadataByMessageKey = new Map<string, OpenClawTranscriptMetadata>();
+    const inboundReplyMetadataKeyOrder: string[] = [];
+    const observedInlineExplicitCaptureKeys = new Set<string>();
+    const observedInlineExplicitCaptureKeyOrder: string[] = [];
     let codexCompactionModeLogged = false;
+
+    function rememberObservedInboundMessageId(messageKey: string): void {
+      if (!observedInboundMessageIds.has(messageKey)) {
+        observedInboundMessageIds.add(messageKey);
+        observedInboundMessageIdOrder.push(messageKey);
+      }
+      while (observedInboundMessageIdOrder.length > MAX_OBSERVED_INBOUND_MESSAGE_IDS) {
+        const expired = observedInboundMessageIdOrder.shift();
+        if (expired) {
+          observedInboundMessageIds.delete(expired);
+          inboundReplyMetadataByMessageKey.delete(expired);
+        }
+      }
+    }
+
+    function rememberObservedInboundMessageKeys(messageKeys: string[]): void {
+      for (const messageKey of messageKeys) {
+        rememberObservedInboundMessageId(messageKey);
+      }
+    }
+
+    function rememberObservedInboundContentFingerprint(
+      contentFingerprint: string | null,
+    ): void {
+      if (!contentFingerprint) return;
+      if (!observedInboundContentFingerprints.has(contentFingerprint)) {
+        observedInboundContentFingerprints.add(contentFingerprint);
+        observedInboundContentFingerprintOrder.push(contentFingerprint);
+      }
+      while (
+        observedInboundContentFingerprintOrder.length >
+        MAX_OBSERVED_INBOUND_MESSAGE_IDS
+      ) {
+        const expired = observedInboundContentFingerprintOrder.shift();
+        if (expired) observedInboundContentFingerprints.delete(expired);
+      }
+    }
+
+    function rememberPendingSparseInboundContentFingerprint(
+      contentFingerprint: string | null,
+    ): void {
+      if (!contentFingerprint) return;
+      if (!pendingSparseInboundContentFingerprints.has(contentFingerprint)) {
+        pendingSparseInboundContentFingerprints.add(contentFingerprint);
+        pendingSparseInboundContentFingerprintOrder.push(contentFingerprint);
+      }
+      while (
+        pendingSparseInboundContentFingerprintOrder.length >
+        MAX_OBSERVED_INBOUND_MESSAGE_IDS
+      ) {
+        const expired = pendingSparseInboundContentFingerprintOrder.shift();
+        if (expired) pendingSparseInboundContentFingerprints.delete(expired);
+      }
+    }
+
+    function consumePendingSparseInboundContentFingerprint(
+      contentFingerprint: string | null,
+    ): boolean {
+      if (!contentFingerprint || !pendingSparseInboundContentFingerprints.has(contentFingerprint)) {
+        return false;
+      }
+      pendingSparseInboundContentFingerprints.delete(contentFingerprint);
+      const index = pendingSparseInboundContentFingerprintOrder.indexOf(contentFingerprint);
+      if (index >= 0) pendingSparseInboundContentFingerprintOrder.splice(index, 1);
+      return true;
+    }
+
+    function rememberInboundReplyMetadata(
+      messageKeys: readonly string[],
+      metadata: OpenClawTranscriptMetadata | null,
+    ): void {
+      if (!metadata?.replyToBody?.trim()) return;
+      for (const messageKey of messageKeys) {
+        if (!inboundReplyMetadataByMessageKey.has(messageKey)) {
+          inboundReplyMetadataKeyOrder.push(messageKey);
+        }
+        inboundReplyMetadataByMessageKey.set(messageKey, metadata);
+      }
+      while (inboundReplyMetadataKeyOrder.length > MAX_OBSERVED_INBOUND_MESSAGE_IDS) {
+        const expired = inboundReplyMetadataKeyOrder.shift();
+        if (expired && !observedInboundMessageIds.has(expired)) {
+          inboundReplyMetadataByMessageKey.delete(expired);
+        }
+      }
+    }
+
+    function getInboundReplyMetadata(
+      messageKeys: readonly string[],
+    ): OpenClawTranscriptMetadata | null {
+      for (const messageKey of messageKeys) {
+        const metadata = inboundReplyMetadataByMessageKey.get(messageKey);
+        if (metadata?.replyToBody?.trim()) return metadata;
+      }
+      return null;
+    }
+
+    function rememberObservedInlineExplicitCaptureKey(noteKey: string): void {
+      if (!observedInlineExplicitCaptureKeys.has(noteKey)) {
+        observedInlineExplicitCaptureKeys.add(noteKey);
+        observedInlineExplicitCaptureKeyOrder.push(noteKey);
+      }
+      while (
+        observedInlineExplicitCaptureKeyOrder.length >
+        MAX_OBSERVED_INLINE_EXPLICIT_CAPTURE_KEYS
+      ) {
+        const expired = observedInlineExplicitCaptureKeyOrder.shift();
+        if (expired) observedInlineExplicitCaptureKeys.delete(expired);
+      }
+    }
+
+    function buildInlineExplicitCaptureDedupeKey(
+      messageKey: string | null | undefined,
+      note: ReturnType<typeof parseInlineExplicitCaptureNotes>[number],
+    ): string | null {
+      if (!messageKey) return null;
+      return `${messageKey}:inline-memory-note:${createHash("sha256")
+        .update(JSON.stringify(note))
+        .digest("hex")}`;
+    }
+
+    async function processInlineExplicitCaptureNotes(
+      notes: ReturnType<typeof parseInlineExplicitCaptureNotes>,
+      messageKeys: readonly string[] | null | undefined,
+    ): Promise<number> {
+      let processed = 0;
+      for (const note of notes) {
+        const noteKeys = (messageKeys ?? [])
+          .map((messageKey) => buildInlineExplicitCaptureDedupeKey(messageKey, note))
+          .filter((noteKey): noteKey is string => typeof noteKey === "string");
+        if (
+          noteKeys.length > 0 &&
+          noteKeys.some((noteKey) => observedInlineExplicitCaptureKeys.has(noteKey))
+        ) {
+          continue;
+        }
+        try {
+          await persistExplicitCapture(
+            orchestrator,
+            validateExplicitCaptureInput(note),
+            "inline",
+          );
+          orchestrator.requestQmdMaintenanceForTool("inline.memory_note");
+          for (const noteKey of noteKeys) {
+            rememberObservedInlineExplicitCaptureKey(noteKey);
+          }
+          processed += 1;
+        } catch (error) {
+          try {
+            const queued = await queueExplicitCaptureForReview(
+              orchestrator,
+              note,
+              "inline",
+              error,
+            );
+            orchestrator.requestQmdMaintenanceForTool(
+              "inline.memory_note.review",
+            );
+            for (const noteKey of noteKeys) {
+              rememberObservedInlineExplicitCaptureKey(noteKey);
+            }
+            processed += 1;
+            log.warn(
+              `explicit inline capture queued for review: ${queued.id}${queued.duplicateOf ? ` (duplicate of ${queued.duplicateOf})` : ""}`,
+            );
+          } catch (queueError) {
+            log.warn(
+              `explicit inline capture rejected: ${error}; review queue fallback failed: ${queueError}`,
+            );
+          }
+        }
+      }
+      return processed;
+    }
 
     function resolveStoredCodexThreadId(sessionKey: string): string | null {
       const threadId = codexThreadBySession.get(sessionKey);
@@ -3063,6 +3612,129 @@ const pluginDefinition = {
       log.info(`registered ${capabilityDesc}`);
     }
 
+    if (cfg.openclawMessageReceivedCaptureEnabled) {
+      (api.on as (
+        event: string,
+        handler: (
+          event: Record<string, unknown>,
+          ctx: Record<string, unknown>,
+        ) => Promise<unknown>,
+      ) => void)(
+        "message_received",
+        async (
+          event: Record<string, unknown>,
+          ctx: Record<string, unknown>,
+        ) => {
+          if (
+            cfg.heartbeat.enabled &&
+            cfg.heartbeat.gateExtractionDuringHeartbeat &&
+            isHeartbeatTrigger(event, ctx)
+          ) {
+            log.debug(
+              `message_received: skipping transcript capture during heartbeat run for ${(ctx?.sessionKey as string) ?? "default"}`,
+            );
+            return;
+          }
+          const content =
+            typeof event.content === "string" ? event.content.trim() : "";
+          if (content.length === 0) return;
+          const sessionKey =
+            normalizeOptionalString(ctx.sessionKey) ??
+            normalizeOptionalString(event.sessionKey) ??
+            "default";
+          const inboundMessageKeys = getOpenClawMessageDedupeKeys(event, event, ctx, sessionKey);
+          if (inboundMessageKeys.some((key) => observedInboundMessageIds.has(key))) return;
+          const metadata = buildOpenClawMessageMetadata(event, event, ctx, cfg);
+          const inboundReplyHintMetadata = cfg.openclawReplyMetadataExtractionHintsEnabled
+            ? buildOpenClawMessageMetadata(event, event, ctx, {
+                openclawReplyMetadataCaptureEnabled: true,
+              })
+            : metadata;
+          const eventDate =
+            typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+              ? new Date(event.timestamp)
+              : new Date();
+          const timestamp = Number.isFinite(eventDate.getTime())
+            ? eventDate.toISOString()
+            : new Date().toISOString();
+          const cleaned = cleanOpenClawUserMessage(content);
+          const inlineCaptureEnabled = shouldProcessInlineExplicitCapture(
+            orchestrator.config,
+          );
+          const explicitNotes = inlineCaptureEnabled
+            ? parseInlineExplicitCaptureNotes(cleaned)
+            : [];
+          const transcriptContent =
+            inlineCaptureEnabled && hasInlineExplicitCaptureMarkup(cleaned)
+              ? stripInlineExplicitCaptureNotes(cleaned)
+              : cleaned;
+          const inboundContentFingerprint = buildOpenClawInboundContentFingerprint(
+            transcriptContent,
+            event,
+            event,
+            ctx,
+            sessionKey,
+          );
+          const sparseInboundContentFingerprint = buildOpenClawSparseInboundContentFingerprint(
+            transcriptContent,
+            sessionKey,
+          );
+          if (
+            inboundContentFingerprint &&
+            observedInboundContentFingerprints.has(inboundContentFingerprint)
+          ) {
+            return;
+          }
+          const inlineCaptureDedupeKeys =
+            inboundMessageKeys.length > 0
+              ? inboundMessageKeys
+              : inboundContentFingerprint
+                ? [inboundContentFingerprint]
+                : sparseInboundContentFingerprint
+                  ? [sparseInboundContentFingerprint]
+                : [];
+          const processedExplicitNotes =
+            explicitNotes.length > 0
+              ? await processInlineExplicitCaptureNotes(
+                  explicitNotes,
+                  inlineCaptureDedupeKeys,
+                )
+              : 0;
+          if (!orchestrator.config.transcriptEnabled || transcriptContent.length === 0) {
+            rememberInboundReplyMetadata(inboundMessageKeys, inboundReplyHintMetadata);
+            if (processedExplicitNotes > 0) {
+              rememberObservedInboundMessageKeys(inboundMessageKeys);
+              rememberObservedInboundContentFingerprint(inboundContentFingerprint);
+              if (inboundMessageKeys.length === 0) {
+                rememberPendingSparseInboundContentFingerprint(sparseInboundContentFingerprint);
+              }
+            }
+            return;
+          }
+          try {
+            await orchestrator.transcript.append({
+              timestamp,
+              role: "user",
+              content: transcriptContent,
+              sessionKey,
+              turnId: crypto.randomUUID(),
+              ...(metadata ? { metadata } : {}),
+            });
+            if (inboundMessageKeys.length > 0) {
+              rememberObservedInboundMessageKeys(inboundMessageKeys);
+              rememberInboundReplyMetadata(inboundMessageKeys, inboundReplyHintMetadata);
+            }
+            rememberObservedInboundContentFingerprint(inboundContentFingerprint);
+            if (inboundMessageKeys.length === 0) {
+              rememberPendingSparseInboundContentFingerprint(sparseInboundContentFingerprint);
+            }
+          } catch (err) {
+            log.debug(`message_received transcript append failed: ${err}`);
+          }
+        },
+      );
+    }
+
     // ========================================================================
     // HOOK: agent_end — Buffer turns and trigger extraction
     // ========================================================================
@@ -3187,7 +3859,7 @@ const pluginDefinition = {
 
             // Clean system metadata from user messages
             const cleaned =
-              role === "user" ? cleanUserMessage(content) : content;
+              role === "user" ? cleanOpenClawUserMessage(content) : content;
             const inlineCaptureEnabled = shouldProcessInlineExplicitCapture(
               orchestrator.config,
             );
@@ -3198,50 +3870,86 @@ const pluginDefinition = {
               inlineCaptureEnabled && hasInlineExplicitCaptureMarkup(cleaned)
                 ? stripInlineExplicitCaptureNotes(cleaned)
                 : cleaned;
+            const messageMetadata = buildOpenClawMessageMetadata(
+              msg,
+              event,
+              ctx,
+              cfg,
+            );
+            const messageDedupeKeys = getOpenClawMessageDedupeKeys(msg, event, ctx, sessionKey);
+            const messageContentFingerprint = buildOpenClawInboundContentFingerprint(
+              stripped,
+              msg,
+              event,
+              ctx,
+              sessionKey,
+            );
+            const sparseMessageContentFingerprint =
+              buildOpenClawSparseInboundContentFingerprint(stripped, sessionKey);
+            const cachedReplyHintMetadata =
+              role === "user" && cfg.openclawReplyMetadataExtractionHintsEnabled
+                ? getInboundReplyMetadata(messageDedupeKeys)
+                : null;
+            const replyHintMetadata = cfg.openclawReplyMetadataExtractionHintsEnabled
+              ? cachedReplyHintMetadata ?? buildOpenClawMessageMetadata(msg, event, ctx, {
+                  openclawReplyMetadataCaptureEnabled: true,
+                })
+              : messageMetadata;
+            const messageDedupeKey = messageDedupeKeys[0];
+            const sparseInboundAlreadyCaptured =
+              role === "user" &&
+              messageDedupeKeys.length === 0 &&
+              consumePendingSparseInboundContentFingerprint(sparseMessageContentFingerprint);
+            const transcriptAlreadyCaptured =
+              role === "user" &&
+              ((messageDedupeKeys.length > 0 &&
+                messageDedupeKeys.some((key) => observedInboundMessageIds.has(key))) ||
+                sparseInboundAlreadyCaptured ||
+                (messageContentFingerprint !== null &&
+                  observedInboundContentFingerprints.has(messageContentFingerprint)));
+            const inlineCaptureDedupeKeys =
+              messageDedupeKeys.length > 0
+                ? messageDedupeKeys
+                : messageContentFingerprint
+                  ? [messageContentFingerprint]
+                  : sparseMessageContentFingerprint
+                    ? [sparseMessageContentFingerprint]
+                  : [];
 
-            for (const note of explicitNotes) {
-              try {
-                await persistExplicitCapture(
-                  orchestrator,
-                  validateExplicitCaptureInput(note),
-                  "inline",
-                );
-                orchestrator.requestQmdMaintenanceForTool("inline.memory_note");
-              } catch (error) {
-                try {
-                  const queued = await queueExplicitCaptureForReview(
-                    orchestrator,
-                    note,
-                    "inline",
-                    error,
-                  );
-                  orchestrator.requestQmdMaintenanceForTool(
-                    "inline.memory_note.review",
-                  );
-                  log.warn(
-                    `explicit inline capture queued for review: ${queued.id}${queued.duplicateOf ? ` (duplicate of ${queued.duplicateOf})` : ""}`,
-                  );
-                } catch (queueError) {
-                  log.warn(
-                    `explicit inline capture rejected: ${error}; review queue fallback failed: ${queueError}`,
-                  );
-                }
-              }
-            }
+            await processInlineExplicitCaptureNotes(
+              explicitNotes,
+              inlineCaptureDedupeKeys,
+            );
 
             // Append to transcript
-            if (orchestrator.config.transcriptEnabled && stripped.length > 0) {
+            if (
+              orchestrator.config.transcriptEnabled &&
+              stripped.length > 0 &&
+              !transcriptAlreadyCaptured
+            ) {
               await orchestrator.transcript.append({
                 timestamp: eventTimestamp,
                 role,
                 content: stripped,
                 sessionKey,
                 turnId: crypto.randomUUID(),
+                ...(messageMetadata ? { metadata: messageMetadata } : {}),
               });
+              if (role === "user") {
+                if (messageDedupeKey) {
+                  rememberObservedInboundMessageKeys(messageDedupeKeys);
+                }
+                rememberObservedInboundContentFingerprint(messageContentFingerprint);
+              }
             }
 
             if (stripped.length > 0) {
-              await orchestrator.processTurn(role, stripped, sessionKey, {
+              const extractionContent =
+                role === "user" &&
+                cfg.openclawReplyMetadataExtractionHintsEnabled
+                  ? withReplyExtractionHint(stripped, replyHintMetadata)
+                  : stripped;
+              await orchestrator.processTurn(role, extractionContent, sessionKey, {
                 bufferKey: resolveExtractionBufferKey(
                   sessionKey,
                   sessionIdentity.logicalSessionKey,
@@ -3250,7 +3958,7 @@ const pluginDefinition = {
                 providerThreadId: sessionIdentity.providerThreadId,
                 turnFingerprint: buildTurnFingerprint({
                   role,
-                  content: stripped,
+                  content: extractionContent,
                   logicalSessionKey: sessionIdentity.logicalSessionKey,
                   providerThreadId: sessionIdentity.providerThreadId,
                   maxContentChars: cfg.extractionMaxTurnChars,
@@ -4694,6 +5402,12 @@ const pluginDefinition = {
           stopHeartbeatWatcher = null;
           removeDreamingObserver?.();
           removeDreamingObserver = null;
+          const unregisterOpenClawHostEmbeddingProvider = (globalThis as any)[
+            keys.HOST_EMBEDDING_UNREGISTER
+          ] as (() => void) | undefined;
+          unregisterOpenClawHostEmbeddingProvider?.();
+          delete (globalThis as any)[keys.HOST_EMBEDDING_UNREGISTER];
+          delete (globalThis as any)[keys.HOST_EMBEDDING_SIGNATURE];
           delete (globalThis as any)[keys.ACCESS_HTTP_SERVER];
           delete (globalThis as any)[keys.ACCESS_HTTP_AUTH_STATE];
           delete (globalThis as any)[keys.ACCESS_SERVICE];
@@ -4762,4 +5476,190 @@ function extractTextContent(msg: Record<string, unknown>): string {
       .join("\n");
   }
   return "";
+}
+
+type OpenClawTranscriptMetadata = NonNullable<
+  import("@remnic/core/types").TranscriptEntry["metadata"]
+>;
+
+function buildOpenClawMessageMetadata(
+  message: Record<string, unknown>,
+  event: Record<string, unknown>,
+  ctx: Record<string, unknown>,
+  cfg: {
+    openclawReplyMetadataCaptureEnabled: boolean;
+  },
+): OpenClawTranscriptMetadata | null {
+  if (!cfg.openclawReplyMetadataCaptureEnabled) return null;
+  const metadata: OpenClawTranscriptMetadata = {};
+  const messageId = getOpenClawMessageId(message, event, ctx);
+  if (messageId) metadata.messageId = truncateMetadataValue(messageId, 512);
+
+  const threadId =
+    normalizeThreadId(message.threadId) ??
+    normalizeThreadId(event.threadId) ??
+    normalizeThreadId(ctx.threadId);
+  if (threadId) metadata.threadId = truncateMetadataValue(threadId, 512);
+
+  const replyToId =
+    normalizeOptionalString(message.replyToId) ??
+    normalizeOptionalString(event.replyToId) ??
+    normalizeOptionalString(ctx.replyToId);
+  if (replyToId) metadata.replyToId = truncateMetadataValue(replyToId, 512);
+
+  const replyToBody =
+    normalizeOptionalString(message.replyToBody) ??
+    normalizeOptionalString(event.replyToBody) ??
+    normalizeOptionalString(ctx.replyToBody);
+  if (replyToBody) metadata.replyToBody = truncateMetadataValue(replyToBody, 1_000);
+
+  const replyToSender =
+    normalizeOptionalString(message.replyToSender) ??
+    normalizeOptionalString(event.replyToSender) ??
+    normalizeOptionalString(ctx.replyToSender);
+  if (replyToSender) metadata.replyToSender = truncateMetadataValue(replyToSender, 256);
+
+  return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+function getOpenClawMessageId(
+  message: Record<string, unknown>,
+  event: Record<string, unknown>,
+  ctx: Record<string, unknown>,
+): string | undefined {
+  const messageId =
+    normalizeOptionalString(message.messageId) ??
+    normalizeOptionalString(event.messageId) ??
+    normalizeOptionalString(ctx.messageId);
+  return messageId ? truncateMetadataValue(messageId, 512) : undefined;
+}
+
+function getOpenClawMessageDedupeKeys(
+  message: Record<string, unknown>,
+  event: Record<string, unknown>,
+  ctx: Record<string, unknown>,
+  sessionKey: string,
+): string[] {
+  const messageId = getOpenClawMessageId(message, event, ctx);
+  if (!messageId) return [];
+  const sessionScope =
+    normalizeOptionalString(message.sessionKey) ??
+    normalizeOptionalString(event.sessionKey) ??
+    normalizeOptionalString(ctx.sessionKey) ??
+    sessionKey;
+  const threadScope = truncateMetadataValue(
+    normalizeThreadId(message.threadId) ??
+    normalizeThreadId(event.threadId) ??
+    normalizeThreadId(ctx.threadId) ??
+    "",
+    512,
+  );
+  const runScope = truncateMetadataValue(
+    normalizeOptionalString(message.runId) ??
+    normalizeOptionalString(event.runId) ??
+    normalizeOptionalString(ctx.runId) ??
+    "",
+    512,
+  );
+  const sessionPart = truncateMetadataValue(sessionScope, 512);
+  const dedupeScopes = new Set<string>();
+  if (threadScope) dedupeScopes.add(threadScope);
+  if (runScope) dedupeScopes.add(runScope);
+  dedupeScopes.add("");
+  return [...dedupeScopes].map((scope) => `${sessionPart}\u0000${scope}\u0000${messageId}`);
+}
+
+function buildOpenClawInboundContentFingerprint(
+  content: string,
+  message: Record<string, unknown>,
+  event: Record<string, unknown>,
+  ctx: Record<string, unknown>,
+  sessionKey: string,
+): string | null {
+  const normalizedContent = content.trim();
+  if (!normalizedContent) return null;
+  const sessionPart = truncateMetadataValue(sessionKey || "default", 512);
+  const runScope = truncateMetadataValue(
+    normalizeOptionalString(message.runId) ??
+      normalizeOptionalString(event.runId) ??
+      normalizeOptionalString(ctx.runId) ??
+      "",
+    512,
+  );
+  const rawTimestamp =
+    normalizeOptionalString(message.timestamp) ??
+    normalizeOptionalString(event.timestamp) ??
+    normalizeOptionalString(ctx.timestamp) ??
+    (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+      ? String(message.timestamp)
+      : undefined) ??
+    (typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+      ? String(event.timestamp)
+      : undefined) ??
+    (typeof ctx.timestamp === "number" && Number.isFinite(ctx.timestamp)
+      ? String(ctx.timestamp)
+      : undefined);
+  const timestampScope = rawTimestamp
+    ? truncateMetadataValue(rawTimestamp, 512)
+    : "";
+  if (!runScope && !timestampScope) return null;
+  const threadScope = truncateMetadataValue(
+    normalizeThreadId(message.threadId) ??
+      normalizeThreadId(event.threadId) ??
+      normalizeThreadId(ctx.threadId) ??
+      "",
+    512,
+  );
+  const contentHash = createHash("sha256")
+    .update(normalizedContent)
+    .digest("hex");
+  return [
+    sessionPart,
+    "content",
+    threadScope,
+    runScope,
+    timestampScope,
+    contentHash,
+  ].join("\u0000");
+}
+
+function buildOpenClawSparseInboundContentFingerprint(
+  content: string,
+  sessionKey: string,
+): string | null {
+  const normalizedContent = content.trim();
+  if (!normalizedContent) return null;
+  const sessionPart = truncateMetadataValue(sessionKey || "default", 512);
+  const contentHash = createHash("sha256")
+    .update(normalizedContent)
+    .digest("hex");
+  return `${sessionPart}\u0000sparse-content\u0000${contentHash}`;
+}
+
+function withReplyExtractionHint(
+  content: string,
+  metadata: OpenClawTranscriptMetadata | null,
+): string {
+  const replyBody = metadata?.replyToBody?.trim();
+  if (!replyBody) return content;
+  const sender = metadata?.replyToSender?.trim();
+  const prefix = sender
+    ? `Reply context from ${sender}: ${replyBody}`
+    : `Reply context: ${replyBody}`;
+  return `${prefix}\n\nCurrent message: ${content}`;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeThreadId(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return normalizeOptionalString(value);
+}
+
+function truncateMetadataValue(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : value.slice(0, maxChars);
 }

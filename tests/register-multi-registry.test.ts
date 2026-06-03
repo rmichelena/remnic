@@ -57,6 +57,8 @@ const ACCESS_HTTP_KEY = `__openclawEngramAccessHttpServer::${SERVICE_ID}`;
 const ACCESS_HTTP_AUTH_STATE_KEY = `__openclawEngramAccessHttpAuthState::${SERVICE_ID}`;
 const SERVICE_STARTED_KEY = `__openclawEngramServiceStarted::${SERVICE_ID}`;
 const INIT_PROMISE_KEY = `__openclawEngramInitPromise::${SERVICE_ID}`;
+const HOST_EMBEDDING_UNREGISTER_KEY = `__openclawEngramHostEmbeddingUnregister::${SERVICE_ID}`;
+const HOST_EMBEDDING_SIGNATURE_KEY = `__openclawEngramHostEmbeddingSignature::${SERVICE_ID}`;
 const MIGRATION_PROMISE_KEY = "__openclawEngramMigrationPromise";
 const DISABLE_REGISTER_MIGRATION_ENV = "REMNIC_DISABLE_REGISTER_MIGRATION";
 const SECRET_REF_RESOLVER_TEST_KEY = "__openclawEngramSecretRefResolverForTest";
@@ -136,6 +138,8 @@ function saveAndResetGlobals() {
     accessHttpAuthState: (globalThis as any)[ACCESS_HTTP_AUTH_STATE_KEY],
     serviceStarted: (globalThis as any)[SERVICE_STARTED_KEY],
     initPromise: (globalThis as any)[INIT_PROMISE_KEY],
+    hostEmbeddingUnregister: (globalThis as any)[HOST_EMBEDDING_UNREGISTER_KEY],
+    hostEmbeddingSignature: (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY],
     migrationPromise: (globalThis as any)[MIGRATION_PROMISE_KEY],
   };
   delete (globalThis as any)[GUARD_KEY];
@@ -149,6 +153,8 @@ function saveAndResetGlobals() {
   delete (globalThis as any)[ACCESS_HTTP_AUTH_STATE_KEY];
   delete (globalThis as any)[SERVICE_STARTED_KEY];
   delete (globalThis as any)[INIT_PROMISE_KEY];
+  delete (globalThis as any)[HOST_EMBEDDING_UNREGISTER_KEY];
+  delete (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY];
   delete (globalThis as any)[MIGRATION_PROMISE_KEY];
   return saved;
 }
@@ -181,7 +187,9 @@ async function safeStop(
 ) {
   for (const api of apis) {
     try {
-      await api._registeredStop?.();
+      if (api?._registeredStop) {
+        await api._registeredStop();
+      }
     } catch {}
   }
 }
@@ -219,6 +227,12 @@ function restoreGlobals(saved: ReturnType<typeof saveAndResetGlobals>) {
 
   if (saved.initPromise !== undefined) (globalThis as any)[INIT_PROMISE_KEY] = saved.initPromise;
   else delete (globalThis as any)[INIT_PROMISE_KEY];
+
+  if (saved.hostEmbeddingUnregister !== undefined) (globalThis as any)[HOST_EMBEDDING_UNREGISTER_KEY] = saved.hostEmbeddingUnregister;
+  else delete (globalThis as any)[HOST_EMBEDDING_UNREGISTER_KEY];
+
+  if (saved.hostEmbeddingSignature !== undefined) (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY] = saved.hostEmbeddingSignature;
+  else delete (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY];
 
   if (saved.migrationPromise !== undefined) (globalThis as any)[MIGRATION_PROMISE_KEY] = saved.migrationPromise;
   else delete (globalThis as any)[MIGRATION_PROMISE_KEY];
@@ -668,6 +682,624 @@ test("full stop then secondary start: SERVICE_STARTED is true, REGISTERED_GUARD 
     await awaitPendingMigration();
     restoreRegisterMigrationEnv(previousDisableMigration);
     restoreGlobals(saved);
+  }
+});
+
+test("host embedding bridge re-registers after cleanup independently of REGISTERED_GUARD", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-reregister-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let first: ReturnType<typeof buildApi> | undefined;
+  let fresh: ReturnType<typeof buildApi> | undefined;
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "test-memory-provider",
+              create: async () => ({
+                provider: {
+                  embed: async () => [1, 0],
+                },
+              }),
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const { getHostEmbeddingProvider } = await import(
+      "../src/host-embedding-provider.js"
+    );
+
+    first = buildApi("host-embedding-first");
+    first.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+    } as any;
+
+    plugin.register(first.api as any);
+    assert.ok(
+      getHostEmbeddingProvider(memoryDir),
+      "first register() should install the host embedding bridge",
+    );
+
+    await first.api._registeredStart?.();
+    await first.api._registeredStop?.();
+
+    assert.equal(
+      getHostEmbeddingProvider(memoryDir),
+      undefined,
+      "stop() should unregister the host embedding bridge",
+    );
+
+    (globalThis as any)[GUARD_KEY] = true;
+    fresh = buildApi("host-embedding-fresh");
+    fresh.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+    } as any;
+
+    plugin.register(fresh.api as any);
+    assert.ok(
+      getHostEmbeddingProvider(memoryDir),
+      "fresh register() should restore host embeddings even when the CLI guard stays set",
+    );
+  } finally {
+    Module._load = originalLoad;
+    await safeStop(first?.api, fresh?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("host embedding bridge re-registers when host embedding config changes", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-config-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let first: ReturnType<typeof buildApi> | undefined;
+  let second: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "first-memory-provider",
+              create: async () => ({
+                provider: {
+                  embed: async () => [1, 0],
+                },
+              }),
+            },
+            {
+              id: "second-memory-provider",
+              create: async () => ({
+                provider: {
+                  embed: async () => [0, 1],
+                },
+              }),
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    first = buildApi("host-embedding-config-first");
+    first.api.config = {
+      models: {
+        providers: [{
+          id: "secret-provider",
+          apiKey: "sk-test-raw-secret",
+        }],
+      },
+    };
+    first.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "first-memory-provider",
+      hostEmbeddingProviderModel: "model-a",
+    } as any;
+
+    plugin.register(first.api as any);
+    assert.equal(
+      getHostEmbeddingProvider(memoryDir)?.model,
+      "memory:first-memory-provider/model-a",
+    );
+    assert.match(
+      (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY],
+      /^sha256:[a-f0-9]{64}$/,
+    );
+    assert.doesNotMatch(
+      (globalThis as any)[HOST_EMBEDDING_SIGNATURE_KEY],
+      /sk-test-raw-secret/,
+    );
+
+    second = buildApi("host-embedding-config-second");
+    second.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "second-memory-provider",
+      hostEmbeddingProviderModel: "model-b",
+    } as any;
+
+    plugin.register(second.api as any);
+    assert.equal(
+      getHostEmbeddingProvider(memoryDir)?.model,
+      "memory:second-memory-provider/model-b",
+    );
+
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(first?.api, second?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("host embedding bridge uses adapter default instead of fallback model", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-default-model-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let registry: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  const requestedModels: Array<unknown> = [];
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "default-model-memory-provider",
+              defaultModel: "adapter-default-model",
+              create: async (options: { model?: string }) => {
+                requestedModels.push(options.model);
+                return {
+                  provider: {
+                    embed: async () => [1, 0],
+                  },
+                };
+              },
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    registry = buildApi("host-embedding-default-model");
+    registry.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "default-model-memory-provider",
+      embeddingFallbackModel: "fallback-only-model",
+    } as any;
+
+    plugin.register(registry.api as any);
+    assert.equal(
+      getHostEmbeddingProvider(memoryDir)?.model,
+      "memory:default-model-memory-provider/adapter-default-model",
+    );
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("input"), [1, 0]);
+    assert.deepEqual(requestedModels, ["adapter-default-model"]);
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(registry?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("host embedding bridge passes workspaceDir to OpenClaw adapters", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-workspace-"));
+  const workspaceDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-workspace-root-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let registry: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  const createOptions: Array<Record<string, unknown>> = [];
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "workspace-memory-provider",
+              create: async (options: Record<string, unknown>) => {
+                createOptions.push(options);
+                return {
+                  provider: {
+                    embed: async () => [1, 0],
+                  },
+                };
+              },
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    registry = buildApi("host-embedding-workspace");
+    registry.api.runtime = {
+      version: "0.0.0",
+      agent: { workspaceDir },
+    } as any;
+    registry.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "workspace-memory-provider",
+    } as any;
+
+    plugin.register(registry.api as any);
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("input"), [1, 0]);
+    assert.equal(createOptions[0]?.workspaceDir, workspaceDir);
+    assert.equal(createOptions[0]?.agentDir, workspaceDir);
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(registry?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("host embedding bridge retries provider creation after transient null result", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-retry-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let registry: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  let createCalls = 0;
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "retry-memory-provider",
+              create: async () => {
+                createCalls += 1;
+                if (createCalls === 1) {
+                  return null;
+                }
+                return {
+                  provider: {
+                    embed: async () => [1, 0],
+                  },
+                };
+              },
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    registry = buildApi("host-embedding-retry");
+    registry.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "retry-memory-provider",
+    } as any;
+
+    plugin.register(registry.api as any);
+    assert.equal(await getHostEmbeddingProvider(memoryDir)?.embed("first"), null);
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("second"), [1, 0]);
+    assert.equal(createCalls, 2);
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(registry?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("passive slot registrations unregister the active host embedding bridge", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-passive-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let active: ReturnType<typeof buildApi> | undefined;
+  let passive: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: (config?: { providerMarker?: string }) => {
+            const providerId =
+              config?.providerMarker === "passive"
+                ? "passive-memory-provider"
+                : "active-memory-provider";
+            return [
+              {
+                id: providerId,
+                create: async () => ({
+                  provider: {
+                    embed: async () =>
+                      providerId === "passive-memory-provider" ? [0, 1] : [1, 0],
+                  },
+                }),
+              },
+            ];
+          },
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    active = buildApi("host-embedding-active-slot");
+    active.api.config = { providerMarker: "active" };
+    active.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+    } as any;
+
+    plugin.register(active.api as any);
+    await active.api._registeredStart?.();
+    assert.equal(
+      getHostEmbeddingProvider(memoryDir)?.model,
+      "memory:active-memory-provider/text-embedding-3-small",
+    );
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("input"), [1, 0]);
+
+    passive = buildApi("host-embedding-passive-slot");
+    passive.api.config = {
+      providerMarker: "passive",
+      plugins: {
+        slots: {
+          memory: "another-memory-plugin",
+        },
+      },
+    };
+    passive.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      slotBehavior: {
+        onSlotMismatch: "silent",
+      },
+    } as any;
+
+    plugin.register(passive.api as any);
+    await passive.api._registeredStart?.();
+    await passive.api._registeredStop?.();
+
+    assert.equal(getHostEmbeddingProvider(memoryDir), undefined);
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(passive?.api, active?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("host embedding bridge re-registers when OpenClaw host config changes", async () => {
+  const saved = saveAndResetGlobals();
+  const previousDisableMigration = disableRegisterMigrationForTest();
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-host-embedding-openclaw-config-"));
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const Module = require("node:module") as {
+    _load: (
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) => unknown;
+  };
+  const originalLoad = Module._load;
+  let first: ReturnType<typeof buildApi> | undefined;
+  let second: ReturnType<typeof buildApi> | undefined;
+  let clearHostEmbeddingProvidersForTest: (() => void) | undefined;
+  try {
+    Module._load = function patchedLoad(
+      request: string,
+      parent?: unknown,
+      isMain?: boolean,
+    ) {
+      if (request === "openclaw/plugin-sdk/memory-core-host-engine-embeddings") {
+        return {
+          listMemoryEmbeddingProviders: () => [
+            {
+              id: "config-aware-memory-provider",
+              create: async (options: { config?: { embeddingMarker?: string } }) => {
+                const marker = options.config?.embeddingMarker;
+                return {
+                  provider: {
+                    embed: async () => (marker === "second" ? [0, 1] : [1, 0]),
+                  },
+                };
+              },
+            },
+          ],
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+
+    const { default: plugin } = await import("../src/index.js");
+    const hostEmbeddingProviders = await import("../src/host-embedding-provider.js");
+    clearHostEmbeddingProvidersForTest =
+      hostEmbeddingProviders.clearHostEmbeddingProvidersForTest;
+    const { getHostEmbeddingProvider } = hostEmbeddingProviders;
+
+    first = buildApi("host-embedding-openclaw-config-first");
+    first.api.config = { embeddingMarker: "first" };
+    first.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "config-aware-memory-provider",
+      hostEmbeddingProviderModel: "model-a",
+    } as any;
+
+    plugin.register(first.api as any);
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("input"), [1, 0]);
+
+    second = buildApi("host-embedding-openclaw-config-second");
+    second.api.config = { embeddingMarker: "second" };
+    second.api.pluginConfig = {
+      ...BASE_TEST_PLUGIN_CONFIG,
+      memoryDir,
+      hostEmbeddingProviderEnabled: true,
+      hostEmbeddingProviderId: "config-aware-memory-provider",
+      hostEmbeddingProviderModel: "model-a",
+    } as any;
+
+    plugin.register(second.api as any);
+    assert.deepEqual(await getHostEmbeddingProvider(memoryDir)?.embed("input"), [0, 1]);
+  } finally {
+    Module._load = originalLoad;
+    clearHostEmbeddingProvidersForTest?.();
+    await safeStop(first?.api, second?.api);
+    await awaitPendingMigration();
+    restoreRegisterMigrationEnv(previousDisableMigration);
+    restoreGlobals(saved);
+    await rm(memoryDir, { recursive: true, force: true });
   }
 });
 

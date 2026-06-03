@@ -3,19 +3,30 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { log } from "./logger.js";
 import { readEnvVar } from "./runtime/env.js";
 import type { PluginConfig } from "./types.js";
+import {
+  getHostEmbeddingProvider,
+  type HostEmbeddingProvider,
+  normalizeHostEmbeddingVector,
+} from "./host-embedding-provider.js";
 
-type EmbeddingProviderType = "openai" | "local";
+type EmbeddingProviderType = "openai" | "local" | "host";
 
 type ProviderConfig = {
   type: EmbeddingProviderType;
   model: string;
-  endpoint: string;
-  headers: Record<string, string>;
+  endpoint?: string;
+  headers?: Record<string, string>;
+  hostProvider?: HostEmbeddingProvider;
 };
 
 type EmbeddingIndexEntry = {
   vector: number[];
   path: string;
+};
+
+type EmbeddingResult = {
+  provider: ProviderConfig;
+  vector: number[];
 };
 
 type EmbeddingIndexFile = {
@@ -24,6 +35,11 @@ type EmbeddingIndexFile = {
   model: string;
   entries: Record<string, EmbeddingIndexEntry>;
 };
+
+type EmbeddingIndexIdentity = Pick<EmbeddingIndexFile, "provider" | "model">;
+type EmbeddingIndexComparable =
+  | EmbeddingIndexIdentity
+  | Pick<ProviderConfig, "type" | "model">;
 
 const DEFAULT_OPENAI_MODEL = "text-embedding-3-small";
 
@@ -61,6 +77,20 @@ export class EmbeddingTimeoutError extends Error {
   constructor(message: string) {
     super(message);
   }
+}
+
+export class EmbeddingProviderUnavailableError extends Error {
+  override readonly name = "EmbeddingProviderUnavailableError" as const;
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+function isLookupBackendUnavailableError(err: unknown): boolean {
+  return (
+    err instanceof EmbeddingTimeoutError ||
+    err instanceof EmbeddingProviderUnavailableError
+  );
 }
 
 /**
@@ -228,26 +258,33 @@ export class EmbeddingFallback {
     const provider = await this.resolveProvider();
     if (!provider) return [];
 
-    const index = await this.loadIndex(provider);
-    const ids = Object.keys(index.entries);
-    if (ids.length === 0) return [];
+    let queryResult = await this.embedForSearch(query, provider, options);
+    if (!queryResult) return [];
 
-    let queryVector: number[] | null;
-    try {
-      queryVector = await this.embed(query, provider, { mode: "lookup" });
-    } catch (err) {
-      if (err instanceof EmbeddingTimeoutError) {
-        if (options.throwOnTimeout) {
-          throw err;
+    const diskIdentity = await this.readIndexIdentityFromDisk();
+    if (diskIdentity && !sameIndexIdentity(diskIdentity, queryResult.provider)) {
+      const diskProvider = await this.resolveFallbackProviderForIndexIdentity(diskIdentity);
+      if (diskProvider) {
+        const diskQueryResult = await this.embedForSearch(query, diskProvider, options);
+        if (diskQueryResult && sameIndexIdentity(diskIdentity, diskQueryResult.provider)) {
+          queryResult = diskQueryResult;
+        } else {
+          log.debug(
+            `embedding fallback search skipped: preserved ${diskIdentity.provider}/${diskIdentity.model} index is unavailable for lookup`,
+          );
+          return [];
         }
-        // Fail-open: recall-path callers get an empty result rather than an
-        // unhandled rejection that would abort recall entirely.
-        log.debug("embedding fallback search: timeout on lookup, returning [] (throwOnTimeout=false)");
+      } else {
+        log.debug(
+          `embedding fallback search skipped: query provider ${queryResult.provider.type}/${queryResult.provider.model} does not match existing ${diskIdentity.provider}/${diskIdentity.model} index`,
+        );
         return [];
       }
-      throw err;
     }
-    if (!queryVector) return [];
+
+    const index = await this.loadIndex(queryResult.provider);
+    const ids = Object.keys(index.entries);
+    if (ids.length === 0) return [];
 
     const includePrefix = normalizePathPrefix(options.pathPrefix);
     const excludePrefixes = (options.pathExcludePrefixes ?? [])
@@ -260,7 +297,7 @@ export class EmbeddingFallback {
         return {
           id,
           path: entry.path,
-          score: cosineSimilarity(queryVector, entry.vector),
+          score: cosineSimilarity(queryResult.vector, entry.vector),
         };
       })
       .filter((r) => {
@@ -289,14 +326,27 @@ export class EmbeddingFallback {
     // add the entry to the index. Previously this used the short lookup
     // budget and silently dropped updates, leaving later dedup lookups
     // blind to the memory. Related: PR #399 P2.
-    const vector = await this.embed(content, provider, { mode: "index" });
-    if (!vector) return;
+    const result = await this.embedWithEffectiveProvider(content, provider, {
+      mode: "index",
+    });
+    if (!result) return;
 
     await this.enqueueIndexMutation(async () => {
-      const index = await this.loadIndex(provider);
+      const existing = await this.readIndexIdentityFromDisk();
+      if (
+        existing &&
+        !sameIndexIdentity(existing, result.provider) &&
+        !canReplaceIndexIdentity(existing, result.provider)
+      ) {
+        log.debug(
+          `embedding fallback index update skipped: ${result.provider.type}/${result.provider.model} would replace existing ${existing.provider}/${existing.model} index`,
+        );
+        return;
+      }
+      const index = await this.loadIndex(result.provider);
       const relPath = toMemoryRelativePath(this.config.memoryDir, filePath);
       index.entries[memoryId] = {
-        vector,
+        vector: result.vector,
         path: relPath,
       };
       await this.saveIndex(index);
@@ -308,10 +358,30 @@ export class EmbeddingFallback {
     if (!provider) return;
 
     await this.enqueueIndexMutation(async () => {
-      const index = await this.loadIndex(provider);
-      if (!index.entries[memoryId]) return;
-      delete index.entries[memoryId];
-      await this.saveIndex(index);
+      const providers = [provider];
+      const diskIdentity = await this.readIndexIdentityFromDisk();
+      if (
+        diskIdentity &&
+        !providers.some((entry) => sameIndexIdentity(entry, diskIdentity))
+      ) {
+        providers.push(providerFromIndexIdentity(diskIdentity));
+      }
+      if (provider.type === "host") {
+        const fallbackProvider = await this.resolveProvider({ includeHost: false });
+        if (
+          fallbackProvider &&
+          !providers.some((entry) => sameIndexIdentity(entry, fallbackProvider))
+        ) {
+          providers.push(fallbackProvider);
+        }
+      }
+
+      for (const indexProvider of providers) {
+        const index = await this.loadIndex(indexProvider);
+        if (!index.entries[memoryId]) continue;
+        delete index.entries[memoryId];
+        await this.saveIndex(index);
+      }
     });
   }
 
@@ -324,49 +394,114 @@ export class EmbeddingFallback {
     return run;
   }
 
-  private async resolveProvider(): Promise<ProviderConfig | null> {
+  private async resolveProvider(
+    options: { includeHost?: boolean } = {},
+  ): Promise<ProviderConfig | null> {
     if (!this.config.embeddingFallbackEnabled) return null;
+
+    if (
+      options.includeHost !== false &&
+      this.config.hostEmbeddingProviderEnabled !== false
+    ) {
+      const hostProvider = getHostEmbeddingProvider(this.config.memoryDir);
+      if (hostProvider) {
+        return {
+          type: "host",
+          model: hostProvider.model || hostProvider.id,
+          hostProvider,
+        };
+      }
+    }
 
     const preferred = this.config.embeddingFallbackProvider;
     const providers = preferred === "auto" ? ["openai", "local"] : [preferred];
 
     for (const p of providers) {
-      if (p === "openai" && this.config.openaiApiKey) {
-        const baseUrl = this.config.openaiBaseUrl ?? "https://api.openai.com/v1";
-        return {
-          type: "openai",
-          model: DEFAULT_OPENAI_MODEL,
-          endpoint: `${baseUrl.replace(/\/$/, "")}/embeddings`,
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.config.openaiApiKey}`,
-          },
-        };
+      if (p === "openai") {
+        const provider = this.createOpenAiProvider();
+        if (provider) return provider;
       }
 
-      if (p === "local" && this.config.localLlmEnabled && this.config.localLlmUrl) {
-        const base = this.config.localLlmUrl.replace(/\/$/, "");
-        const endpoint = /\/v1$/i.test(base) ? `${base}/embeddings` : `${base}/v1/embeddings`;
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          ...(this.config.localLlmHeaders ?? {}),
-        };
-        if (this.config.localLlmApiKey && this.config.localLlmAuthHeader !== false) {
-          headers.Authorization = `Bearer ${this.config.localLlmApiKey}`;
-        }
-        return {
-          type: "local",
-          model:
-            this.config.embeddingFallbackModel ||
-            this.config.localLlmModel ||
-            DEFAULT_OPENAI_MODEL,
-          endpoint,
-          headers,
-        };
+      if (p === "local") {
+        const provider = this.createLocalProvider();
+        if (provider) return provider;
       }
     }
 
     return null;
+  }
+
+  private async resolveFallbackProviderForIndexIdentity(
+    identity: EmbeddingIndexIdentity,
+  ): Promise<ProviderConfig | null> {
+    if (identity.provider === "openai") {
+      const provider = this.createOpenAiProvider();
+      return provider && sameIndexIdentity(provider, identity) ? provider : null;
+    }
+    if (identity.provider === "local") {
+      const provider = this.createLocalProvider();
+      return provider && sameIndexIdentity(provider, identity) ? provider : null;
+    }
+    return null;
+  }
+
+  private createOpenAiProvider(): ProviderConfig | null {
+    if (!this.config.openaiApiKey) return null;
+    const baseUrl = this.config.openaiBaseUrl ?? "https://api.openai.com/v1";
+    return {
+      type: "openai",
+      model: DEFAULT_OPENAI_MODEL,
+      endpoint: `${baseUrl.replace(/\/$/, "")}/embeddings`,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.openaiApiKey}`,
+      },
+    };
+  }
+
+  private createLocalProvider(): ProviderConfig | null {
+    if (!this.config.localLlmEnabled || !this.config.localLlmUrl) return null;
+    const base = this.config.localLlmUrl.replace(/\/$/, "");
+    const endpoint = /\/v1$/i.test(base) ? `${base}/embeddings` : `${base}/v1/embeddings`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(this.config.localLlmHeaders ?? {}),
+    };
+    if (this.config.localLlmApiKey && this.config.localLlmAuthHeader !== false) {
+      headers.Authorization = `Bearer ${this.config.localLlmApiKey}`;
+    }
+    return {
+      type: "local",
+      model:
+        this.config.embeddingFallbackModel ||
+        this.config.localLlmModel ||
+        DEFAULT_OPENAI_MODEL,
+      endpoint,
+      headers,
+    };
+  }
+
+  private async embedForSearch(
+    query: string,
+    provider: ProviderConfig,
+    options: { throwOnTimeout?: boolean } = {},
+  ): Promise<EmbeddingResult | null> {
+    try {
+      return await this.embedWithEffectiveProvider(query, provider, {
+        mode: "lookup",
+      });
+    } catch (err) {
+      if (isLookupBackendUnavailableError(err)) {
+        if (options.throwOnTimeout) {
+          throw err;
+        }
+        // Fail-open: recall-path callers get an empty result rather than an
+        // unhandled rejection that would abort recall entirely.
+        log.debug("embedding fallback search: backend unavailable on lookup, returning [] (throwOnTimeout=false)");
+        return null;
+      }
+      throw err;
+    }
   }
 
   private async embed(
@@ -374,6 +509,15 @@ export class EmbeddingFallback {
     provider: ProviderConfig,
     options: { mode?: EmbedMode } = {},
   ): Promise<number[] | null> {
+    const result = await this.embedWithEffectiveProvider(input, provider, options);
+    return result?.vector ?? null;
+  }
+
+  private async embedWithEffectiveProvider(
+    input: string,
+    provider: ProviderConfig,
+    options: { mode?: EmbedMode } = {},
+  ): Promise<EmbeddingResult | null> {
     // Bound the fetch so a hung embedding endpoint cannot stall callers.
     // The lookup path uses a short budget (see DEFAULT_EMBEDDING_LOOKUP_TIMEOUT_MS
     // docblock) so semantic dedup fails open fast. The index path uses a
@@ -385,6 +529,21 @@ export class EmbeddingFallback {
       mode === "index"
         ? resolveEmbeddingIndexTimeoutMs()
         : resolveEmbeddingLookupTimeoutMs();
+    if (provider.type === "host") {
+      const vector = await this.embedWithHostProvider(input, provider, mode, timeoutMs);
+      if (vector) return { provider, vector };
+      const fallbackProvider = await this.resolveProvider({ includeHost: false });
+      if (!fallbackProvider) {
+        if (mode === "lookup") {
+          throw new EmbeddingProviderUnavailableError(
+            `host embedding provider unavailable (${provider.hostProvider?.id ?? provider.model})`,
+          );
+        }
+        return null;
+      }
+      return this.embedWithEffectiveProvider(input, fallbackProvider, options);
+    }
+    if (!provider.endpoint || !provider.headers) return null;
     try {
       const res = await fetch(provider.endpoint, {
         method: "POST",
@@ -417,12 +576,15 @@ export class EmbeddingFallback {
       const payload = (await res.json()) as any;
       const vector = payload?.data?.[0]?.embedding;
       if (!Array.isArray(vector)) return null;
-      return vector.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n));
+      const normalized = vector
+        .map((n: unknown) => Number(n))
+        .filter((n: number) => Number.isFinite(n));
+      return normalized.length > 0 ? { provider, vector: normalized } : null;
     } catch (err) {
       // Round 11 (Finding Ur_J): the !res.ok branch above throws
       // EmbeddingTimeoutError directly. Re-throw it here so the catch does
       // not swallow our own intentional signal back into a null return.
-      if (err instanceof EmbeddingTimeoutError) {
+      if (isLookupBackendUnavailableError(err)) {
         throw err;
       }
       // AbortSignal.timeout throws a DOMException with name "TimeoutError";
@@ -479,6 +641,26 @@ export class EmbeddingFallback {
     }
   }
 
+  private async embedWithHostProvider(
+    input: string,
+    provider: ProviderConfig,
+    mode: EmbedMode,
+    timeoutMs: number,
+  ): Promise<number[] | null> {
+    const hostProvider = provider.hostProvider;
+    if (!hostProvider) return null;
+    try {
+      const vector = await hostProvider.embed(input.slice(0, 8000), {
+        signal: AbortSignal.timeout(timeoutMs),
+        inputType: mode === "lookup" ? "query" : "document",
+      });
+      return normalizeHostEmbeddingVector(vector);
+    } catch (err) {
+      log.debug(`host embedding provider error: ${hostProvider.id}: ${err}`);
+      return null;
+    }
+  }
+
   private async loadIndex(provider: ProviderConfig): Promise<EmbeddingIndexFile> {
     if (this.loaded && this.loaded.provider === provider.type && this.loaded.model === provider.model) {
       return this.loaded;
@@ -514,6 +696,31 @@ export class EmbeddingFallback {
       entries: {},
     };
     return this.loaded;
+  }
+
+  private async readIndexIdentityFromDisk(): Promise<EmbeddingIndexIdentity | null> {
+    try {
+      const raw = await readFile(this.indexPath, "utf-8");
+      const parsed = JSON.parse(raw) as Partial<EmbeddingIndexFile> | null;
+      if (
+        parsed &&
+        parsed.version === 1 &&
+        (parsed.provider === "openai" ||
+          parsed.provider === "local" ||
+          parsed.provider === "host") &&
+        typeof parsed.model === "string" &&
+        parsed.model.length > 0
+      ) {
+        return {
+          provider: parsed.provider,
+          model: parsed.model,
+        };
+      }
+    } catch {
+      // Missing or invalid indexes are treated as absent; loadIndex() owns
+      // creating a fresh file when it is safe to write.
+    }
+    return null;
   }
 
   private async saveIndex(index: EmbeddingIndexFile): Promise<void> {
@@ -576,6 +783,31 @@ function normalizePathPrefix(prefix: string | undefined): string | undefined {
   if (p.length === 0) return undefined;
   if (!p.endsWith("/")) p = `${p}/`;
   return p;
+}
+
+function sameIndexIdentity(
+  left: EmbeddingIndexComparable,
+  right: EmbeddingIndexComparable,
+): boolean {
+  return indexIdentityProvider(left) === indexIdentityProvider(right) && left.model === right.model;
+}
+
+function indexIdentityProvider(identity: EmbeddingIndexComparable): EmbeddingProviderType {
+  return "provider" in identity ? identity.provider : identity.type;
+}
+
+function canReplaceIndexIdentity(
+  existing: EmbeddingIndexIdentity,
+  replacement: Pick<ProviderConfig, "type" | "model">,
+): boolean {
+  return existing.provider === "host" && !sameIndexIdentity(existing, replacement);
+}
+
+function providerFromIndexIdentity(identity: EmbeddingIndexIdentity): ProviderConfig {
+  return {
+    type: identity.provider,
+    model: identity.model,
+  };
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
