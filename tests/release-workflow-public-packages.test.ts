@@ -21,6 +21,7 @@ const expectedPublishDirs = [
   "packages/connector-weclone",
   "packages/connector-replit",
   "packages/hermes-provider",
+  "packages/belief-ledger",
   "packages/remnic-server",
   "packages/plugin-pi",
   "packages/remnic-cli",
@@ -29,7 +30,6 @@ const expectedPublishDirs = [
   "packages/plugin-codex",
   "packages/shim-openclaw-engram",
 ] as const;
-
 test("release workflow publish order matches the supported npm install surfaces", async () => {
   const workflow = await readFile(".github/workflows/release-and-publish.yml", "utf8");
   const order = spawnSync(process.execPath, ["scripts/publish-order.mjs", "--json"], {

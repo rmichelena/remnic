@@ -12,6 +12,8 @@ const RECENT_TRANSCRIPT_LOOKBACK_HOURS = 24;
 const INSTRUCTION_LIKE_RE = /\b(always|never|must|should|remember to|do not|don't|process|workflow|template|checklist|instruction)\b/i;
 const METADATA_WRAPPER_RE = /^(source|context|metadata|notes?):/i;
 const ENTITY_PRONOUN_RE = /\b(he|him|his|she|her|they|them|their|it|its)\b/i;
+const BELIEF_LEDGER_SECTION_KEY = "belief_ledger";
+const BELIEF_LEDGER_FACT_RE = /^claim=([^;]+);\s*status=([^;]+);\s*updatedAt=([^;]+);\s*(.+)$/;
 
 type EntityQueryMode = "direct" | "timeline" | "follow_up";
 
@@ -106,6 +108,59 @@ function dedupeHintSnippetsByText(snippets: EntityHintSnippet[]): EntityHintSnip
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(snippet);
+  }
+  return result;
+}
+
+function isBeliefLedgerSection(section: Pick<EntityStructuredSection, "key">): boolean {
+  return normalizeEntityText(section.key).replace(/\s+/g, "_") === BELIEF_LEDGER_SECTION_KEY;
+}
+
+function beliefLedgerFactKeys(sections: EntityStructuredSection[]): Set<string> {
+  const keys = new Set<string>();
+  for (const section of sections) {
+    if (!isBeliefLedgerSection(section)) continue;
+    for (const fact of section.facts) {
+      keys.add(normalizeEntityText(fact));
+    }
+  }
+  return keys;
+}
+
+function recallFactsForStructuredSection(section: EntityStructuredSection): string[] {
+  if (!isBeliefLedgerSection(section)) return section.facts;
+  return currentActiveBeliefLedgerFactTexts(section.facts);
+}
+
+function currentActiveBeliefLedgerFactTexts(facts: string[]): string[] {
+  const byClaim = new Map<string, { status: string; updatedAtMs: number; texts: string[] }>();
+  for (const fact of facts) {
+    const match = BELIEF_LEDGER_FACT_RE.exec(fact.trim());
+    if (!match) continue;
+    const [, claimId, status, updatedAt, text] = match;
+    const updatedAtMs = Date.parse(updatedAt);
+    if (!claimId?.trim() || !status?.trim() || !Number.isFinite(updatedAtMs) || !text?.trim()) continue;
+    const normalizedStatus = status.trim().toLowerCase();
+    const normalizedClaimId = claimId.trim();
+    const current = byClaim.get(normalizedClaimId);
+    const inactiveTieWins =
+      current &&
+      updatedAtMs === current.updatedAtMs &&
+      current.status === "active" &&
+      normalizedStatus !== "active";
+    if (!current || updatedAtMs > current.updatedAtMs || inactiveTieWins) {
+      byClaim.set(normalizedClaimId, { status: normalizedStatus, updatedAtMs, texts: [text.trim()] });
+      continue;
+    }
+    if (updatedAtMs === current.updatedAtMs && current.status === normalizedStatus) {
+      current.texts.push(text.trim());
+    }
+  }
+  const result: string[] = [];
+  for (const current of byClaim.values()) {
+    if (current.status === "active") {
+      result.push(...current.texts);
+    }
   }
   return result;
 }
@@ -408,7 +463,13 @@ async function buildEntityMentionIndex(
   const entities = new Map<string, EntityMentionIndexEntry>();
   for (const entity of entityFiles) {
     const canonicalId = normalizeEntityName(entity.name, entity.type);
-    const sanitizedFacts = entity.facts.map((fact) => sanitizeEntityFact(fact)).filter(Boolean).map((fact) => compactLine(fact, 180));
+    const rawStructuredSections = entity.structuredSections ?? [];
+    const rawBeliefLedgerFactKeys = beliefLedgerFactKeys(rawStructuredSections);
+    const sanitizedFacts = entity.facts
+      .map((fact) => sanitizeEntityFact(fact))
+      .filter(Boolean)
+      .filter((fact) => !rawBeliefLedgerFactKeys.has(normalizeEntityText(fact)))
+      .map((fact) => compactLine(fact, 180));
     const sanitizedTimelineFacts = entity.timeline
       .map((entry) => sanitizeEntityFact(entry.text))
       .filter(Boolean)
@@ -421,10 +482,10 @@ async function buildEntityMentionIndex(
       summary: entity.synthesis?.trim() || entity.summary?.trim() || undefined,
       facts: sanitizedFacts,
       timelineFacts: uniqueStrings(sanitizedTimelineFacts),
-      structuredSections: (entity.structuredSections ?? []).map((section) => ({
+      structuredSections: rawStructuredSections.map((section) => ({
         key: section.key,
         title: section.title,
-        facts: section.facts
+        facts: recallFactsForStructuredSection(section)
           .map((fact) => sanitizeEntityFact(fact))
           .filter(Boolean)
           .map((fact) => compactLine(fact, 180)),
