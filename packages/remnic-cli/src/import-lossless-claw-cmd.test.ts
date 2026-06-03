@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import { parseImportLosslessClawArgs } from "./import-lossless-claw-args.js";
+import {
+  cmdImportLosslessClaw,
+  type ImportLosslessClawModule,
+} from "./import-lossless-claw-cmd.js";
 
 describe("parseImportLosslessClawArgs", () => {
   it("accepts --src and a relative path", () => {
@@ -95,5 +102,70 @@ describe("parseImportLosslessClawArgs", () => {
         ]),
       /Unknown argument/,
     );
+  });
+});
+
+describe("cmdImportLosslessClaw", () => {
+  it("does not create destination state when opening the source database fails", async () => {
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "remnic-lossless-source-first-"),
+    );
+    try {
+      const sourcePath = path.join(tempDir, "corrupt-source.sqlite");
+      const memoryDir = path.join(tempDir, "memory");
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      let sourceClosed = false;
+      let destinationOpened = false;
+      fs.writeFileSync(sourcePath, "not a sqlite database");
+      const sourceDb = {
+        close: () => {
+          sourceClosed = true;
+        },
+      };
+      const destinationDb = {
+        close: () => undefined,
+      };
+      const fakeModule: ImportLosslessClawModule = {
+        openSourceDatabase: () => sourceDb as never,
+        assertLosslessClawSchema: () => {
+          throw new Error(
+            "Source database is missing lossless-claw tables: conversations.",
+          );
+        },
+        openInMemoryDestinationDatabase: () => {
+          destinationOpened = true;
+          return destinationDb as never;
+        },
+        openExistingLcmDatabaseReadOnly: () => {
+          destinationOpened = true;
+          return destinationDb as never;
+        },
+        importLosslessClaw: () => {
+          throw new Error("import should not run");
+        },
+      };
+
+      const exitCode = await cmdImportLosslessClaw(
+        ["--src", sourcePath, "--memory-dir", memoryDir],
+        {
+          resolveMemoryDir: () => memoryDir,
+          stdout: (line) => stdout.push(line),
+          stderr: (line) => stderr.push(line),
+        },
+        {
+          loadImportLosslessClawModule: async () => fakeModule,
+        },
+      );
+
+      assert.equal(exitCode, 1);
+      assert.deepEqual(stdout, []);
+      assert.match(stderr.join("\n"), /lossless-claw/i);
+      assert.equal(sourceClosed, true);
+      assert.equal(destinationOpened, false);
+      assert.equal(fs.existsSync(memoryDir), false);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

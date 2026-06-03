@@ -18,6 +18,7 @@ type BetterSqlite3DatabaseLike = ReturnType<typeof openLcmDatabase>;
 
 export interface ImportLosslessClawModule {
   openSourceDatabase(filePath: string): BetterSqlite3DatabaseLike;
+  assertLosslessClawSchema(db: BetterSqlite3DatabaseLike): void;
   openInMemoryDestinationDatabase(): BetterSqlite3DatabaseLike;
   openExistingLcmDatabaseReadOnly(filePath: string): BetterSqlite3DatabaseLike;
   importLosslessClaw(options: {
