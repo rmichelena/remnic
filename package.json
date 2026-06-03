@@ -393,6 +393,12 @@
     "./qmd.js": {
       "import": "./dist/qmd.js"
     },
+    "./qmd-recall-cache": {
+      "import": "./dist/qmd-recall-cache.js"
+    },
+    "./qmd-recall-cache.js": {
+      "import": "./dist/qmd-recall-cache.js"
+    },
     "./reconstruct": {
       "import": "./dist/reconstruct.js"
     },
