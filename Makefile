@@ -22,10 +22,10 @@ lint:
 	pnpm check-types
 
 preflight:
-	pnpm preflight
+	pnpm run preflight
 
 preflight-quick:
-	pnpm preflight:quick
+	pnpm run preflight:quick
 
 clean:
 	node scripts/clean-dist.mjs
