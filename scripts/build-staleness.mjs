@@ -43,7 +43,10 @@ function newestMtime(paths) {
     if (!fs.existsSync(entryPath)) {
       return;
     }
-    const stat = fs.statSync(entryPath);
+    const stat = fs.lstatSync(entryPath);
+    if (stat.isSymbolicLink()) {
+      return;
+    }
     if (stat.isDirectory()) {
       for (const child of fs.readdirSync(entryPath)) {
         visit(path.join(entryPath, child));
