@@ -1,4 +1,4 @@
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -131,6 +131,15 @@ async function main() {
     }
     assertIncludes(invalidFlagResult.stderr, "--memory-dir requires a path value");
     await assertPathMissing(invalidFlagPath);
+
+    const homeSentinel = path.join(tempHome, "sentinel");
+    await writeFile(homeSentinel, "keep\n", "utf8");
+    const unsafeResetResult = runDemoArgs(["--memory-dir", "~", "--reset"], { HOME: tempHome });
+    if (unsafeResetResult.status === 0) {
+      throw new Error(`unsafe home reset succeeded\nstdout:\n${unsafeResetResult.stdout}`);
+    }
+    assertIncludes(unsafeResetResult.stderr, "refusing to reset protected memory directory");
+    await access(homeSentinel);
 
     console.log("PASS coding-agent-memory-demo smoke test");
   } finally {

@@ -1,9 +1,12 @@
-import { rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EngramAccessService, Orchestrator, expandTildePath, parseConfig } from "@remnic/core";
 
 const DEFAULT_MEMORY_DIR = "examples/coding-agent-memory-demo/.demo-memory";
+const DEMO_MARKER_FILE = ".remnic-coding-agent-memory-demo";
+const DEMO_MARKER_CONTENT = "Remnic coding-agent memory demo directory\n";
 const CHECKOUT_NAMESPACE = "project-checkout-service";
 const MARKETING_NAMESPACE = "project-marketing-site";
 const WRITE_PRINCIPAL = "codex-cli";
@@ -84,6 +87,7 @@ function parseArgs(argv: string[]) {
     displayMemoryDir: memoryDir,
     memoryDir: path.resolve(process.cwd(), expandTildePath(memoryDir)),
     reset: reset ?? usesDefaultMemoryDir,
+    usesDefaultMemoryDir,
   };
 }
 
@@ -150,6 +154,72 @@ async function removeDirWithRetry(dir: string): Promise<void> {
   }
 }
 
+async function statPath(filePath: string) {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isProtectedResetTarget(memoryDir: string): boolean {
+  const resolved = path.resolve(memoryDir);
+  const protectedTargets = [path.parse(resolved).root, path.resolve(process.cwd()), path.resolve(os.homedir())];
+  return protectedTargets.some((protectedTarget) => resolved === protectedTarget);
+}
+
+async function hasDemoMarkerOrIsEmpty(memoryDir: string): Promise<boolean> {
+  const entries = await readdir(memoryDir);
+  return entries.length === 0 || entries.includes(DEMO_MARKER_FILE);
+}
+
+async function assertSafeResetTarget(options: ReturnType<typeof parseArgs>): Promise<void> {
+  if (isProtectedResetTarget(options.memoryDir)) {
+    throw new DemoError("refusing to reset protected memory directory");
+  }
+
+  const existing = await statPath(options.memoryDir);
+  if (!existing) {
+    return;
+  }
+  if (existing.isSymbolicLink()) {
+    throw new DemoError("refusing to reset symlinked memory directory");
+  }
+  if (!existing.isDirectory()) {
+    throw new DemoError("--memory-dir reset target must be a directory");
+  }
+  if (options.usesDefaultMemoryDir || (await hasDemoMarkerOrIsEmpty(options.memoryDir))) {
+    return;
+  }
+
+  throw new DemoError("refusing to reset custom memory directory without demo marker");
+}
+
+async function shouldWriteDemoMarker(options: ReturnType<typeof parseArgs>): Promise<boolean> {
+  if (options.usesDefaultMemoryDir) {
+    return true;
+  }
+  const existing = await statPath(options.memoryDir);
+  if (!existing) {
+    return true;
+  }
+  if (existing.isSymbolicLink() || !existing.isDirectory()) {
+    return false;
+  }
+  return hasDemoMarkerOrIsEmpty(options.memoryDir);
+}
+
+async function writeDemoMarker(options: ReturnType<typeof parseArgs>): Promise<void> {
+  if (!(await shouldWriteDemoMarker(options))) {
+    return;
+  }
+  await mkdir(options.memoryDir, { recursive: true });
+  await writeFile(path.join(options.memoryDir, DEMO_MARKER_FILE), DEMO_MARKER_CONTENT, "utf8");
+}
+
 function resultForMemoryId<T extends { memoryId?: string; id?: string }>(
   entries: T[] | undefined,
   memoryId: string,
@@ -176,8 +246,10 @@ function assertDemoInvariant(condition: unknown, message: string): asserts condi
 async function runDemo() {
   const options = parseArgs(process.argv.slice(2));
   if (options.reset) {
+    await assertSafeResetTarget(options);
     await removeDirWithRetry(options.memoryDir);
   }
+  await writeDemoMarker(options);
 
   const orchestrator = new Orchestrator(createConfig(options.memoryDir));
   try {

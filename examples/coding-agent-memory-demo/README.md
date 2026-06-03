@@ -69,7 +69,9 @@ The generated demo memory files live under
 that directory whenever you want a fresh run; the demo also resets only that
 built-in directory by default.
 
-Custom memory directories are preserved unless you explicitly pass `--reset`:
+Custom memory directories are preserved unless you explicitly pass `--reset`.
+For safety, reset only removes the built-in demo directory, an absent or empty
+custom directory, or a custom directory already marked by a previous demo run:
 
 ```bash
 pnpm run demo:coding-agent-memory -- --memory-dir /tmp/remnic-demo
