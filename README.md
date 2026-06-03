@@ -35,6 +35,8 @@ Remnic exposes memory and context through HTTP and MCP surfaces and includes int
 
 The long-term goal is to make memory inspectable, scoped, correctable, and measurable across agent workflows.
 
+Try the no-key [Coding Agent Memory Demo](examples/coding-agent-memory-demo/) for a five-minute walkthrough where real Remnic `memoryStore()` and `recallXray()` calls carry a scoped project decision/preference across two coding-agent session identities.
+
 ## Engram -> Remnic
  **Engram is now Remnic.** Canonical packages live under the `@remnic/*` scope:
  [`@remnic/core`](https://www.npmjs.com/package/@remnic/core),

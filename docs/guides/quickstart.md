@@ -45,6 +45,12 @@ remnic connectors install replit
 
 Each command generates a dedicated auth token and installs the native plugin for that platform.
 
+Want to see cross-tool memory before installing connectors? Run the no-key
+[Coding Agent Memory Demo](../../examples/coding-agent-memory-demo/) from a
+source checkout. It uses real Remnic storage and recall paths to carry scoped
+project context from one coding-agent session identity to another with
+retrieval reasons.
+
 ## Step 4: Verify
 
 ```bash
