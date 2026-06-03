@@ -41,6 +41,10 @@ set -euo pipefail
 
 TARGET_DIR="./bench-datasets"
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
@@ -71,9 +75,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${TARGET_DIR}" ]]; then
+  echo "error: --target requires a non-empty directory path" >&2
+  exit 2
+fi
+
 LONG_MEM_EVAL_DIR="${TARGET_DIR}/longmemeval"
 LOCOMO_DIR="${TARGET_DIR}/locomo"
 BEAM_DIR="${TARGET_DIR}/beam"
+
+LONG_MEM_EVAL_DIR_Q="$(shell_quote "${LONG_MEM_EVAL_DIR}")"
+LOCOMO_DIR_Q="$(shell_quote "${LOCOMO_DIR}")"
+BEAM_DIR_Q="$(shell_quote "${BEAM_DIR}")"
+BEAM_DATA_DIR_Q="$(shell_quote "${BEAM_DIR}/data")"
 
 cat <<EOF
 # Remnic published-benchmark datasets — download instructions
@@ -83,37 +97,37 @@ cat <<EOF
 # because it handles auth + resumable downloads; wget is shown as a fallback.
 
 # 1. Create the target directories
-mkdir -p "${LONG_MEM_EVAL_DIR}"
-mkdir -p "${LOCOMO_DIR}"
-mkdir -p "${BEAM_DIR}"
+mkdir -p -- ${LONG_MEM_EVAL_DIR_Q}
+mkdir -p -- ${LOCOMO_DIR_Q}
+mkdir -p -- ${BEAM_DIR_Q}
 
 # 2. LongMemEval-S  (https://huggingface.co/datasets/xiaowu0162/LongMemEval)
 #    Prefer the huggingface-cli path. Install via:  pipx install "huggingface_hub[cli]"
 huggingface-cli download xiaowu0162/LongMemEval \\
   --repo-type dataset \\
-  --local-dir "${LONG_MEM_EVAL_DIR}" \\
+  --local-dir ${LONG_MEM_EVAL_DIR_Q} \\
   --include "longmemeval_oracle.json" \\
            "longmemeval_s_cleaned.json" \\
            "longmemeval_s.json"
 
 # Fallback: direct file download (update commit hash if the upstream moves)
-# wget -P "${LONG_MEM_EVAL_DIR}" \\
+# wget -P ${LONG_MEM_EVAL_DIR_Q} \\
 #   "https://huggingface.co/datasets/xiaowu0162/LongMemEval/resolve/main/longmemeval_oracle.json"
 
 # 3. LoCoMo-10  (https://huggingface.co/datasets/snap-research/locomo10)
 huggingface-cli download snap-research/locomo10 \\
   --repo-type dataset \\
-  --local-dir "${LOCOMO_DIR}" \\
+  --local-dir ${LOCOMO_DIR_Q} \\
   --include "locomo10.json" "locomo.json"
 
 # Fallback direct download
-# wget -P "${LOCOMO_DIR}" \\
+# wget -P ${LOCOMO_DIR_Q} \\
 #   "https://huggingface.co/datasets/snap-research/locomo10/resolve/main/locomo10.json"
 
 # 4. BEAM 100K/500K/1M  (https://huggingface.co/datasets/Mohammadta/BEAM)
 huggingface-cli download Mohammadta/BEAM \\
   --repo-type dataset \\
-  --local-dir "${BEAM_DIR}" \\
+  --local-dir ${BEAM_DIR_Q} \\
   --include "data/100K-00000-of-00001.parquet" \\
             "data/500K-00000-of-00001.parquet" \\
             "data/1M-00000-of-00001.parquet"
@@ -121,14 +135,14 @@ huggingface-cli download Mohammadta/BEAM \\
 # BEAM 10M  (https://huggingface.co/datasets/Mohammadta/BEAM-10M)
 huggingface-cli download Mohammadta/BEAM-10M \\
   --repo-type dataset \\
-  --local-dir "${BEAM_DIR}" \\
+  --local-dir ${BEAM_DIR_Q} \\
   --include "data/10M-00000-of-00002.parquet" \\
             "data/10M-00001-of-00002.parquet"
 
 # 5. Smoke-check that the runner sees your files (quick-mode, no model calls):
-#    pnpm exec remnic bench run --quick longmemeval --dataset-dir "${LONG_MEM_EVAL_DIR}"
-#    pnpm exec remnic bench run --quick locomo      --dataset-dir "${LOCOMO_DIR}"
-#    pnpm exec remnic bench published --name beam --dataset "${BEAM_DIR}/data" --model gpt-5.5 --dry-run --limit 1
+#    pnpm exec remnic bench run --quick longmemeval --dataset-dir ${LONG_MEM_EVAL_DIR_Q}
+#    pnpm exec remnic bench run --quick locomo      --dataset-dir ${LOCOMO_DIR_Q}
+#    pnpm exec remnic bench published --name beam --dataset ${BEAM_DATA_DIR_Q} --model gpt-5.5 --dry-run --limit 1
 #
 # The 'bench published --dry-run' command validates dataset loading without model calls.
 
