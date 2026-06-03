@@ -1,6 +1,6 @@
 {
   "name": "@remnic/core",
-  "version": "9.3.567",
+  "version": "9.3.568",
   "description": "Framework-agnostic Remnic memory engine — orchestrator, storage, extraction, search, trust zones",
   "type": "module",
   "main": "dist/index.js",
