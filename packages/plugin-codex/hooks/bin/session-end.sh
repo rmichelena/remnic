@@ -53,55 +53,172 @@ TRANSCRIPT_PATH="$(node -e "const d=JSON.parse(process.argv[1]); process.stdout.
 
 echo '{"continue":true}'
 
-# Final observe flush if we have transcript
-if [ -n "$REMNIC_TOKEN" ] && [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-  LEGACY_CURSOR_FILE="/tmp/engram-cursor-${SESSION_ID}"
-  CURSOR_FILE="/tmp/remnic-cursor-${SESSION_ID}"
-  if [ ! -f "$CURSOR_FILE" ] && [ -f "$LEGACY_CURSOR_FILE" ]; then
-    CURSOR_FILE="$LEGACY_CURSOR_FILE"
+SESSION_ID_SAFE=0
+if [[ "$SESSION_ID" != "" && ! "$SESSION_ID" =~ [^A-Za-z0-9._-] ]]; then
+  SESSION_ID_SAFE=1
+  STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+  STATE_DIR="${STATE_HOME}/remnic/hooks"
+  CURSOR_FILE="${STATE_DIR}/remnic-cursor-${SESSION_ID}"
+  LOCK_DIR="${STATE_DIR}/remnic-lock-${SESSION_ID}.d"
+  LEGACY_CURSOR_FILE="${STATE_DIR}/engram-cursor-${SESSION_ID}"
+  LEGACY_LOCK_DIR="${STATE_DIR}/engram-lock-${SESSION_ID}.d"
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || SESSION_ID_SAFE=0
+  if [ "$SESSION_ID_SAFE" -eq 1 ]; then
+    if ! node - "$STATE_DIR" <<'NODE'
+const fs = require('fs');
+const stateDir = process.argv[2];
+try {
+  const info = fs.lstatSync(stateDir);
+  if (info.isSymbolicLink() || !info.isDirectory()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+  if ((info.mode & 0o077) !== 0) fs.chmodSync(stateDir, 0o700);
+} catch {
+  process.exit(1);
+}
+NODE
+    then
+      log "unsafe state directory $STATE_DIR"
+      SESSION_ID_SAFE=0
+    fi
   fi
+  if [ "$SESSION_ID_SAFE" -eq 1 ] && [ ! -f "$CURSOR_FILE" ] && { [ -f "$LEGACY_CURSOR_FILE" ] || [ -d "$LEGACY_LOCK_DIR" ]; }; then
+    CURSOR_FILE="$LEGACY_CURSOR_FILE"
+    LOCK_DIR="$LEGACY_LOCK_DIR"
+  fi
+fi
+
+validate_cursor_file() {
+  node - "$CURSOR_FILE" <<'NODE'
+const fs = require('fs');
+const cursorFile = process.argv[2];
+try {
+  const info = fs.lstatSync(cursorFile);
+  if (info.isSymbolicLink() || !info.isFile()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+} catch (error) {
+  if (error && error.code === 'ENOENT') process.exit(0);
+  process.exit(1);
+}
+NODE
+}
+
+read_cursor_file() {
+  validate_cursor_file || {
+    log "unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  [ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo 0
+}
+
+write_cursor_file() {
+  NEW_CURSOR_VALUE="$1"
+  validate_cursor_file || {
+    log "refusing unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  TEMP_CURSOR="$(mktemp "${CURSOR_FILE}.tmp.XXXXXX" 2>/dev/null)" || return 1
+  if ! printf '%s\n' "$NEW_CURSOR_VALUE" > "$TEMP_CURSOR"; then
+    rm -f "$TEMP_CURSOR"
+    return 1
+  fi
+  chmod 600 "$TEMP_CURSOR" 2>/dev/null || true
+  mv -f "$TEMP_CURSOR" "$CURSOR_FILE"
+}
+
+migrate_tmp_cursor_file() {
+  for TMP_CURSOR_FILE in "/tmp/remnic-cursor-${SESSION_ID}" "/tmp/engram-cursor-${SESSION_ID}"; do
+    [ ! -e "$TMP_CURSOR_FILE" ] && continue
+    TMP_CURSOR_VALUE="$(node - "$TMP_CURSOR_FILE" <<'NODE'
+const fs = require('fs');
+const cursorFile = process.argv[2];
+try {
+  const info = fs.lstatSync(cursorFile);
+  if (info.isSymbolicLink() || !info.isFile()) process.exit(1);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) process.exit(1);
+  const value = fs.readFileSync(cursorFile, 'utf8').trim();
+  if (!/^\d+$/.test(value)) process.exit(1);
+  process.stdout.write(value);
+} catch {
+  process.exit(1);
+}
+NODE
+    )" || continue
+    CURRENT_CURSOR_VALUE=""
+    if validate_cursor_file; then
+      CURRENT_CURSOR_VALUE="$([ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" 2>/dev/null || echo "")"
+    fi
+    case "$CURRENT_CURSOR_VALUE" in
+      ""|*[!0-9]*) CURRENT_CURSOR_VALUE="-1" ;;
+    esac
+    if [ "$TMP_CURSOR_VALUE" -gt "$CURRENT_CURSOR_VALUE" ]; then
+      write_cursor_file "$TMP_CURSOR_VALUE" || continue
+    fi
+    rm -f "$TMP_CURSOR_FILE" 2>/dev/null
+  done
+}
+
+remove_cursor_file() {
+  validate_cursor_file || {
+    log "refusing unsafe cursor file $CURSOR_FILE"
+    return 1
+  }
+  rm -f "$CURSOR_FILE"
+}
+
+# Final observe flush if we have transcript
+if [ -n "$REMNIC_TOKEN" ] && [ "$SESSION_ID_SAFE" -eq 1 ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
   LAST_COUNT=0
-  [ -f "$CURSOR_FILE" ] && LAST_COUNT="$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)"
+  migrate_tmp_cursor_file
+  if LAST_COUNT="$(read_cursor_file)"; then
+    PAYLOAD="$(node -e "
+      const fs = require('fs');
+      const lines = fs.readFileSync(process.argv[1], 'utf8').split('\n').filter(Boolean);
+      const messages = [];
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type !== 'user' && entry.type !== 'assistant') continue;
+          const msg = entry.message;
+          if (!msg || typeof msg !== 'object') continue;
+          const role = msg.role;
+          if (role !== 'user' && role !== 'assistant') continue;
+          let text = typeof msg.content === 'string' ? msg.content.trim() :
+            Array.isArray(msg.content) ? msg.content.filter(b => b.type === 'text' && b.text).map(b => b.text.trim()).join('\n').trim() : '';
+          if (text) messages.push({ role, content: text });
+        } catch {}
+      }
+      const newMessages = messages.slice(parseInt(process.argv[3], 10) || 0);
+      if (newMessages.length) {
+        process.stdout.write(JSON.stringify({ sessionKey: process.argv[2], messages: newMessages }));
+      }
+    " "$TRANSCRIPT_PATH" "$SESSION_ID" "$LAST_COUNT" 2>/dev/null)"
 
-  PAYLOAD="$(node -e "
-    const fs = require('fs');
-    const lines = fs.readFileSync(process.argv[1], 'utf8').split('\n').filter(Boolean);
-    const messages = [];
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry.type !== 'user' && entry.type !== 'assistant') continue;
-        const msg = entry.message;
-        if (!msg || typeof msg !== 'object') continue;
-        const role = msg.role;
-        if (role !== 'user' && role !== 'assistant') continue;
-        let text = typeof msg.content === 'string' ? msg.content.trim() :
-          Array.isArray(msg.content) ? msg.content.filter(b => b.type === 'text' && b.text).map(b => b.text.trim()).join('\n').trim() : '';
-        if (text) messages.push({ role, content: text });
-      } catch {}
-    }
-    const newMessages = messages.slice(parseInt(process.argv[3], 10) || 0);
-    if (newMessages.length) {
-      process.stdout.write(JSON.stringify({ sessionKey: process.argv[2], messages: newMessages }));
-    }
-  " "$TRANSCRIPT_PATH" "$SESSION_ID" "$LAST_COUNT" 2>/dev/null)"
-
-  if [ -n "$PAYLOAD" ]; then
-    log "final flush for $SESSION_ID"
-    curl -s --max-time 30 \
-      -X POST "$REMNIC_URL" \
-      -H "Authorization: Bearer ${REMNIC_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -H "X-Engram-Client-Id: codex" \
-      -d "$PAYLOAD" >/dev/null 2>&1 || log "final flush failed"
+    if [ -n "$PAYLOAD" ]; then
+      log "final flush for $SESSION_ID"
+      curl -s --max-time 30 \
+        -X POST "$REMNIC_URL" \
+        -H "Authorization: Bearer ${REMNIC_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "X-Engram-Client-Id: codex" \
+        -d "$PAYLOAD" >/dev/null 2>&1 || log "final flush failed"
+    fi
+  else
+    log "final flush skipped for $SESSION_ID due to unsafe cursor"
   fi
 fi
 
 # Cleanup
-rm -f "/tmp/remnic-cursor-${SESSION_ID}" 2>/dev/null
-rmdir "/tmp/remnic-lock-${SESSION_ID}.d" 2>/dev/null
-rm -f "/tmp/engram-cursor-${SESSION_ID}" 2>/dev/null
-rmdir "/tmp/engram-lock-${SESSION_ID}.d" 2>/dev/null
+if [ "$SESSION_ID_SAFE" -eq 1 ]; then
+  remove_cursor_file || true
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  if [ "$CURSOR_FILE" != "$LEGACY_CURSOR_FILE" ] && [ -e "$LEGACY_CURSOR_FILE" ] && [ ! -L "$LEGACY_CURSOR_FILE" ]; then
+    rm -f "$LEGACY_CURSOR_FILE" 2>/dev/null || true
+  fi
+  if [ "$LOCK_DIR" != "$LEGACY_LOCK_DIR" ]; then
+    rmdir "$LEGACY_LOCK_DIR" 2>/dev/null || true
+  fi
+fi
 
 # Codex-native memory materialization (#378). The script honors the
 # `codexMaterializeMemories` config flag and the `.remnic-managed` sentinel,
