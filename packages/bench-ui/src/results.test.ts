@@ -37,3 +37,30 @@ test("loadBenchResultSummaries reports malformed result files as skipped warning
     await rm(resultsDir, { recursive: true, force: true });
   }
 });
+
+test("loadBenchResultSummaries preserves non-standard result modes", async () => {
+  const resultsDir = await mkdtemp(path.join(os.tmpdir(), "remnic-bench-ui-results-"));
+  const resultPath = path.join(resultsDir, "eval.json");
+
+  try {
+    await writeFile(
+      resultPath,
+      JSON.stringify({
+        meta: {
+          id: "run-eval",
+          benchmark: "locomo",
+          timestamp: "2026-05-21T00:00:00.000Z",
+          mode: "eval",
+        },
+        results: { aggregates: {} },
+      }),
+      "utf8",
+    );
+
+    const payload = await loadBenchResultSummaries(resultsDir);
+
+    assert.equal(payload.summaries[0]?.mode, "eval");
+  } finally {
+    await rm(resultsDir, { recursive: true, force: true });
+  }
+});

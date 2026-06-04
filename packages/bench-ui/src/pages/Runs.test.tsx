@@ -1,9 +1,11 @@
 import * as React from "react";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 
 import type { BenchResultSummary, BenchResultSummaryPayload, RunFilters } from "../bench-data";
-import { reconcileRunFilters } from "./Runs";
+import { reconcileRunFilters, Runs } from "./Runs";
 
 function summary(overrides: Partial<BenchResultSummary>): BenchResultSummary {
   return {
@@ -76,4 +78,32 @@ test("reconcileRunFilters resets dynamic filter values missing after payload ref
       range: "30d",
     },
   );
+});
+
+test("Runs renders payload modes and reconcileRunFilters preserves them", () => {
+  const data = payload([
+    summary({ id: "quick-run", mode: "quick" }),
+    summary({ id: "eval-run", mode: "eval" }),
+  ]);
+
+  assert.equal(
+    reconcileRunFilters(data, {
+      benchmark: "all",
+      systemProvider: "all",
+      judgeProvider: "all",
+      mode: "eval",
+      range: "all",
+    }).mode,
+    "eval",
+  );
+
+  const markup = renderToStaticMarkup(
+    <MemoryRouter>
+      <Runs payload={data} />
+    </MemoryRouter>,
+  );
+
+  assert.match(markup, /<option[^>]*value="all"[^>]*>All modes<\/option>/);
+  assert.match(markup, /<option[^>]*value="eval"[^>]*>eval<\/option>/);
+  assert.match(markup, /<option[^>]*value="quick"[^>]*>quick<\/option>/);
 });

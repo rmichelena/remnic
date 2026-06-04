@@ -271,7 +271,7 @@ export function summarizeBenchmarkResult(
     benchmarkTier:
       typeof meta.benchmarkTier === "string" ? meta.benchmarkTier : "custom",
     timestamp: meta.timestamp,
-    mode: meta.mode === "full" ? "full" : "quick",
+    mode: typeof meta.mode === "string" ? meta.mode : "quick",
     totalLatencyMs: toFiniteNumber(cost.totalLatencyMs),
     meanQueryLatencyMs: toFiniteNumber(cost.meanQueryLatencyMs),
     taskCount: tasks.length,
