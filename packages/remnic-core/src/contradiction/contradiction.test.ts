@@ -545,12 +545,37 @@ test("listPairs filters by verdict", async () => {
 test("listPairs respects limit", async () => {
   const { dir, cleanup } = await makeTempDir();
   try {
-    for (let i = 0; i < 5; i++) {
-      writePair(dir, makePair({ memoryIds: [`a-${i}`, `b-${i}`] }));
-    }
+    const expectedFirst = writePair(dir, makePair({
+      memoryIds: ["a-first", "b-first"],
+      detectedAt: "2026-01-01T00:00:00.000Z",
+    }));
+    const expectedSecond = writePair(dir, makePair({
+      memoryIds: ["a-second", "b-second"],
+      detectedAt: "2026-01-02T00:00:00.000Z",
+    }));
+    const terminal = writePair(dir, makePair({
+      memoryIds: ["a-terminal", "b-terminal"],
+      detectedAt: "2025-01-01T00:00:00.000Z",
+    }));
+    resolvePair(dir, terminal.pairId, "keep-a");
+    writePair(dir, makePair({
+      memoryIds: ["a-independent", "b-independent"],
+      detectedAt: "2025-01-02T00:00:00.000Z",
+      verdict: "independent",
+    }));
+    writePair(dir, makePair({
+      memoryIds: ["a-third", "b-third"],
+      detectedAt: "2026-01-03T00:00:00.000Z",
+    }));
+
     const result = listPairs(dir, { filter: "all", limit: 2 });
     assert.equal(result.pairs.length, 2);
     assert.equal(result.total, 5, "total should reflect all matching pairs, not just returned");
+    assert.deepEqual(
+      result.pairs.map((pair) => pair.pairId),
+      [expectedFirst.pairId, expectedSecond.pairId],
+      "limit should apply after deterministic review ordering, not raw directory order",
+    );
   } finally {
     await cleanup();
   }

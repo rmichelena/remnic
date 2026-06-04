@@ -135,6 +135,30 @@ function isDeferralActive(pair: ContradictionPair): boolean {
   return deferredUntil !== null && Date.now() < deferredUntil;
 }
 
+function isReviewActionable(pair: ContradictionPair): boolean {
+  return !isTerminalResolution(pair.resolution)
+    && !isDeferralActive(pair)
+    && pair.resolution !== "both-valid"
+    && pair.verdict !== "independent";
+}
+
+function compareReviewPairs(a: ContradictionPair, b: ContradictionPair): number {
+  const aActionable = isReviewActionable(a);
+  const bActionable = isReviewActionable(b);
+  if (aActionable !== bActionable) return aActionable ? -1 : 1;
+
+  const aDetectedAt = parseIsoMillis(a.detectedAt) ?? Number.POSITIVE_INFINITY;
+  const bDetectedAt = parseIsoMillis(b.detectedAt) ?? Number.POSITIVE_INFINITY;
+  if (aDetectedAt !== bDetectedAt) return aDetectedAt < bDetectedAt ? -1 : 1;
+
+  const aPairId = typeof a.pairId === "string" ? a.pairId : "";
+  const bPairId = typeof b.pairId === "string" ? b.pairId : "";
+  const pairIdOrder = aPairId.localeCompare(bPairId);
+  if (pairIdOrder !== 0) return pairIdOrder;
+
+  return a.memoryIds.join("\0").localeCompare(b.memoryIds.join("\0"));
+}
+
 function reviewStateMillis(pair: ContradictionPair): number {
   return Math.max(
     parseIsoMillis(pair.deferredUntil) ?? Number.NEGATIVE_INFINITY,
@@ -390,7 +414,7 @@ export function listPairs(
   const startTime = Date.now();
   const dir = reviewDir(memoryDir);
   const { filter = "all", namespace, includeUnscopedForNamespace = false, limit = 50 } = options ?? {};
-  const pairs: ContradictionPair[] = [];
+  const matchingPairs: ContradictionPair[] = [];
   let total = 0;
 
   if (!fs.existsSync(dir)) {
@@ -423,10 +447,17 @@ export function listPairs(
       }
 
       total++;
-      if (pairs.length < limit) pairs.push(pair);
+      matchingPairs.push(pair);
     } catch {
       continue;
     }
+  }
+
+  matchingPairs.sort(compareReviewPairs);
+  const pairs: ContradictionPair[] = [];
+  for (const pair of matchingPairs) {
+    if (!(pairs.length < limit)) break;
+    pairs.push(pair);
   }
 
   return { pairs, total, durationMs: Date.now() - startTime };
