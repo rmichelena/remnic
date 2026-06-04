@@ -134,6 +134,38 @@ test("semantic dedup: ignores non-finite scores", async () => {
   }
 });
 
+test("semantic dedup: ignores malformed hits without a usable memory id", async () => {
+  const decision = await decideSemanticDedup(
+    "content",
+    makeLookup([
+      { id: "", score: 0.99 },
+      { id: "   ", score: 0.98 },
+      { id: 42, score: 0.97 } as unknown as SemanticDedupHit,
+      { id: "valid-hit", score: 0.93 },
+    ]),
+    DEFAULT_OPTS,
+  );
+
+  assert.equal(decision.action, "skip");
+  if (decision.action === "skip") {
+    assert.equal(decision.reason, "near_duplicate");
+    assert.equal(decision.topId, "valid-hit");
+    assert.equal(decision.topScore, 0.93);
+  }
+
+  const allMalformed = await decideSemanticDedup(
+    "content",
+    makeLookup([
+      { id: "", score: 0.99 },
+      { id: 42, score: 0.98 } as unknown as SemanticDedupHit,
+    ]),
+    DEFAULT_OPTS,
+  );
+
+  assert.equal(allMalformed.action, "keep");
+  assert.equal(allMalformed.reason, "no_near_duplicate");
+});
+
 test("semantic dedup: treats lookup throw as fail-open keep", async () => {
   const decision = await decideSemanticDedup(
     "content",
@@ -553,6 +585,7 @@ test("embedding fallback ignores persisted indexes from a different provider or 
       localLlmUrl: "http://127.0.0.1:1234",
       localLlmModel: "local-embed",
       embeddingFallbackModel: "local-embed",
+      openaiApiKey: false,
     });
     const fallback = new EmbeddingFallback(config);
 
