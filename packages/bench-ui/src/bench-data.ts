@@ -79,7 +79,7 @@ export interface BenchResultSummary {
   benchmark: string;
   benchmarkTier: string;
   timestamp: string;
-  mode: "quick" | "full";
+  mode: string;
   totalLatencyMs: number | null;
   meanQueryLatencyMs: number | null;
   taskCount: number;

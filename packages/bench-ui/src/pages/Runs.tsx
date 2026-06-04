@@ -3,8 +3,13 @@ import { useEffect, useState } from "react";
 import type { BenchResultSummaryPayload, RunFilters, TrendRange } from "../bench-data";
 import { filterRuns, listBenchmarks, listProviders } from "../bench-data";
 import { RunTable } from "../components/RunTable";
+import { compareStrings } from "../sort-utils";
 
 const ranges: TrendRange[] = ["7d", "30d", "90d", "all"];
+
+function listModes(payload: BenchResultSummaryPayload): string[] {
+  return Array.from(new Set(payload.summaries.map((summary) => summary.mode))).sort(compareStrings);
+}
 
 export function reconcileRunFilters(
   payload: BenchResultSummaryPayload,
@@ -61,6 +66,7 @@ export function Runs({ payload }: { payload: BenchResultSummaryPayload }) {
   const benchmarks = listBenchmarks(payload);
   const systemProviders = listProviders(payload, "systemProvider");
   const judgeProviders = listProviders(payload, "judgeProvider");
+  const modes = listModes(payload);
   const filtered = filterRuns(payload, reconciledFilters);
 
   return (
@@ -127,8 +133,11 @@ export function Runs({ payload }: { payload: BenchResultSummaryPayload }) {
             onChange={(event) => setFilters((current) => ({ ...current, mode: event.target.value }))}
           >
             <option value="all">All modes</option>
-            <option value="quick">quick</option>
-            <option value="full">full</option>
+            {modes.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
           </select>
         </label>
         <label>
