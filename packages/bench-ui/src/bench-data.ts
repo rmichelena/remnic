@@ -186,6 +186,23 @@ export interface ProviderRow {
   benchmarkScores: Record<string, number | null>;
 }
 
+function comparablePrimaryScoreDelta(
+  latest: BenchResultSummary,
+  previous: BenchResultSummary | null,
+): number | null {
+  if (
+    latest.primaryMetric === null ||
+    latest.primaryScore === null ||
+    previous === null ||
+    previous.primaryMetric !== latest.primaryMetric ||
+    previous.primaryScore === null
+  ) {
+    return null;
+  }
+
+  return latest.primaryScore - previous.primaryScore;
+}
+
 function withinRange(timestamp: string, range: TrendRange, anchor: number): boolean {
   const value = Date.parse(timestamp);
   if (Number.isNaN(value) || value > anchor) {
@@ -326,12 +343,7 @@ export function getBenchmarkCards(payload: BenchResultSummaryPayload): Benchmark
       benchmark,
       latest,
       previous,
-      delta:
-        latest.primaryScore !== null &&
-        previous !== null &&
-        previous.primaryScore !== null
-          ? latest.primaryScore - previous.primaryScore
-          : null,
+      delta: comparablePrimaryScoreDelta(latest, previous),
     });
   }
 
@@ -350,12 +362,7 @@ export function getRecentRuns(payload: BenchResultSummaryPayload, limit = 6): Re
     for (let index = 0; index < runs.length; index += 1) {
       const run = runs[index]!;
       const previous = runs[index + 1] ?? null;
-      deltaByRunId.set(
-        run.id,
-        run.primaryScore !== null && previous !== null && previous.primaryScore !== null
-          ? run.primaryScore - previous.primaryScore
-          : null,
-      );
+      deltaByRunId.set(run.id, comparablePrimaryScoreDelta(run, previous));
     }
   }
 

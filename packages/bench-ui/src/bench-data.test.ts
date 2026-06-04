@@ -5,6 +5,7 @@ import {
   buildCompareModel,
   buildProviderRows,
   deltaPolarityClass,
+  getBenchmarkCards,
   getRecentRuns,
   pickDefaultCompareIds,
   type BenchResultSummary,
@@ -135,6 +136,30 @@ test("getRecentRuns returns globally newest runs instead of one latest run per b
   assert.equal(recent[0]?.delta, 1);
   assert.equal(recent[1]?.delta, 1);
   assert.equal(recent[2]?.delta, null);
+});
+
+test("benchmark cards and recent runs do not compute deltas across primary metrics", () => {
+  const runs = [
+    summary({
+      id: "latest",
+      timestamp: "2026-05-21T10:00:00.000Z",
+      primaryMetric: "accuracy",
+      primaryScore: 0.8,
+    }),
+    summary({
+      id: "previous",
+      timestamp: "2026-05-21T09:00:00.000Z",
+      primaryMetric: "commands_count",
+      primaryScore: 2,
+    }),
+  ];
+  const payload = { resultsDir: "/tmp/results", summaries: runs };
+
+  const cards = getBenchmarkCards(payload);
+  const recent = getRecentRuns(payload);
+
+  assert.equal(cards[0]?.delta, null);
+  assert.equal(recent[0]?.delta, null);
 });
 
 test("pickDefaultCompareIds chooses newest comparable benchmark pair", () => {
