@@ -27,6 +27,64 @@ const emptyPayload: BenchResultSummaryPayload = {
   skippedFiles: [],
 };
 
+type ViteImportMeta = ImportMeta & {
+  env?: {
+    BASE_URL?: string;
+    DEV?: boolean;
+  };
+};
+
+export function resolveBenchResultsUrl(
+  baseUrl = (import.meta as ViteImportMeta).env?.BASE_URL ?? "/",
+  isDev = (import.meta as ViteImportMeta).env?.DEV === true
+): string {
+  return resolveBenchResultsUrls(baseUrl, isDev)[0] ?? "/api/results";
+}
+
+export function resolveBenchResultsUrls(
+  baseUrl = (import.meta as ViteImportMeta).env?.BASE_URL ?? "/",
+  isDev = (import.meta as ViteImportMeta).env?.DEV === true
+): string[] {
+  if (isDev) {
+    return ["/api/results"];
+  }
+
+  const normalizedBaseUrl = baseUrl.trim() || "/";
+  if (normalizedBaseUrl === "." || normalizedBaseUrl === "./") {
+    return ["api/results"];
+  }
+
+  const baseResultsUrl = `${normalizedBaseUrl.endsWith("/") ? normalizedBaseUrl : `${normalizedBaseUrl}/`}api/results`;
+  return baseResultsUrl === "/api/results" ? [baseResultsUrl] : [baseResultsUrl, "/api/results"];
+}
+
+export async function fetchBenchResultsPayload(urls = resolveBenchResultsUrls()): Promise<BenchResultSummaryPayload> {
+  let lastError: unknown;
+
+  for (const url of urls) {
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (cause) {
+      lastError = cause;
+      continue;
+    }
+
+    if (!response.ok) {
+      lastError = new Error(`Failed to load bench results: ${response.status}`);
+      continue;
+    }
+
+    try {
+      return (await response.json()) as BenchResultSummaryPayload;
+    } catch (cause) {
+      lastError = cause;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 function AppShell({
   children,
   payload,
@@ -46,10 +104,7 @@ function AppShell({
         <div className="brand-lockup">
           <span className="brand-kicker">@remnic/bench-ui</span>
           <h1>Bench dashboard</h1>
-          <p>
-            Local benchmark views for overview, run history, comparison, benchmark
-            diagnosis, and provider drift.
-          </p>
+          <p>Local benchmark views for overview, run history, comparison, benchmark diagnosis, and provider drift.</p>
         </div>
 
         <div className="sidebar-summary">
@@ -69,9 +124,7 @@ function AppShell({
               key={item.path}
               to={item.path}
               end={item.path === "/"}
-              className={({ isActive }) =>
-                `nav-item${isActive ? " nav-item--active" : ""}`
-              }
+              className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`}
             >
               {item.label}
             </NavLink>
@@ -96,8 +149,8 @@ function AppShell({
               <p className="warning-copy">
                 {payload.skippedFiles!.length} result file
                 {payload.skippedFiles!.length === 1 ? "" : "s"} skipped:{" "}
-                {payload.skippedFiles!
-                  .slice(0, 3)
+                {payload
+                  .skippedFiles!.slice(0, 3)
                   .map((entry) => entry.filePath.split(/[\\/]/u).pop() || entry.filePath)
                   .join(", ")}
               </p>
@@ -138,12 +191,7 @@ export function App() {
     setError(null);
 
     try {
-      const response = await fetch("/api/results");
-      if (!response.ok) {
-        throw new Error(`Failed to load bench results: ${response.status}`);
-      }
-
-      const next = (await response.json()) as BenchResultSummaryPayload;
+      const next = await fetchBenchResultsPayload();
       if (requestId !== requestIdRef.current) return;
       setPayload(next);
     } catch (cause) {
@@ -179,10 +227,7 @@ export function App() {
           <Route path="/ingestion" element={<Ingestion payload={payload} />} />
           <Route path="/runs" element={<Runs payload={payload} />} />
           <Route path="/compare" element={<Compare payload={payload} />} />
-          <Route
-            path="/benchmark/:benchmarkId"
-            element={<BenchmarkDetail payload={payload} />}
-          />
+          <Route path="/benchmark/:benchmarkId" element={<BenchmarkDetail payload={payload} />} />
           <Route path="/providers" element={<Providers payload={payload} />} />
           <Route
             path="/benchmark"
