@@ -365,6 +365,196 @@ test("query-aware max candidate limit treats 0 as uncapped for advisory seed res
   assert.equal(results.length, 2);
 });
 
+test("explicit tag misses preserve an empty prefilter through QMD retrieval", async () => {
+  const orchestrator = await makeOrchestrator("engram-query-aware-tag-miss-");
+  const storage = (orchestrator as any).storage;
+
+  const unrelatedId = await storage.writeMemory(
+    "fact",
+    "The marketing team updated homepage messaging for the spring launch.",
+    { tags: ["marketing/content"], confidence: 0.9 },
+  );
+  const alphaId = await storage.writeMemory(
+    "fact",
+    "Alpha-tagged infrastructure note that should not match beta.",
+    { tags: ["alpha"], confidence: 0.9 },
+  );
+
+  const memories = await storage.readAllMemories();
+  indexMemoriesBatch(
+    orchestrator.config.memoryDir,
+    memories.map((memory: any) => ({
+      path: memory.path,
+      createdAt: memory.frontmatter.created,
+      tags: memory.frontmatter.tags ?? [],
+    })),
+  );
+
+  const byId = new Map<string, any>(memories.map((memory: any) => [memory.frontmatter.id, memory]));
+  let backendCalls = 0;
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    debugStatus: () => "available",
+    search: async () => {
+      backendCalls += 1;
+      return [
+        {
+          docid: unrelatedId,
+          path: byId.get(unrelatedId)?.path,
+          score: 0.99,
+          snippet: "unrelated result",
+        },
+      ];
+    },
+    hybridSearch: async () => {
+      backendCalls += 1;
+      return [
+        {
+          docid: alphaId,
+          path: byId.get(alphaId)?.path,
+          score: 0.9,
+          snippet: "alpha result",
+        },
+      ];
+    },
+  };
+
+  const prefilter = await (orchestrator as any).buildQueryAwarePrefilter(
+    "What happened with #beta?",
+    ["default"],
+  );
+  assert.equal(prefilter.candidatePaths?.size, 0);
+  assert.equal(prefilter.combination, "tag");
+
+  const results = await (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp(
+    "What happened with #beta?",
+    5,
+    5,
+    {
+      namespacesEnabled: false,
+      recallNamespaces: ["default"],
+      resolveNamespace: () => "default",
+      queryAwarePrefilter: prefilter,
+    },
+  );
+
+  assert.equal(backendCalls, 0);
+  assert.deepEqual(results, []);
+});
+
+test("explicit tag misses dominate temporal matches and skip non-QMD fallbacks", async () => {
+  const orchestrator = await makeOrchestrator("engram-query-aware-tag-temporal-miss-", {
+    qmdEnabled: false,
+    embeddingFallbackEnabled: true,
+  });
+  const storage = (orchestrator as any).storage;
+
+  const alphaId = await storage.writeMemory(
+    "fact",
+    "Alpha-tagged incident note from today that should not match beta.",
+    { tags: ["alpha"], confidence: 0.9 },
+  );
+
+  const memories = await storage.readAllMemories();
+  indexMemoriesBatch(
+    orchestrator.config.memoryDir,
+    memories.map((memory: any) => ({
+      path: memory.path,
+      createdAt: memory.frontmatter.created,
+      tags: memory.frontmatter.tags ?? [],
+    })),
+  );
+
+  const byId = new Map<string, any>(memories.map((memory: any) => [memory.frontmatter.id, memory]));
+  let embeddingCalls = 0;
+  (orchestrator as any).embeddingFallback = {
+    isAvailable: async () => true,
+    search: async () => {
+      embeddingCalls += 1;
+      return [
+        {
+          id: alphaId,
+          path: byId.get(alphaId)?.path,
+          score: 0.99,
+        },
+      ];
+    },
+  };
+
+  const prefilter = await (orchestrator as any).buildQueryAwarePrefilter(
+    "What happened today with #beta?",
+    ["default"],
+  );
+  assert.equal(prefilter.candidatePaths?.size, 0);
+  assert.equal(prefilter.combination, "tag");
+
+  const context = await (orchestrator as any).recallInternal(
+    "What happened today with #beta?",
+    "user:test:query-aware-tag-temporal-miss",
+  );
+
+  assert.equal(embeddingCalls, 0);
+  assert.doesNotMatch(context, /Alpha-tagged incident note/i);
+});
+
+test("explicit tag misses suppress fresh QMD cache hits", async () => {
+  const orchestrator = await makeOrchestrator("engram-query-aware-tag-cache-miss-");
+  const storage = (orchestrator as any).storage;
+
+  const alphaId = await storage.writeMemory(
+    "fact",
+    "Alpha-tagged cached QMD result that should not match beta.",
+    { tags: ["alpha"], confidence: 0.9 },
+  );
+  const memories = await storage.readAllMemories();
+  const byId = new Map<string, any>(memories.map((memory: any) => [memory.frontmatter.id, memory]));
+
+  let qmdCalls = 0;
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    debugStatus: () => "available",
+    search: async () => {
+      qmdCalls += 1;
+      return [
+        {
+          docid: alphaId,
+          path: byId.get(alphaId)?.path,
+          score: 0.99,
+          snippet: "alpha result",
+        },
+      ];
+    },
+    hybridSearch: async () => {
+      qmdCalls += 1;
+      return [];
+    },
+  };
+
+  const cachedContext = await (orchestrator as any).recallInternal(
+    "What happened with #beta?",
+    "user:test:query-aware-tag-cache-miss",
+  );
+  assert.match(cachedContext, /alpha result/i);
+  assert.equal(qmdCalls, 2);
+
+  indexMemoriesBatch(
+    orchestrator.config.memoryDir,
+    memories.map((memory: any) => ({
+      path: memory.path,
+      createdAt: memory.frontmatter.created,
+      tags: memory.frontmatter.tags ?? [],
+    })),
+  );
+
+  const context = await (orchestrator as any).recallInternal(
+    "What happened with #beta?",
+    "user:test:query-aware-tag-cache-miss",
+  );
+
+  assert.equal(qmdCalls, 2);
+  assert.doesNotMatch(context, /alpha result/i);
+});
+
 test("query-aware prefilter scopes candidate paths to authorized namespaces", async () => {
   const orchestrator = await makeOrchestrator("engram-query-aware-ns-", {
     namespacesEnabled: true,
