@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  FILTER_LABELS,
-  isDirectAnswerEligible,
   type DirectAnswerCandidate,
   type DirectAnswerConfig,
+  FILTER_LABELS,
+  isDirectAnswerEligible,
 } from "./direct-answer.js";
 import type { MemoryFile } from "./types.js";
 
@@ -17,15 +17,17 @@ const DEFAULT_CONFIG: DirectAnswerConfig = {
   eligibleTaxonomyBuckets: ["decisions", "principles", "conventions", "runbooks", "entities"],
 };
 
-function makeMemory(overrides: {
-  id?: string;
-  path?: string;
-  content?: string;
-  tags?: string[];
-  status?: MemoryFile["frontmatter"]["status"];
-  verificationState?: MemoryFile["frontmatter"]["verificationState"];
-  entityRef?: string;
-} = {}): MemoryFile {
+function makeMemory(
+  overrides: {
+    id?: string;
+    path?: string;
+    content?: string;
+    tags?: string[];
+    status?: MemoryFile["frontmatter"]["status"];
+    verificationState?: MemoryFile["frontmatter"]["verificationState"];
+    entityRef?: string;
+  } = {}
+): MemoryFile {
   const id = overrides.id ?? "mem-1";
   return {
     path: overrides.path ?? `/memory/${id}.md`,
@@ -46,14 +48,15 @@ function makeMemory(overrides: {
   };
 }
 
-function makeCandidate(overrides: Partial<DirectAnswerCandidate> & { memory?: MemoryFile } = {}): DirectAnswerCandidate {
+function makeCandidate(
+  overrides: Partial<DirectAnswerCandidate> & { memory?: MemoryFile } = {}
+): DirectAnswerCandidate {
   return {
     memory: overrides.memory ?? makeMemory(),
     // Use `in` so callers can pass an explicit `null` without it being
     // clobbered by the default.
-    trustZone: "trustZone" in overrides ? overrides.trustZone ?? null : "trusted",
-    taxonomyBucket:
-      "taxonomyBucket" in overrides ? overrides.taxonomyBucket ?? null : "decisions",
+    trustZone: "trustZone" in overrides ? (overrides.trustZone ?? null) : "trusted",
+    taxonomyBucket: "taxonomyBucket" in overrides ? (overrides.taxonomyBucket ?? null) : "decisions",
     importanceScore: overrides.importanceScore ?? 0.9,
     matchScore: overrides.matchScore,
   };
@@ -350,6 +353,555 @@ test("isDirectAnswerEligible rejects when no candidate meets the token-overlap f
   assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
 });
 
+test("isDirectAnswerEligible does not pass CJK direct answers on shared common characters", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户讨厌深色主题",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.tokenOverlap === undefined);
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible does not pass short CJK direct answers on shared suffixes", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢浅色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible does not pass CJK direct answers on shared prefixes with opposite values", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢浅色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible requires every independent CJK phrase before direct answering", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式 and 客户账户升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible does not require punctuation-bridged CJK aggregate phrases", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式 and 客户账户升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式，客户账户升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible treats space-separated long CJK clauses as independent phrases", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式 and 客户账户升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式 客户账户升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible bridges short spaced CJK query chunks", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户 喜欢 深色 模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户erp升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户crm升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户crm升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户crm升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires spaced ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 ERP 升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 CRM 升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible requires short spaced ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 v1 升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 v2 升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching spaced ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 CRM 升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 CRM 升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible accepts matching short spaced ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 v2 升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 v2 升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires end-boundary ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 ERP",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 CRM",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching end-boundary ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 CRM",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 CRM",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires start-boundary ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "ERP 客户",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "CRM 客户",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible requires short CJK chunks around mixed-script discriminators", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户crm降级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户crm升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible requires short contiguous ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户v1升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户v2升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching short contiguous ASCII discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户v2升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户v2升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires non-Latin discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户α升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户β升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching non-Latin discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户β升级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户β升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires boundary non-Latin discriminators in mixed CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户 α",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户 β",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible requires all non-CJK Unicode query tokens before direct answering", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "пользователь ненавидит темный режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "пользователь любит темный режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching non-CJK Unicode query tokens", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "пользователь любит темный режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "пользователь любит темный режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible requires ASCII discriminators in non-CJK Unicode queries", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "клиент erp режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "клиент crm режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible accepts matching ASCII discriminators in non-CJK Unicode queries", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "клиент crm режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "клиент crm режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible does not require English prompt words before non-CJK Unicode terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "клиент режим",
+    }),
+  });
+  for (const promptWord of ["find", "get", "status", "include"]) {
+    const result = isDirectAnswerEligible({
+      query: `${promptWord} клиент режим`,
+      candidates: [candidate],
+      config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+    });
+    assert.equal(result.eligible, true, promptWord);
+    assert.equal(result.reason, "eligible", promptWord);
+    assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55, promptWord);
+  }
+});
+
+test("isDirectAnswerEligible does not require Russian prompt words before non-CJK Unicode terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "пользователь любит темный режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "найди пользователь любит темный режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible matches CJK direct answers across inserted spaces", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户 喜欢 深色 模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.55 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.55);
+});
+
+test("isDirectAnswerEligible does not require English prompt words before CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "what is 用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.5 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.5);
+});
+
+test("isDirectAnswerEligible does not require a single English prompt word before CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "what 用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.5 },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, "eligible");
+  assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.5);
+});
+
+test("isDirectAnswerEligible does not require English recall verbs before CJK terms", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户喜欢深色模式",
+    }),
+  });
+  for (const promptWord of ["find", "status", "include"]) {
+    const result = isDirectAnswerEligible({
+      query: `${promptWord} 用户喜欢深色模式`,
+      candidates: [candidate],
+      config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0.5 },
+    });
+    assert.equal(result.eligible, true, promptWord);
+    assert.equal(result.reason, "eligible", promptWord);
+    assert.ok(result.tokenOverlap !== undefined && result.tokenOverlap >= 0.5, promptWord);
+  }
+});
+
 test("isDirectAnswerEligible with tokenOverlapFloor=0 accepts any overlap (rule 45)", () => {
   const candidate = makeCandidate({
     memory: makeMemory({
@@ -363,6 +915,57 @@ test("isDirectAnswerEligible with tokenOverlapFloor=0 accepts any overlap (rule 
     config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0 },
   });
   assert.equal(result.eligible, true);
+});
+
+test("isDirectAnswerEligible rejects required CJK phrase misses when tokenOverlapFloor=0", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "用户讨厌深色主题",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "用户喜欢深色模式",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible rejects required mixed-script misses when tokenOverlapFloor=0", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "客户crm降级",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "客户crm升级",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
+});
+
+test("isDirectAnswerEligible rejects required non-CJK Unicode misses when tokenOverlapFloor=0", () => {
+  const candidate = makeCandidate({
+    memory: makeMemory({
+      tags: [],
+      content: "пользователь ненавидит темный режим",
+    }),
+  });
+  const result = isDirectAnswerEligible({
+    query: "пользователь любит темный режим",
+    candidates: [candidate],
+    config: { ...DEFAULT_CONFIG, tokenOverlapFloor: 0 },
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, "below-token-overlap-floor");
+  assert.ok(result.filteredBy.includes(FILTER_LABELS.belowTokenOverlapFloor));
 });
 
 // ── Gate: ambiguity margin ──────────────────────────────────────────────────

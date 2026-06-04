@@ -76,9 +76,7 @@ function tagIndexPath(memoryDir: string): string {
 
 function ensureStateDir(memoryDir: string): void {
   const dir = stateDir(memoryDir);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  fs.mkdirSync(dir, { recursive: true });
 }
 
 function readJsonSafe<T>(filePath: string, fallback: T): T {
@@ -187,6 +185,13 @@ function lockOwnerIsRunning(owner: IndexLockOwner): boolean {
   return runningStartedAtMs <= owner.processStartedAtMs + INDEX_PROCESS_START_TOLERANCE_MS;
 }
 
+function lockIsFresh(lockInfo: fs.Stats, owner: IndexLockOwner | null): boolean {
+  const ownerCreatedAtMs =
+    typeof owner?.createdAt === "string" && owner.createdAt.length > 0 ? Date.parse(owner.createdAt) : Number.NaN;
+  const referenceMs = Number.isFinite(ownerCreatedAtMs) ? ownerCreatedAtMs : lockInfo.mtimeMs;
+  return Date.now() - referenceMs < INDEX_LOCK_STALE_MS;
+}
+
 function removeAbandonedIndexLock(lockDir: string): IndexLockCleanupResult {
   try {
     const info = fs.lstatSync(lockDir);
@@ -196,11 +201,14 @@ function removeAbandonedIndexLock(lockDir: string): IndexLockCleanupResult {
       return "removed";
     }
     const owner = readIndexLockOwner(lockDir);
-    if (owner !== null && lockOwnerIsRunning(owner)) return "wait";
-    if (owner === null && Date.now() - info.mtimeMs < INDEX_LOCK_STALE_MS) return "wait";
+    if (owner !== null) {
+      if (lockOwnerIsRunning(owner)) return "wait";
+    }
+    if (owner === null && lockIsFresh(info, null)) return "wait";
     fs.rmSync(lockDir, { recursive: true, force: true });
     return "removed";
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "removed";
     // Fail silently — indexes are advisory only
     return "blocked";
   }
@@ -217,6 +225,15 @@ function withIndexFileLock(filePath: string, update: () => void): void {
       acquired = true;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        try {
+          fs.mkdirSync(path.dirname(lockDir), { recursive: true });
+        } catch {
+          return;
+        }
+        sleepSync(INDEX_LOCK_POLL_MS);
+        continue;
+      }
       if (code !== "EEXIST") return;
       const cleanupResult = removeAbandonedIndexLock(lockDir);
       if (cleanupResult === "blocked") return;
