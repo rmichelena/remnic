@@ -41,7 +41,7 @@ export class RerankCache {
  */
 export function parseRerankResponse(
   raw: string,
-  candidates: RerankCandidate[],
+  candidates: RerankCandidate[]
 ): Array<RerankCandidate & { score?: number }> {
   const byId = new Map<string, RerankCandidate>();
   for (const c of candidates) byId.set(c.id, c);
@@ -80,8 +80,8 @@ export function parseRerankResponse(
 }
 
 function stableKey(query: string, ids: string[]): string {
-  // Keep it simple and deterministic; this is not a security boundary.
-  return `${query.trim().toLowerCase()}|${ids.join(",")}`;
+  // Keep candidate boundaries explicit; candidate IDs are arbitrary strings.
+  return JSON.stringify([query.trim().toLowerCase(), ids]);
 }
 
 function clampSnippet(snippet: string, maxChars: number): string {
@@ -101,7 +101,7 @@ export async function rerankLocalOrNoop(opts: {
         timeoutMs?: number;
         operation?: string;
         priority?: "recall-critical" | "background";
-      },
+      }
     ) => Promise<{ content: string } | null>;
   };
   enabled: boolean;
@@ -127,8 +127,7 @@ export async function rerankLocalOrNoop(opts: {
     snippet: clampSnippet(c.snippet, 400),
   }));
 
-  const system =
-    "You are a ranking system. Return JSON only. No markdown, no commentary.";
+  const system = "You are a ranking system. Return JSON only. No markdown, no commentary.";
   const user = JSON.stringify(
     {
       task: "rerank",
@@ -144,7 +143,7 @@ export async function rerankLocalOrNoop(opts: {
       ],
     },
     null,
-    0,
+    0
   );
 
   const res = await opts.local.chatCompletion(
@@ -158,13 +157,13 @@ export async function rerankLocalOrNoop(opts: {
       timeoutMs: opts.timeoutMs,
       operation: "rerank",
       priority: "recall-critical",
-    },
+    }
   );
   if (!res?.content) return null;
 
   const parsed = parseRerankResponse(
     res.content,
-    ids.map((id, i) => ({ id, originalIndex: i })),
+    ids.map((id, i) => ({ id, originalIndex: i }))
   );
   const rankedIds = parsed.map((p) => p.id);
 
