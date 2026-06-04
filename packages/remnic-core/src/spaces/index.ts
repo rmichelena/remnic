@@ -8,9 +8,10 @@
  * through push/pull and promotion workflows.
  */
 
+import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { readEnvVar, resolveHomeDir } from "../runtime/env.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -123,6 +124,9 @@ export interface AuditEntry {
 // ── Manifest management ─────────────────────────────────────────────────────
 
 const MANIFEST_VERSION = 1;
+const MANIFEST_LOCK_STALE_MS = 30_000;
+const MANIFEST_LOCK_TIMEOUT_MS = MANIFEST_LOCK_STALE_MS + 10_000;
+const MANIFEST_LOCK_SLEEP_MS = 20;
 
 function normalizeSpaceMemoryDir(memoryDir: string): string {
   return path.resolve(memoryDir);
@@ -138,28 +142,324 @@ export function getManifestPath(baseDir?: string): string {
 }
 
 export function loadManifest(baseDir?: string, memoryDirOverride?: string): SpaceManifest {
+  if (fs.existsSync(getManifestPath(baseDir))) {
+    try {
+      return readManifestUnlocked(baseDir, memoryDirOverride, { bootstrapIfMissing: false });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  return updateManifest(baseDir, (manifest) => manifest, memoryDirOverride);
+}
+
+export function saveManifest(manifest: SpaceManifest, baseDir?: string): void {
+  withManifestLock(baseDir, () => {
+    saveManifestUnlocked(manifest, baseDir);
+  });
+}
+
+export function updateManifest<T>(
+  baseDir: string | undefined,
+  updater: (manifest: SpaceManifest) => T,
+  memoryDirOverride?: string
+): T {
+  return withManifestLock(baseDir, () => {
+    const manifest = readManifestUnlocked(baseDir, memoryDirOverride);
+    const result = updater(manifest);
+    saveManifestUnlocked(manifest, baseDir);
+    return result;
+  });
+}
+
+function readManifestUnlocked(
+  baseDir?: string,
+  memoryDirOverride?: string,
+  options: { bootstrapIfMissing?: boolean } = {}
+): SpaceManifest {
   const manifestPath = getManifestPath(baseDir);
 
   if (!fs.existsSync(manifestPath)) {
-    // Bootstrap with a personal space
+    if (options.bootstrapIfMissing === false) {
+      const error = new Error(`Spaces manifest not found: ${manifestPath}`) as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
+    }
     const personalSpace = createPersonalSpace(baseDir, memoryDirOverride);
-    const manifest: SpaceManifest = {
+    return {
       activeSpaceId: personalSpace.id,
       spaces: [personalSpace],
       version: MANIFEST_VERSION,
     };
-    saveManifest(manifest, baseDir);
-    return manifest;
   }
 
   const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   return raw as SpaceManifest;
 }
 
-export function saveManifest(manifest: SpaceManifest, baseDir?: string): void {
+function saveManifestUnlocked(manifest: SpaceManifest, baseDir?: string): void {
   const manifestPath = getManifestPath(baseDir);
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  const manifestDir = path.dirname(manifestPath);
+  fs.mkdirSync(manifestDir, { recursive: true });
+  const tempPath = path.join(manifestDir, `.manifest.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
+    fs.renameSync(tempPath, manifestPath);
+  } catch (error) {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      // Ignore cleanup failures; surface the original write/rename error.
+    }
+    throw error;
+  }
+}
+
+function withManifestLock<T>(baseDir: string | undefined, operation: () => T): T {
+  const lockDir = `${getManifestPath(baseDir)}.lock`;
+  fs.mkdirSync(path.dirname(lockDir), { recursive: true });
+  const lockOwner = acquireManifestLock(lockDir);
+  try {
+    return operation();
+  } finally {
+    releaseManifestLock(lockDir, lockOwner);
+  }
+}
+
+function acquireManifestLock(lockDir: string): string {
+  const deadline = Date.now() + MANIFEST_LOCK_TIMEOUT_MS;
+  const owner = createManifestLockOwner();
+  const reclaimDir = getManifestLockReclaimDir(lockDir);
+  while (true) {
+    if (fs.existsSync(reclaimDir)) {
+      removeStaleManifestReclaimLock(reclaimDir);
+    }
+    if (fs.existsSync(reclaimDir)) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for spaces manifest reclaim lock: ${reclaimDir}`);
+      }
+      sleepSync(MANIFEST_LOCK_SLEEP_MS);
+      continue;
+    }
+
+    try {
+      fs.mkdirSync(lockDir, { recursive: false });
+      try {
+        fs.writeFileSync(path.join(lockDir, "owner"), `${owner}\n`, { flag: "wx" });
+      } catch (error) {
+        fs.rmSync(lockDir, { recursive: true, force: true });
+        throw error;
+      }
+      if (fs.existsSync(reclaimDir)) {
+        releaseManifestLock(lockDir, owner);
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for spaces manifest reclaim lock: ${reclaimDir}`);
+        }
+        sleepSync(MANIFEST_LOCK_SLEEP_MS);
+        continue;
+      }
+      return owner;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        throw error;
+      }
+
+      removeStaleManifestLock(lockDir);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for spaces manifest lock: ${lockDir}`);
+      }
+      sleepSync(MANIFEST_LOCK_SLEEP_MS);
+    }
+  }
+}
+
+function releaseManifestLock(lockDir: string, owner: string): void {
+  try {
+    const ownerPath = path.join(lockDir, "owner");
+    if (fs.readFileSync(ownerPath, "utf8").trim() === owner) {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+function removeStaleManifestLock(lockDir: string): void {
+  const reclaimDir = getManifestLockReclaimDir(lockDir);
+  const reclaimOwner = createManifestLockOwner();
+  try {
+    fs.mkdirSync(reclaimDir, { recursive: false });
+    try {
+      fs.writeFileSync(path.join(reclaimDir, "owner"), `${reclaimOwner}\n`, { flag: "wx" });
+    } catch (error) {
+      fs.rmSync(reclaimDir, { recursive: true, force: true });
+      throw error;
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    const snapshot = readManifestLockSnapshot(lockDir);
+    if (!snapshot || Date.now() - snapshot.mtimeMs <= MANIFEST_LOCK_STALE_MS) {
+      return;
+    }
+
+    if (isManifestLockOwnerActive(snapshot.owner)) {
+      return;
+    }
+
+    const tombstoneDir = `${lockDir}.stale.${process.pid}.${crypto.randomUUID()}`;
+    try {
+      fs.renameSync(lockDir, tombstoneDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+      return;
+    }
+    fs.rmSync(tombstoneDir, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(reclaimDir, { recursive: true, force: true });
+  }
+}
+
+function getManifestLockReclaimDir(lockDir: string): string {
+  return `${lockDir}.reclaim`;
+}
+
+function createManifestLockOwner(): string {
+  return JSON.stringify({
+    pid: process.pid,
+    startKey: readProcessStartKey(process.pid),
+    token: crypto.randomUUID(),
+  });
+}
+
+function removeStaleManifestReclaimLock(reclaimDir: string): void {
+  const snapshot = readManifestLockSnapshot(reclaimDir);
+  if (!snapshot || Date.now() - snapshot.mtimeMs <= MANIFEST_LOCK_STALE_MS) {
+    return;
+  }
+
+  if (isManifestLockOwnerActive(snapshot.owner)) {
+    return;
+  }
+
+  const tombstoneDir = `${reclaimDir}.stale.${process.pid}.${crypto.randomUUID()}`;
+  try {
+    fs.renameSync(reclaimDir, tombstoneDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+    return;
+  }
+  fs.rmSync(tombstoneDir, { recursive: true, force: true });
+}
+
+function readManifestLockSnapshot(lockDir: string): { mtimeMs: number; owner?: string } | undefined {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(lockDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+
+  try {
+    const owner = fs.readFileSync(path.join(lockDir, "owner"), "utf8").trim();
+    return { mtimeMs: stat.mtimeMs, owner };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { mtimeMs: stat.mtimeMs };
+    }
+    throw error;
+  }
+}
+
+function isManifestLockOwnerActive(owner: string | undefined): boolean {
+  if (!owner) {
+    return false;
+  }
+
+  const parsed = parseManifestLockOwner(owner);
+  if (!parsed) {
+    return false;
+  }
+
+  const currentStartKey = readProcessStartKey(parsed.pid);
+  if (currentStartKey && parsed.startKey) {
+    return currentStartKey === parsed.startKey;
+  }
+
+  return isProcessAlive(parsed.pid);
+}
+
+function parseManifestLockOwner(owner: string): { pid: number; startKey?: string } | undefined {
+  try {
+    const parsed = JSON.parse(owner) as { pid?: unknown; startKey?: unknown };
+    const pid = typeof parsed.pid === "number" ? parsed.pid : Number.NaN;
+    if (Number.isInteger(pid) && pid > 0) {
+      return {
+        pid,
+        startKey: typeof parsed.startKey === "string" && parsed.startKey.length > 0 ? parsed.startKey : undefined,
+      };
+    }
+  } catch {
+    // Fall through to legacy owner format.
+  }
+
+  const legacyPid = Number(owner.split(":", 1)[0]);
+  return Number.isInteger(legacyPid) && legacyPid > 0 ? { pid: legacyPid } : undefined;
+}
+
+function readProcessStartKey(pid: number): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined;
+  }
+
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    return undefined;
+  }
+  const startKey = result.stdout.trim().replace(/\s+/g, " ");
+  return startKey.length > 0 ? startKey : undefined;
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (pid === process.pid) {
+    return true;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    return true;
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function createPersonalSpace(baseDir?: string, memoryDirOverride?: string): Space {
@@ -167,12 +467,11 @@ function createPersonalSpace(baseDir?: string, memoryDirOverride?: string): Spac
   // Priority: override > REMNIC_MEMORY_DIR > ENGRAM_MEMORY_DIR > existing standalone dir > existing OpenClaw dir > new standalone dir
   const standalonePath = path.join(homeDir, ".engram", "memory");
   const openclawPath = path.join(homeDir, ".openclaw", "workspace", "memory", "local");
-  const memoryDir = memoryDirOverride
-    ?? readEnvVar("REMNIC_MEMORY_DIR")
-    ?? readEnvVar("ENGRAM_MEMORY_DIR")
-    ?? (fs.existsSync(standalonePath) ? standalonePath
-      : fs.existsSync(openclawPath) ? openclawPath
-      : standalonePath);
+  const memoryDir =
+    memoryDirOverride ??
+    readEnvVar("REMNIC_MEMORY_DIR") ??
+    readEnvVar("ENGRAM_MEMORY_DIR") ??
+    (fs.existsSync(standalonePath) ? standalonePath : fs.existsSync(openclawPath) ? openclawPath : standalonePath);
   const normalizedMemoryDir = normalizeSpaceMemoryDir(memoryDir);
   const now = new Date().toISOString();
 
@@ -210,111 +509,117 @@ export function createSpace(options: {
   parentSpaceId?: string;
   baseDir?: string;
 }): Space {
-  const manifest = loadManifest(options.baseDir);
-  const id = options.name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-");
-
-  if (manifest.spaces.some((s) => s.id === id)) {
-    throw new Error(`Space "${id}" already exists`);
-  }
-
-  // Validate parent space exists
-  if (options.parentSpaceId && !manifest.spaces.some((s) => s.id === options.parentSpaceId)) {
-    throw new Error(`Parent space "${options.parentSpaceId}" not found`);
-  }
-
+  const id = options.name
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-");
   const now = new Date().toISOString();
   const memoryDir = normalizeSpaceMemoryDir(
-    options.memoryDir ?? path.join(
-      getSpacesDir(options.baseDir),
-      id,
-      "memory",
-    ),
+    options.memoryDir ?? path.join(getSpacesDir(options.baseDir), id, "memory")
   );
 
-  const space: Space = {
-    id,
-    name: options.name,
-    kind: options.kind,
-    description: options.description,
-    memoryDir,
-    createdAt: now,
-    updatedAt: now,
-    owner: readEnvVar("USER"),
-    parentSpaceId: options.parentSpaceId,
-  };
+  const space = updateManifest(options.baseDir, (manifest) => {
+    if (manifest.spaces.some((s) => s.id === id)) {
+      throw new Error(`Space "${id}" already exists`);
+    }
 
-  // Ensure memory directory exists
-  fs.mkdirSync(memoryDir, { recursive: true });
+    // Validate parent space exists
+    if (options.parentSpaceId && !manifest.spaces.some((s) => s.id === options.parentSpaceId)) {
+      throw new Error(`Parent space "${options.parentSpaceId}" not found`);
+    }
 
-  manifest.spaces.push(space);
-  manifest.updatedAt = now;
-  saveManifest(manifest, options.baseDir);
+    const created: Space = {
+      id,
+      name: options.name,
+      kind: options.kind,
+      description: options.description,
+      memoryDir,
+      createdAt: now,
+      updatedAt: now,
+      owner: readEnvVar("USER"),
+      parentSpaceId: options.parentSpaceId,
+    };
+
+    // Ensure memory directory exists before publishing the manifest entry.
+    fs.mkdirSync(memoryDir, { recursive: true });
+
+    manifest.spaces.push(created);
+    manifest.updatedAt = now;
+    return created;
+  });
 
   // Audit
-  appendAudit({
-    action: "space.create",
-    sourceSpaceId: id,
-    details: `Created ${options.kind} space "${options.name}"`,
-  }, options.baseDir);
+  appendAudit(
+    {
+      action: "space.create",
+      sourceSpaceId: id,
+      details: `Created ${options.kind} space "${options.name}"`,
+    },
+    options.baseDir
+  );
 
   return space;
 }
 
 export function deleteSpace(spaceId: string, baseDir?: string): void {
-  const manifest = loadManifest(baseDir);
-
   if (spaceId === "personal") {
     throw new Error("Cannot delete the personal space");
   }
 
-  const idx = manifest.spaces.findIndex((s) => s.id === spaceId);
-  if (idx === -1) throw new Error(`Space "${spaceId}" not found`);
+  updateManifest(baseDir, (manifest) => {
+    const idx = manifest.spaces.findIndex((s) => s.id === spaceId);
+    if (idx === -1) throw new Error(`Space "${spaceId}" not found`);
 
-  // If deleting active space, switch to personal
-  if (manifest.activeSpaceId === spaceId) {
-    manifest.activeSpaceId = "personal";
-  }
-
-  // Clear parentSpaceId references from children
-  for (const space of manifest.spaces) {
-    if (space.parentSpaceId === spaceId) {
-      space.parentSpaceId = undefined;
+    // If deleting active space, switch to personal
+    if (manifest.activeSpaceId === spaceId) {
+      manifest.activeSpaceId = "personal";
     }
-  }
 
-  manifest.spaces.splice(idx, 1);
-  saveManifest(manifest, baseDir);
+    // Clear parentSpaceId references from children
+    for (const space of manifest.spaces) {
+      if (space.parentSpaceId === spaceId) {
+        space.parentSpaceId = undefined;
+      }
+    }
 
-  appendAudit({
-    action: "space.delete",
-    sourceSpaceId: spaceId,
-    details: `Deleted space "${spaceId}"`,
-  }, baseDir);
+    manifest.spaces.splice(idx, 1);
+  });
+
+  appendAudit(
+    {
+      action: "space.delete",
+      sourceSpaceId: spaceId,
+      details: `Deleted space "${spaceId}"`,
+    },
+    baseDir
+  );
 }
 
 // ── Switch ───────────────────────────────────────────────────────────────────
 
 export function switchSpace(spaceId: string, baseDir?: string): SpaceSwitchResult {
-  const manifest = loadManifest(baseDir);
-  const space = manifest.spaces.find((s) => s.id === spaceId);
+  const { previousId, spaceName } = updateManifest(baseDir, (manifest) => {
+    const space = manifest.spaces.find((s) => s.id === spaceId);
+    if (!space) throw new Error(`Space "${spaceId}" not found`);
+    const previousId = manifest.activeSpaceId;
+    manifest.activeSpaceId = spaceId;
+    return { previousId, spaceName: space.name };
+  });
 
-  if (!space) throw new Error(`Space "${spaceId}" not found`);
-
-  const previousId = manifest.activeSpaceId;
-  manifest.activeSpaceId = spaceId;
-  saveManifest(manifest, baseDir);
-
-  appendAudit({
-    action: "space.switch",
-    sourceSpaceId: previousId,
-    targetSpaceId: spaceId,
-    details: `Switched from "${previousId}" to "${spaceId}"`,
-  }, baseDir);
+  appendAudit(
+    {
+      action: "space.switch",
+      sourceSpaceId: previousId,
+      targetSpaceId: spaceId,
+      details: `Switched from "${previousId}" to "${spaceId}"`,
+    },
+    baseDir
+  );
 
   return {
     previousSpaceId: previousId,
     currentSpaceId: spaceId,
-    message: `Switched to "${space.name}"`,
+    message: `Switched to "${spaceName}"`,
   };
 }
 
@@ -323,7 +628,7 @@ export function switchSpace(spaceId: string, baseDir?: string): SpaceSwitchResul
 export function pushToSpace(
   sourceSpaceId: string,
   targetSpaceId: string,
-  options?: { memoryIds?: string[]; force?: boolean; baseDir?: string },
+  options?: { memoryIds?: string[]; force?: boolean; baseDir?: string }
 ): SpacePushResult {
   const startTime = Date.now();
   const manifest = loadManifest(options?.baseDir);
@@ -339,12 +644,15 @@ export function pushToSpace(
     force: options?.force,
   });
 
-  appendAudit({
-    action: "space.push",
-    sourceSpaceId,
-    targetSpaceId,
-    details: `Pushed ${result.merged} memories, ${result.conflicts.length} conflicts`,
-  }, options?.baseDir);
+  appendAudit(
+    {
+      action: "space.push",
+      sourceSpaceId,
+      targetSpaceId,
+      details: `Pushed ${result.merged} memories, ${result.conflicts.length} conflicts`,
+    },
+    options?.baseDir
+  );
 
   return {
     sourceSpaceId,
@@ -358,7 +666,7 @@ export function pushToSpace(
 export function pullFromSpace(
   sourceSpaceId: string,
   targetSpaceId: string,
-  options?: { memoryIds?: string[]; force?: boolean; baseDir?: string },
+  options?: { memoryIds?: string[]; force?: boolean; baseDir?: string }
 ): SpacePullResult {
   const startTime = Date.now();
   const manifest = loadManifest(options?.baseDir);
@@ -374,12 +682,15 @@ export function pullFromSpace(
     force: options?.force,
   });
 
-  appendAudit({
-    action: "space.pull",
-    sourceSpaceId,
-    targetSpaceId,
-    details: `Pulled ${result.merged} memories, ${result.conflicts.length} conflicts`,
-  }, options?.baseDir);
+  appendAudit(
+    {
+      action: "space.pull",
+      sourceSpaceId,
+      targetSpaceId,
+      details: `Pulled ${result.merged} memories, ${result.conflicts.length} conflicts`,
+    },
+    options?.baseDir
+  );
 
   return {
     sourceSpaceId,
@@ -392,31 +703,30 @@ export function pullFromSpace(
 
 // ── Share ────────────────────────────────────────────────────────────────────
 
-export function shareSpace(
-  spaceId: string,
-  members: string[],
-  baseDir?: string,
-): SpaceShareResult {
-  const manifest = loadManifest(baseDir);
-  const space = manifest.spaces.find((s) => s.id === spaceId);
+export function shareSpace(spaceId: string, members: string[], baseDir?: string): SpaceShareResult {
+  const spaceName = updateManifest(baseDir, (manifest) => {
+    const space = manifest.spaces.find((s) => s.id === spaceId);
+    if (!space) throw new Error(`Space "${spaceId}" not found`);
+    if (space.kind === "personal") throw new Error("Cannot share personal space");
 
-  if (!space) throw new Error(`Space "${spaceId}" not found`);
-  if (space.kind === "personal") throw new Error("Cannot share personal space");
+    space.members = [...new Set([...(space.members ?? []), ...members])];
+    space.updatedAt = new Date().toISOString();
+    return space.name;
+  });
 
-  space.members = [...new Set([...(space.members ?? []), ...members])];
-  space.updatedAt = new Date().toISOString();
-  saveManifest(manifest, baseDir);
-
-  appendAudit({
-    action: "space.share",
-    sourceSpaceId: spaceId,
-    details: `Shared with: ${members.join(", ")}`,
-  }, baseDir);
+  appendAudit(
+    {
+      action: "space.share",
+      sourceSpaceId: spaceId,
+      details: `Shared with: ${members.join(", ")}`,
+    },
+    baseDir
+  );
 
   return {
     spaceId,
     sharedWith: members,
-    message: `Shared "${space.name}" with ${members.length} member(s)`,
+    message: `Shared "${spaceName}" with ${members.length} member(s)`,
   };
 }
 
@@ -425,7 +735,7 @@ export function shareSpace(
 export function promoteSpace(
   sourceSpaceId: string,
   targetSpaceId: string,
-  options?: { memoryIds?: string[]; force?: boolean; forceOverwrite?: boolean; baseDir?: string },
+  options?: { memoryIds?: string[]; force?: boolean; forceOverwrite?: boolean; baseDir?: string }
 ): SpacePromoteResult {
   const startTime = Date.now();
   const manifest = loadManifest(options?.baseDir);
@@ -448,12 +758,15 @@ export function promoteSpace(
     force: options?.forceOverwrite !== undefined ? options.forceOverwrite : (options?.force ?? false),
   });
 
-  appendAudit({
-    action: "space.promote",
-    sourceSpaceId,
-    targetSpaceId,
-    details: `Promoted ${result.merged} memories from "${source.name}" to "${target.name}"`,
-  }, options?.baseDir);
+  appendAudit(
+    {
+      action: "space.promote",
+      sourceSpaceId,
+      targetSpaceId,
+      details: `Promoted ${result.merged} memories from "${source.name}" to "${target.name}"`,
+    },
+    options?.baseDir
+  );
 
   return {
     sourceSpaceId,
@@ -469,7 +782,7 @@ export function promoteSpace(
 export function mergeSpaces(
   sourceSpaceId: string,
   targetSpaceId: string,
-  options?: { force?: boolean; baseDir?: string },
+  options?: { force?: boolean; baseDir?: string }
 ): MergeResult {
   const startTime = Date.now();
   const manifest = loadManifest(options?.baseDir);
@@ -484,12 +797,15 @@ export function mergeSpaces(
     force: options?.force,
   });
 
-  appendAudit({
-    action: "space.merge",
-    sourceSpaceId,
-    targetSpaceId,
-    details: `Merged: ${result.merged} merged, ${result.conflicts.length} conflicts, ${result.skipped} skipped`,
-  }, options?.baseDir);
+  appendAudit(
+    {
+      action: "space.merge",
+      sourceSpaceId,
+      targetSpaceId,
+      details: `Merged: ${result.merged} merged, ${result.conflicts.length} conflicts, ${result.skipped} skipped`,
+    },
+    options?.baseDir
+  );
 
   return {
     ...result,
@@ -504,9 +820,7 @@ export function getAuditLog(baseDir?: string): AuditEntry[] {
   if (!fs.existsSync(auditPath)) return [];
 
   const lines = fs.readFileSync(auditPath, "utf8").trim().split("\n");
-  return lines
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as AuditEntry);
+  return lines.filter((l) => l.trim()).map((l) => JSON.parse(l) as AuditEntry);
 }
 
 function appendAudit(entry: Omit<AuditEntry, "id" | "timestamp">, baseDir?: string): void {
@@ -519,7 +833,7 @@ function appendAudit(entry: Omit<AuditEntry, "id" | "timestamp">, baseDir?: stri
     ...entry,
   };
 
-  fs.appendFileSync(auditPath, JSON.stringify(full) + "\n");
+  fs.appendFileSync(auditPath, `${JSON.stringify(full)}\n`);
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -532,7 +846,7 @@ interface CopyOptions {
 function copyMemories(
   sourceDir: string,
   targetDir: string,
-  options?: CopyOptions,
+  options?: CopyOptions
 ): { merged: number; conflicts: ConflictEntry[]; skipped: number } {
   let merged = 0;
   const conflicts: ConflictEntry[] = [];
