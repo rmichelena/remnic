@@ -33,9 +33,7 @@
     "url": "https://github.com/joshuaswarren/remnic/issues"
   },
   "author": "Joshua Warren",
-  "workspaces": [
-    "packages/*"
-  ],
+  "workspaces": ["packages/*"],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -437,6 +435,30 @@
     "./namespaces/storage.js": {
       "import": "./dist/namespaces/storage.js"
     },
+    "./openai-chat-compat": {
+      "import": "./dist/openai-chat-compat.js"
+    },
+    "./openai-chat-compat.js": {
+      "import": "./dist/openai-chat-compat.js"
+    },
+    "./operator-toolkit": {
+      "import": "./dist/operator-toolkit.js"
+    },
+    "./operator-toolkit.js": {
+      "import": "./dist/operator-toolkit.js"
+    },
+    "./opik-exporter": {
+      "import": "./dist/opik-exporter.js"
+    },
+    "./opik-exporter.js": {
+      "import": "./dist/opik-exporter.js"
+    },
+    "./profiling": {
+      "import": "./dist/profiling.js"
+    },
+    "./profiling.js": {
+      "import": "./dist/profiling.js"
+    },
     "./qmd": {
       "import": "./dist/qmd.js"
     },
@@ -454,6 +476,18 @@
     },
     "./reconstruct.js": {
       "import": "./dist/reconstruct.js"
+    },
+    "./relevance": {
+      "import": "./dist/relevance.js"
+    },
+    "./relevance.js": {
+      "import": "./dist/relevance.js"
+    },
+    "./rerank": {
+      "import": "./dist/rerank.js"
+    },
+    "./rerank.js": {
+      "import": "./dist/rerank.js"
     },
     "./retrieval": {
       "import": "./dist/retrieval.js"
@@ -502,6 +536,12 @@
     },
     "./replay/types.js": {
       "import": "./dist/replay/types.js"
+    },
+    "./resume-bundles": {
+      "import": "./dist/resume-bundles.js"
+    },
+    "./resume-bundles.js": {
+      "import": "./dist/resume-bundles.js"
     },
     "./maintenance/archive-observations": {
       "import": "./dist/maintenance/archive-observations.js"
@@ -586,6 +626,12 @@
     },
     "./runtime/env.js": {
       "import": "./dist/runtime/env.js"
+    },
+    "./sanitize": {
+      "import": "./dist/sanitize.js"
+    },
+    "./sanitize.js": {
+      "import": "./dist/sanitize.js"
     },
     "./search": {
       "import": "./dist/search/index.js"
@@ -864,12 +910,7 @@
       "import": "./dist/transfer/types.js"
     }
   },
-  "files": [
-    "dist",
-    "bin/engram-access.js",
-    "openclaw.plugin.json",
-    "scripts/ensure-better-sqlite3.mjs"
-  ],
+  "files": ["dist", "bin/engram-access.js", "openclaw.plugin.json", "scripts/ensure-better-sqlite3.mjs"],
   "dependencies": {
     "@honcho-ai/sdk": "^2.0.0",
     "@lancedb/lancedb": "^0.26.2",
@@ -892,9 +933,7 @@
   },
   "openclaw": {
     "plugin": "./openclaw.plugin.json",
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "extensions": ["./dist/index.js"]
   },
   "scripts": {
     "sync:openclaw-plugin": "node scripts/sync-openclaw-plugin.mjs",
@@ -947,12 +986,6 @@
     "typescript": "^5.9.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "sharp",
-      "koffi",
-      "protobufjs"
-    ]
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp", "koffi", "protobufjs"]
   }
 }
