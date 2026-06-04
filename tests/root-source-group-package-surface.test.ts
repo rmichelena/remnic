@@ -23,6 +23,18 @@ const sourceGroupShims = [
   "reconstruct",
   "retrieval",
   "retrieval-agents",
+  "schemas",
+  "sdk-compat",
+  "signal",
+  "source-attribution",
+  "summarizer",
+  "summary-snapshot",
+  "threading",
+  "tmt",
+  "topics",
+  "transcript",
+  "trust-zones",
+  "types",
 ] as const;
 
 test("root source-group shims are exported and built as package subpaths", async () => {
