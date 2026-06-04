@@ -33,9 +33,7 @@
     "url": "https://github.com/joshuaswarren/remnic/issues"
   },
   "author": "Joshua Warren",
-  "workspaces": [
-    "packages/*"
-  ],
+  "workspaces": ["packages/*"],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -653,6 +651,78 @@
     "./search/remote-backend.js": {
       "import": "./dist/search/remote-backend.js"
     },
+    "./schemas": {
+      "import": "./dist/schemas.js"
+    },
+    "./schemas.js": {
+      "import": "./dist/schemas.js"
+    },
+    "./sdk-compat": {
+      "import": "./dist/sdk-compat.js"
+    },
+    "./sdk-compat.js": {
+      "import": "./dist/sdk-compat.js"
+    },
+    "./signal": {
+      "import": "./dist/signal.js"
+    },
+    "./signal.js": {
+      "import": "./dist/signal.js"
+    },
+    "./source-attribution": {
+      "import": "./dist/source-attribution.js"
+    },
+    "./source-attribution.js": {
+      "import": "./dist/source-attribution.js"
+    },
+    "./summarizer": {
+      "import": "./dist/summarizer.js"
+    },
+    "./summarizer.js": {
+      "import": "./dist/summarizer.js"
+    },
+    "./summary-snapshot": {
+      "import": "./dist/summary-snapshot.js"
+    },
+    "./summary-snapshot.js": {
+      "import": "./dist/summary-snapshot.js"
+    },
+    "./threading": {
+      "import": "./dist/threading.js"
+    },
+    "./threading.js": {
+      "import": "./dist/threading.js"
+    },
+    "./tmt": {
+      "import": "./dist/tmt.js"
+    },
+    "./tmt.js": {
+      "import": "./dist/tmt.js"
+    },
+    "./topics": {
+      "import": "./dist/topics.js"
+    },
+    "./topics.js": {
+      "import": "./dist/topics.js"
+    },
+    "./transcript": {
+      "import": "./dist/transcript.js"
+    },
+    "./transcript.js": {
+      "import": "./dist/transcript.js"
+    },
+    "./trust-zones": {
+      "import": "./dist/trust-zones.js"
+    },
+    "./trust-zones.js": {
+      "import": "./dist/trust-zones.js"
+    },
+    "./types": {
+      "import": "./dist/types.js"
+    },
+    "./types.js": {
+      "import": "./dist/types.js"
+    },
     "./session-observer-bands": {
       "import": "./dist/session-observer-bands.js"
     },
@@ -792,12 +862,7 @@
       "import": "./dist/transfer/types.js"
     }
   },
-  "files": [
-    "dist",
-    "bin/engram-access.js",
-    "openclaw.plugin.json",
-    "scripts/ensure-better-sqlite3.mjs"
-  ],
+  "files": ["dist", "bin/engram-access.js", "openclaw.plugin.json", "scripts/ensure-better-sqlite3.mjs"],
   "dependencies": {
     "@honcho-ai/sdk": "^2.0.0",
     "@lancedb/lancedb": "^0.26.2",
@@ -820,9 +885,7 @@
   },
   "openclaw": {
     "plugin": "./openclaw.plugin.json",
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "extensions": ["./dist/index.js"]
   },
   "scripts": {
     "sync:openclaw-plugin": "node scripts/sync-openclaw-plugin.mjs",
@@ -875,12 +938,6 @@
     "typescript": "^5.9.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "sharp",
-      "koffi",
-      "protobufjs"
-    ]
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp", "koffi", "protobufjs"]
   }
 }
