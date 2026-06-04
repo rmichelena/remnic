@@ -6,7 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { queryByDateRangeAsync, queryByTagsAsync } from "./temporal-index.js";
+import {
+  indexMemory,
+  queryByDateRangeAsync,
+  queryByTagsAsync,
+  resolvePromptTagPrefilterAsync,
+} from "./temporal-index.js";
 
 async function runIndexWorker(moduleUrl: string, memoryDir: string, workerId: number, count: number): Promise<void> {
   const workerSource = `
@@ -188,4 +193,28 @@ test("temporal index writers fail open on symlink lock blockers", async () => {
   const tagMatches = await queryByTagsAsync(memoryDir, ["concurrency/shared"]);
   assert.equal(dateMatches, null);
   assert.deepEqual(tagMatches, new Set(["/tmp/remnic-temporal-worker-101-memory-0.md"]));
+});
+
+test("tag queries distinguish missing index from valid no-match results", async () => {
+  const memoryDir = await mkdtemp(join(tmpdir(), "remnic-temporal-index-tag-miss-"));
+
+  const unavailableMatches = await queryByTagsAsync(memoryDir, ["beta"]);
+  assert.equal(unavailableMatches, null);
+
+  indexMemory(memoryDir, "/tmp/remnic-temporal-alpha-memory.md", "2026-03-11T12:00:00.000Z", ["alpha"]);
+
+  const matchingPaths = await queryByTagsAsync(memoryDir, ["alpha"]);
+  assert.deepEqual(matchingPaths, new Set(["/tmp/remnic-temporal-alpha-memory.md"]));
+
+  const noMatchPaths = await queryByTagsAsync(memoryDir, ["beta"]);
+  assert.deepEqual(noMatchPaths, new Set());
+
+  const promptPrefilter = await resolvePromptTagPrefilterAsync(memoryDir, "find #beta notes");
+  assert.deepEqual(promptPrefilter.matchedTags, ["beta"]);
+  assert.deepEqual(promptPrefilter.paths, new Set());
+
+  const noFilterPrefilter = await resolvePromptTagPrefilterAsync(memoryDir, "find project notes");
+  assert.deepEqual(noFilterPrefilter.matchedTags, []);
+  assert.deepEqual(noFilterPrefilter.expandedTags, []);
+  assert.equal(noFilterPrefilter.paths, null);
 });

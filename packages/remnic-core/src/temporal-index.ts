@@ -732,7 +732,7 @@ export async function queryByTagsAsync(memoryDir: string, tags: string[]): Promi
     try {
       gIndex = normalizeTagIndex(JSON.parse(raw) as TagIndex);
     } catch {
-      gIndex = { version: TAG_INDEX_VERSION, tags: {}, aliases: {} };
+      return null;
     }
 
     return queryByTagsFromIndex(gIndex, tags);
@@ -741,7 +741,7 @@ export async function queryByTagsAsync(memoryDir: string, tags: string[]): Promi
   }
 }
 
-function queryByTagsFromIndex(index: TagIndex, tags: string[]): Set<string> | null {
+function queryByTagsFromIndex(index: TagIndex, tags: string[]): Set<string> {
   const expandedTags = expandCanonicalTags(index, tags);
   const results = new Set<string>();
   for (const canonical of expandedTags) {
@@ -751,7 +751,7 @@ function queryByTagsFromIndex(index: TagIndex, tags: string[]): Set<string> | nu
       results.add(pathValue);
     }
   }
-  return results.size > 0 ? results : null;
+  return results;
 }
 
 /**
@@ -796,6 +796,13 @@ export async function resolvePromptTagPrefilterAsync(
       for (const canonical of canonicals) {
         matched.add(canonical);
       }
+    }
+    if (matched.size === 0) {
+      return {
+        matchedTags: [],
+        expandedTags: [],
+        paths: null,
+      };
     }
 
     const expandedTags = expandCanonicalTags(tagIndex, Array.from(matched));

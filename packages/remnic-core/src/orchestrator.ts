@@ -953,7 +953,8 @@ function applyQueryAwareCandidateFilter(
   candidates: QmdSearchResult[],
   candidatePaths: Set<string> | null,
 ): QmdSearchResult[] {
-  if (!candidatePaths || candidatePaths.size === 0) return candidates;
+  if (!candidatePaths) return candidates;
+  if (candidatePaths.size === 0) return [];
   const filtered = candidates.filter((candidate) =>
     candidatePaths.has(candidate.path),
   );
@@ -5316,7 +5317,7 @@ export class Orchestrator {
     paths: Set<string> | null,
     recallNamespaces: string[],
   ): Set<string> | null {
-    if (!paths || paths.size === 0) return null;
+    if (!paths) return null;
     const scoped = new Set<string>();
     for (const memoryPath of paths) {
       if (!memoryPath || isArtifactMemoryPath(memoryPath)) continue;
@@ -5328,7 +5329,7 @@ export class Orchestrator {
       }
       scoped.add(memoryPath);
     }
-    return scoped.size > 0 ? scoped : null;
+    return scoped;
   }
 
   private async buildQueryAwarePrefilter(
@@ -5376,7 +5377,14 @@ export class Orchestrator {
     let combination: QueryAwarePrefilter["combination"] = "none";
     let filteredToFullSearch = false;
 
-    if (temporalCandidates && tagCandidates) {
+    if (
+      tagSignals.matchedTags.length > 0 &&
+      tagCandidates !== null &&
+      tagCandidates.size === 0
+    ) {
+      candidatePaths = tagCandidates;
+      combination = "tag";
+    } else if (temporalCandidates !== null && tagCandidates !== null) {
       const intersection = new Set(
         Array.from(temporalCandidates).filter((memoryPath) =>
           tagCandidates.has(memoryPath),
@@ -5389,10 +5397,10 @@ export class Orchestrator {
         candidatePaths = new Set([...temporalCandidates, ...tagCandidates]);
         combination = "union";
       }
-    } else if (temporalCandidates) {
+    } else if (temporalCandidates !== null) {
       candidatePaths = temporalCandidates;
       combination = "temporal";
-    } else if (tagCandidates) {
+    } else if (tagCandidates !== null) {
       candidatePaths = tagCandidates;
       combination = "tag";
     }
@@ -5565,6 +5573,10 @@ export class Orchestrator {
         })),
       });
     };
+    if (queryAwarePrefilter.candidatePaths?.size === 0) {
+      await emitDebugSnapshot([], fetchLimit);
+      return [];
+    }
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       throwIfRecallAborted(options.abortSignal);
@@ -7778,6 +7790,15 @@ export class Orchestrator {
         );
         const staleQmdFallback =
           cachedQmd?.source === "stale" ? cachedQmd : null;
+        const queryAwarePrefilter = await queryAwarePrefilterPromise;
+        const queryAwarePrefilterIsEmpty =
+          queryAwarePrefilter.candidatePaths?.size === 0;
+        const emptyQueryAwareQmdResult: Exclude<QmdPhaseResult, null> = {
+          memoryResultsLists: [[]],
+          globalResults: [],
+          preAugmentTopScore: 0,
+          maxSpecializedScore: 0,
+        };
         if (cachedQmd?.source === "fresh") {
           recordRecallSectionMetric({
             section: "qmd",
@@ -7788,6 +7809,9 @@ export class Orchestrator {
             success: true,
             timing: `${Math.max(0, Math.round(cachedQmd.ageMs))}ms-cache`,
           });
+          if (queryAwarePrefilterIsEmpty) {
+            return emptyQueryAwareQmdResult;
+          }
           return cachedQmd.value;
         }
 
@@ -7808,6 +7832,9 @@ export class Orchestrator {
                 success: true,
                 timing: `stale-cache(reprobe-cooldown:${Math.max(0, Math.round(staleQmdFallback.ageMs))}ms)`,
               });
+              if (queryAwarePrefilterIsEmpty) {
+                return emptyQueryAwareQmdResult;
+              }
               return staleQmdFallback.value;
             }
             recordRecallSectionMetric({
@@ -7834,6 +7861,9 @@ export class Orchestrator {
                 success: true,
                 timing: `stale-cache(reprobe-failed:${Math.max(0, Math.round(staleQmdFallback.ageMs))}ms)`,
               });
+              if (queryAwarePrefilterIsEmpty) {
+                return emptyQueryAwareQmdResult;
+              }
               return staleQmdFallback.value;
             }
             recordRecallSectionMetric({
@@ -7853,11 +7883,11 @@ export class Orchestrator {
           log.info(`QMD re-probe succeeded: ${this.qmd.debugStatus()}`);
         }
 
-        const queryAwarePrefilter = await queryAwarePrefilterPromise;
         const maxPerAgent = this.config.parallelMaxResultsPerAgent;
         const specializedAgentPromise: Promise<
           [ParallelSearchResult[], ParallelSearchResult[]]
         > | null =
+          !queryAwarePrefilterIsEmpty &&
           this.config.parallelRetrievalEnabled && maxPerAgent > 0
             ? Promise.all([
                 shouldRunAgent("direct", retrievalQuery, 0)
@@ -7981,6 +8011,9 @@ export class Orchestrator {
               success: true,
               timing: `stale-cache(${err instanceof Error ? err.message : String(err)})`,
             });
+            if (queryAwarePrefilterIsEmpty) {
+              return emptyQueryAwareQmdResult;
+            }
             return staleQmdFallback.value;
           }
           throw err;
@@ -9462,6 +9495,7 @@ export class Orchestrator {
         // When the gate rejects, all recall pathways are skipped to prevent
         // low-relevance results from polluting context.
         const queryAwarePrefilter = await queryAwarePrefilterPromise;
+        if (queryAwarePrefilter.candidatePaths?.size !== 0) {
         const embeddingResults = await this.searchEmbeddingFallback(
           retrievalQuery,
           embeddingFetchLimit,
@@ -9566,6 +9600,7 @@ export class Orchestrator {
             impressionRecorded = true;
           }
         }
+        }
       }
 
       if (globalResults.length > 0) {
@@ -9607,6 +9642,7 @@ export class Orchestrator {
     } else if (recallResultLimit > 0 && !this.qmd.isAvailable()) {
       // Fallback: embeddings first, then recency-only.
       const queryAwarePrefilter = await queryAwarePrefilterPromise;
+      if (queryAwarePrefilter.candidatePaths?.size !== 0) {
       const embeddingResults = await this.searchEmbeddingFallback(
         retrievalQuery,
         embeddingFetchLimit,
@@ -9921,6 +9957,7 @@ export class Orchestrator {
             impressionRecorded = true;
           }
         }
+      }
       }
 
       if (isDisagreementPrompt(prompt)) {
@@ -15553,6 +15590,7 @@ export class Orchestrator {
     throwIfRecallAborted(abortSignal);
     const cappedLimit = Math.max(0, limit);
     if (cappedLimit === 0) return [];
+    if (queryAwarePrefilter?.candidatePaths?.size === 0) return [];
 
     const scopedSeedResults = queryAwarePrefilter?.candidatePaths?.size
       ? await this.searchScopedMemoryCandidates(
@@ -15639,6 +15677,11 @@ export class Orchestrator {
     /** Issue #681 — when true, bypass graphTraversalConfidenceFloor. */
     includeLowConfidence?: boolean;
   }): Promise<QmdSearchResult[]> {
+    if (options.queryAwarePrefilter?.candidatePaths?.size === 0) {
+      if (options.xrayPoolSizeSink) options.xrayPoolSizeSink.size = 0;
+      return [];
+    }
+
     const coldQmdEnabled = this.config.qmdColdTierEnabled === true;
     const coldCollection =
       this.config.qmdColdCollection ?? "openclaw-engram-cold";
@@ -15953,7 +15996,7 @@ export class Orchestrator {
         // Intersect with result paths first so out-of-scope paths don't exhaust the budget
         const scoped = new Set(Array.from(s).filter((p) => resultPaths.has(p)));
         if (maxCandidates === 0 || scoped.size <= maxCandidates)
-          return scoped.size > 0 ? scoped : null;
+          return scoped;
         return new Set(Array.from(scoped).slice(0, maxCandidates));
       };
       if (temporalFromDate !== null) {
