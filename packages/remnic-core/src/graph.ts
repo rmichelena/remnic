@@ -10,8 +10,8 @@
  * All writes are fail-open: errors are caught/logged, never thrown.
  */
 
-import { mkdir, appendFile, readFile } from "node:fs/promises";
-import * as path from "path";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import * as path from "node:path";
 
 import { readEdgeConfidence } from "./graph-edge-reinforcement.js";
 import { emitGraphEvent } from "./graph-events.js";
@@ -66,14 +66,7 @@ export const DEFAULT_GRAPH_TRAVERSAL_CONFIDENCE_FLOOR = 0.2;
 export const DEFAULT_GRAPH_TRAVERSAL_PAGERANK_ITERATIONS = 8;
 
 // Causal signal phrases — order matters (most specific first)
-export const CAUSAL_PHRASES = [
-  "as a result",
-  "led to",
-  "because of",
-  "therefore",
-  "caused",
-  "because",
-];
+export const CAUSAL_PHRASES = ["as a result", "led to", "because of", "therefore", "caused", "because"];
 
 export function graphsDir(memoryDir: string): string {
   return path.join(memoryDir, "state", "graphs");
@@ -114,8 +107,8 @@ export function withGraphWriteLock<T>(filePath: string, fn: () => Promise<T>): P
     filePath,
     next.then(
       () => undefined,
-      () => undefined,
-    ),
+      () => undefined
+    )
   );
   return next;
 }
@@ -123,7 +116,7 @@ export function withGraphWriteLock<T>(filePath: string, fn: () => Promise<T>): P
 export async function appendEdge(memoryDir: string, edge: GraphEdge): Promise<void> {
   await ensureGraphsDir(memoryDir);
   const filePath = graphFilePath(memoryDir, edge.type);
-  const line = JSON.stringify(edge) + "\n";
+  const line = `${JSON.stringify(edge)}\n`;
   await withGraphWriteLock(filePath, async () => {
     await appendFile(filePath, line, "utf8");
   });
@@ -205,7 +198,7 @@ export async function readEdgesStrict(memoryDir: string, type: GraphType): Promi
  */
 export async function readAllEdges(
   memoryDir: string,
-  config: Pick<GraphConfig, "entityGraphEnabled" | "timeGraphEnabled" | "causalGraphEnabled">,
+  config: Pick<GraphConfig, "entityGraphEnabled" | "timeGraphEnabled" | "causalGraphEnabled">
 ): Promise<GraphEdge[]> {
   const parts: GraphEdge[][] = await Promise.all([
     config.entityGraphEnabled ? readEdges(memoryDir, "entity") : Promise.resolve([]),
@@ -243,9 +236,12 @@ function isValidGraphEdge(raw: unknown, expectedType: GraphType): raw is GraphEd
   const edge = raw as Record<string, unknown>;
   return (
     edge.type === expectedType &&
-    typeof edge.from === "string" && edge.from.length > 0 &&
-    typeof edge.to === "string" && edge.to.length > 0 &&
-    typeof edge.weight === "number" && Number.isFinite(edge.weight) &&
+    typeof edge.from === "string" &&
+    edge.from.length > 0 &&
+    typeof edge.to === "string" &&
+    edge.to.length > 0 &&
+    typeof edge.weight === "number" &&
+    Number.isFinite(edge.weight) &&
     typeof edge.label === "string" &&
     typeof edge.ts === "string"
   );
@@ -258,7 +254,7 @@ export async function analyzeGraphHealth(
     timeGraphEnabled?: boolean;
     causalGraphEnabled?: boolean;
     includeRepairGuidance?: boolean;
-  },
+  }
 ): Promise<GraphHealthReport> {
   const enabledTypes: GraphType[] = [];
   if (options?.entityGraphEnabled !== false) enabledTypes.push("entity");
@@ -324,7 +320,7 @@ export async function analyzeGraphHealth(
       validEdges: 0,
       corruptLines: 0,
       uniqueNodes: globalNodes.size,
-    },
+    }
   );
   totals.uniqueNodes = globalNodes.size;
 
@@ -338,10 +334,14 @@ export async function analyzeGraphHealth(
   if (options?.includeRepairGuidance === true) {
     const guidance: string[] = [];
     if (totals.corruptLines > 0) {
-      guidance.push("Corrupt graph lines detected: back up memory/state/graphs, then rebuild graphs from clean memory replay/extraction runs.");
+      guidance.push(
+        "Corrupt graph lines detected: back up memory/state/graphs, then rebuild graphs from clean memory replay/extraction runs."
+      );
     }
     if (totals.validEdges === 0) {
-      guidance.push("No valid edges detected yet: run normal extraction traffic (or replay ingestion) to seed graph files.");
+      guidance.push(
+        "No valid edges detected yet: run normal extraction traffic (or replay ingestion) to seed graph files."
+      );
     }
     if (guidance.length > 0) report.repairGuidance = guidance;
   }
@@ -392,10 +392,7 @@ export class GraphIndex {
   }
 
   private async loadEdgesCached(): Promise<GraphEdge[]> {
-    if (
-      this.edgeCache &&
-      Date.now() - this.edgeCache.loadedAt < GraphIndex.EDGE_CACHE_TTL_MS
-    ) {
+    if (this.edgeCache && Date.now() - this.edgeCache.loadedAt < GraphIndex.EDGE_CACHE_TTL_MS) {
       return this.edgeCache.allEdges;
     }
     const allEdges = await readAllEdges(this.memoryDir, {
@@ -520,21 +517,23 @@ export class GraphIndex {
        * Default `false` (floor from config is applied).
        */
       includeLowConfidence?: boolean;
-    },
-  ): Promise<Array<{
-    path: string;
-    score: number;
-    seed: string;
-    hopDepth: number;
-    decayedWeight: number;
-    graphType: "entity" | "time" | "causal";
-    /**
-     * Confidence of the edge that produced this candidate's recorded
-     * provenance (the strongest edge along the chosen entry path).
-     * In `[0, 1]`. Legacy edges without `confidence` surface as 1.0.
-     */
-    edgeConfidence: number;
-  }>> {
+    }
+  ): Promise<
+    Array<{
+      path: string;
+      score: number;
+      seed: string;
+      hopDepth: number;
+      decayedWeight: number;
+      graphType: "entity" | "time" | "causal";
+      /**
+       * Confidence of the edge that produced this candidate's recorded
+       * provenance (the strongest edge along the chosen entry path).
+       * In `[0, 1]`. Legacy edges without `confidence` surface as 1.0.
+       */
+      edgeConfidence: number;
+    }>
+  > {
     if (!this.cfg.multiGraphMemoryEnabled) return [];
     const steps = maxSteps ?? this.cfg.maxGraphTraversalSteps;
     const decay = this.cfg.graphActivationDecay;
@@ -543,12 +542,9 @@ export class GraphIndex {
     // Otherwise clamp the configured floor into [0, 1] so misconfiguration
     // cannot (a) admit edges with negative confidence or (b) reject every
     // edge.
-    const floor = opts?.includeLowConfidence === true
-      ? 0
-      : clampConfidenceFloor(this.cfg.graphTraversalConfidenceFloor);
-    const iterations = clampPageRankIterations(
-      this.cfg.graphTraversalPageRankIterations,
-    );
+    const floor =
+      opts?.includeLowConfidence === true ? 0 : clampConfidenceFloor(this.cfg.graphTraversalConfidenceFloor);
+    const iterations = clampPageRankIterations(this.cfg.graphTraversalPageRankIterations);
 
     try {
       const allEdges = await this.loadEdgesCached();
@@ -581,50 +577,67 @@ export class GraphIndex {
           edgeConfidence: number;
         }
       >();
-      const visited = new Set<string>(seeds);
+      let frontier = new Map<string, { node: string; seed: string; activation: number }>();
+      const reachedBySeed = new Map<string, Set<string>>();
+      for (const seed of seeds) {
+        frontier.set(`${seed}\0${seed}`, { node: seed, seed, activation: 1 });
+        reachedBySeed.set(seed, new Set([seed]));
+      }
 
-      // BFS queue: [nodePath, hop, seedPath]
-      const queue: Array<[string, number, string]> = seeds.map((s) => [s, 0, s]);
+      for (let hop = 0; hop < steps && frontier.size > 0; hop++) {
+        const nextFrontier = new Map<string, { node: string; seed: string; activation: number }>();
 
-      while (queue.length > 0) {
-        const [node, hop, sourceSeed] = queue.shift()!;
-        if (hop >= steps) continue;
+        for (const { node, seed: sourceSeed, activation } of frontier.values()) {
+          const edges = adj.get(node) ?? [];
+          for (const edge of edges) {
+            const neighbor = edge.to === node ? edge.from : edge.to;
+            const conf = readEdgeConfidence(edge);
+            // Defense in depth: the adjacency build already drops sub-floor
+            // edges, but if a synthesized reverse edge ever bypassed that
+            // path, this guard keeps spreading activation honest.
+            if (conf < floor) continue;
+            const score = activation * edge.weight * conf * decay;
+            const reachedForSeed = reachedBySeed.get(sourceSeed);
+            if (reachedForSeed?.has(neighbor)) {
+              continue;
+            }
 
-        const edges = adj.get(node) ?? [];
-        for (const edge of edges) {
-          const neighbor = edge.to === node ? edge.from : edge.to;
-          const conf = readEdgeConfidence(edge);
-          // Defense in depth: the adjacency build already drops sub-floor
-          // edges, but if a synthesized reverse edge ever bypassed that
-          // path, this guard keeps spreading activation honest.
-          if (conf < floor) continue;
-          const score = edge.weight * conf * Math.pow(decay, hop + 1);
+            if (!seedSet.has(neighbor)) {
+              const existing = scores.get(neighbor) ?? 0;
+              scores.set(neighbor, existing + score);
 
-          if (!seedSet.has(neighbor)) {
-            const existing = scores.get(neighbor) ?? 0;
-            scores.set(neighbor, existing + score);
+              const prev = provenance.get(neighbor);
+              if (!prev || hop + 1 < prev.hopDepth || (hop + 1 === prev.hopDepth && score > prev.decayedWeight)) {
+                provenance.set(neighbor, {
+                  seed: sourceSeed,
+                  hopDepth: hop + 1,
+                  decayedWeight: score,
+                  graphType: edge.type,
+                  edgeConfidence: conf,
+                });
+              }
 
-            const prev = provenance.get(neighbor);
-            if (
-              !prev ||
-              hop + 1 < prev.hopDepth ||
-              (hop + 1 === prev.hopDepth && score > prev.decayedWeight)
-            ) {
-              provenance.set(neighbor, {
-                seed: sourceSeed,
-                hopDepth: hop + 1,
-                decayedWeight: score,
-                graphType: edge.type,
-                edgeConfidence: conf,
-              });
+              if (hop + 1 < steps) {
+                const frontierKey = `${sourceSeed}\0${neighbor}`;
+                const existingFrontier = nextFrontier.get(frontierKey);
+                if (existingFrontier) {
+                  existingFrontier.activation += score;
+                } else {
+                  nextFrontier.set(frontierKey, {
+                    node: neighbor,
+                    seed: sourceSeed,
+                    activation: score,
+                  });
+                }
+              }
             }
           }
-
-          if (!visited.has(neighbor)) {
-            visited.add(neighbor);
-            queue.push([neighbor, hop + 1, sourceSeed]);
-          }
         }
+
+        for (const { node, seed } of nextFrontier.values()) {
+          reachedBySeed.get(seed)?.add(node);
+        }
+        frontier = nextFrontier;
       }
 
       // Issue #681 PR 3/3 — optional PageRank-style refinement.
@@ -712,7 +725,7 @@ export function clampPageRankIterations(raw: unknown): number {
 export function applyPageRankRefinement(
   scores: Map<string, number>,
   adj: Map<string, GraphEdge[]>,
-  opts: { iterations: number; floor: number; damping: number },
+  opts: { iterations: number; floor: number; damping: number }
 ): void {
   const { iterations, floor, damping } = opts;
   if (iterations <= 0 || scores.size === 0) return;
@@ -793,7 +806,7 @@ export function applyPageRankRefinement(
  */
 export function applyLateralInhibition(
   scores: Map<string, number>,
-  opts: { beta: number; topM: number },
+  opts: { beta: number; topM: number }
 ): Map<string, number> {
   const { beta, topM } = opts;
   if (beta === 0 || topM === 0) return new Map(scores);
