@@ -33,9 +33,7 @@
     "url": "https://github.com/joshuaswarren/remnic/issues"
   },
   "author": "Joshua Warren",
-  "workspaces": [
-    "packages/*"
-  ],
+  "workspaces": ["packages/*"],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -203,17 +201,47 @@
     "./consolidation-provenance-check.js": {
       "import": "./dist/consolidation-provenance-check.js"
     },
+    "./delinearize": {
+      "import": "./dist/delinearize.js"
+    },
+    "./delinearize.js": {
+      "import": "./dist/delinearize.js"
+    },
+    "./embedding-fallback": {
+      "import": "./dist/embedding-fallback.js"
+    },
+    "./embedding-fallback.js": {
+      "import": "./dist/embedding-fallback.js"
+    },
+    "./enrichment": {
+      "import": "./dist/enrichment.js"
+    },
+    "./enrichment.js": {
+      "import": "./dist/enrichment.js"
+    },
     "./entity-retrieval": {
       "import": "./dist/entity-retrieval.js"
     },
     "./entity-retrieval.js": {
       "import": "./dist/entity-retrieval.js"
     },
+    "./evals": {
+      "import": "./dist/evals.js"
+    },
+    "./evals.js": {
+      "import": "./dist/evals.js"
+    },
     "./extraction": {
       "import": "./dist/extraction.js"
     },
     "./extraction.js": {
       "import": "./dist/extraction.js"
+    },
+    "./explicit-capture": {
+      "import": "./dist/explicit-capture.js"
+    },
+    "./explicit-capture.js": {
+      "import": "./dist/explicit-capture.js"
     },
     "./fallback-llm": {
       "import": "./dist/fallback-llm.js"
@@ -286,6 +314,12 @@
     },
     "./identity-continuity.js": {
       "import": "./dist/identity-continuity.js"
+    },
+    "./importance": {
+      "import": "./dist/importance.js"
+    },
+    "./importance.js": {
+      "import": "./dist/importance.js"
     },
     "./json-store": {
       "import": "./dist/json-store.js"
@@ -744,12 +778,7 @@
       "import": "./dist/transfer/types.js"
     }
   },
-  "files": [
-    "dist",
-    "bin/engram-access.js",
-    "openclaw.plugin.json",
-    "scripts/ensure-better-sqlite3.mjs"
-  ],
+  "files": ["dist", "bin/engram-access.js", "openclaw.plugin.json", "scripts/ensure-better-sqlite3.mjs"],
   "dependencies": {
     "@honcho-ai/sdk": "^2.0.0",
     "@lancedb/lancedb": "^0.26.2",
@@ -772,9 +801,7 @@
   },
   "openclaw": {
     "plugin": "./openclaw.plugin.json",
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "extensions": ["./dist/index.js"]
   },
   "scripts": {
     "sync:openclaw-plugin": "node scripts/sync-openclaw-plugin.mjs",
@@ -827,12 +854,6 @@
     "typescript": "^5.9.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "sharp",
-      "koffi",
-      "protobufjs"
-    ]
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp", "koffi", "protobufjs"]
   }
 }

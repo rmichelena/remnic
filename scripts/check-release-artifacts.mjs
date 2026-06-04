@@ -53,6 +53,18 @@ await Promise.all(requiredFiles.map(assertFile));
 
 await Promise.all(
   [
+    "remnic-workspace/delinearize",
+    "remnic-workspace/delinearize.js",
+    "remnic-workspace/embedding-fallback",
+    "remnic-workspace/embedding-fallback.js",
+    "remnic-workspace/enrichment",
+    "remnic-workspace/enrichment.js",
+    "remnic-workspace/evals",
+    "remnic-workspace/evals.js",
+    "remnic-workspace/explicit-capture",
+    "remnic-workspace/explicit-capture.js",
+    "remnic-workspace/importance",
+    "remnic-workspace/importance.js",
     "remnic-workspace/migrate/from-engram",
     "remnic-workspace/lcm",
     "remnic-workspace/lcm/engine",
