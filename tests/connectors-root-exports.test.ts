@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -66,8 +67,41 @@ test("root package export map exposes compat and source shims", async () => {
     ["extraction", "./dist/extraction.js"],
     ["secure-store", "./dist/secure-store/index.js"],
     ["secure-store/index", "./dist/secure-store/index.js"],
+    ["temporal-index", "./dist/temporal-index.js"],
+    ["temporal-validity", "./dist/temporal-validity.js"],
   ] as const) {
     assert.deepEqual(exportsMap[`./${subpath}`], { import: expectedTarget }, subpath);
     assert.deepEqual(exportsMap[`./${subpath}.js`], { import: expectedTarget }, `${subpath}.js`);
+  }
+});
+
+test("root package resolver exposes temporal shims", () => {
+  for (const subpath of ["temporal-index", "temporal-validity"] as const) {
+    const expectedUrl = new URL(`../dist/${subpath}.js`, import.meta.url).href;
+    assert.equal(import.meta.resolve(`remnic-workspace/${subpath}`), expectedUrl, subpath);
+    assert.equal(import.meta.resolve(`remnic-workspace/${subpath}.js`), expectedUrl, `${subpath}.js`);
+  }
+});
+
+test("root build emits temporal shim artifacts", () => {
+  const tsupConfig = readFileSync(new URL("../tsup.config.ts", import.meta.url), "utf8");
+
+  for (const entry of ["src/temporal-index.ts", "src/temporal-validity.ts"] as const) {
+    assert.match(tsupConfig, new RegExp(`"${entry}"`), entry);
+  }
+});
+
+test("root temporal index shim preserves public core exports", () => {
+  const shimSource = readFileSync(new URL("../src/temporal-index.ts", import.meta.url), "utf8");
+
+  for (const exportName of [
+    "indexMemory",
+    "indexesExist",
+    "isTemporalQuery",
+    "queryByTagsAsync",
+    "recencyWindowFromPrompt",
+    "resolvePromptTagPrefilterAsync",
+  ] as const) {
+    assert.match(shimSource, new RegExp(`\\b${exportName}\\b`), exportName);
   }
 });
