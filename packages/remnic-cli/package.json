@@ -1,6 +1,6 @@
 {
   "name": "@remnic/cli",
-  "version": "9.3.608",
+  "version": "9.3.609",
   "description": "CLI for Remnic memory — init, query, doctor, daemon management",
   "type": "module",
   "main": "dist/index.js",
@@ -39,15 +39,15 @@
     "yaml": "^2.4.2"
   },
   "peerDependencies": {
-    "@remnic/bench": "^9.3.608",
-    "@remnic/export-weclone": "^9.3.608",
-    "@remnic/import-weclone": "^9.3.608",
-    "@remnic/import-chatgpt": "^9.3.608",
-    "@remnic/import-claude": "^9.3.608",
-    "@remnic/import-gemini": "^9.3.608",
-    "@remnic/import-lossless-claw": "^9.3.608",
-    "@remnic/import-mem0": "^9.3.608",
-    "@remnic/import-supermemory": "^9.3.608"
+    "@remnic/bench": "^9.3.609",
+    "@remnic/export-weclone": "^9.3.609",
+    "@remnic/import-weclone": "^9.3.609",
+    "@remnic/import-chatgpt": "^9.3.609",
+    "@remnic/import-claude": "^9.3.609",
+    "@remnic/import-gemini": "^9.3.609",
+    "@remnic/import-lossless-claw": "^9.3.609",
+    "@remnic/import-mem0": "^9.3.609",
+    "@remnic/import-supermemory": "^9.3.609"
   },
   "peerDependenciesMeta": {
     "@remnic/bench": {
