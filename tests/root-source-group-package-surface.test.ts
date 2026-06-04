@@ -10,7 +10,18 @@ type RootPackageJson = {
   exports?: Record<string, { import?: string }>;
 };
 
-const sourceGroupShims = ["qmd", "reconstruct", "retrieval", "retrieval-agents"] as const;
+const sourceGroupShims = [
+  "delinearize",
+  "embedding-fallback",
+  "enrichment",
+  "evals",
+  "explicit-capture",
+  "importance",
+  "qmd",
+  "reconstruct",
+  "retrieval",
+  "retrieval-agents",
+] as const;
 
 test("root source-group shims are exported and built as package subpaths", async () => {
   const [packageJsonRaw, tsupConfigRaw] = await Promise.all([
