@@ -23,106 +23,93 @@ function page(id: string): SchemaTierPage {
 }
 
 test("extractRankedPageIds preserves dotted and slash-delimited IDs", () => {
-  const pages = [
-    page("project.alpha/task-1"),
-    page("project.alpha/task-2"),
-  ];
+  const pages = [page("project.alpha/task-1"), page("project.alpha/task-2")];
 
   assert.deepEqual(
-    extractRankedPageIds(
-      "recall hit\npage_id: project.alpha/task-2\npage_id: project.alpha/task-1",
-      pages,
-    ),
-    ["project.alpha/task-2", "project.alpha/task-1"],
+    extractRankedPageIds("recall hit\npage_id: project.alpha/task-2\npage_id: project.alpha/task-1", pages),
+    ["project.alpha/task-2", "project.alpha/task-1"]
   );
 });
 
 test("extractRankedPageIds ignores trailing punctuation on known IDs", () => {
-  const pages = [
-    page("task-1"),
-    page("project.alpha/task-2"),
-  ];
+  const pages = [page("task-1"), page("project.alpha/task-2")];
 
-  assert.deepEqual(
-    extractRankedPageIds(
-      "recall hit\npage_id: task-1,\npage_id: project.alpha/task-2)",
-      pages,
-    ),
-    ["task-1", "project.alpha/task-2"],
-  );
+  assert.deepEqual(extractRankedPageIds("recall hit\npage_id: task-1,\npage_id: project.alpha/task-2)", pages), [
+    "task-1",
+    "project.alpha/task-2",
+  ]);
 });
 
 test("extractRankedPageIds ignores leading wrappers on known IDs", () => {
-  const pages = [
-    page("task-1"),
-    page("project.alpha/task-2"),
-  ];
+  const pages = [page("task-1"), page("project.alpha/task-2")];
 
-  assert.deepEqual(
-    extractRankedPageIds(
-      'recall hit\npage_id: "task-1"\npage_id: (project.alpha/task-2)',
-      pages,
-    ),
-    ["task-1", "project.alpha/task-2"],
-  );
+  assert.deepEqual(extractRankedPageIds('recall hit\npage_id: "task-1"\npage_id: (project.alpha/task-2)', pages), [
+    "task-1",
+    "project.alpha/task-2",
+  ]);
 });
 
 test("extractRankedPageIds resolves known IDs case-insensitively", () => {
   const pages = [page("Project.Alpha/Task-1")];
 
-  assert.deepEqual(
-    extractRankedPageIds("page_id: PROJECT.ALPHA/TASK-1", pages),
-    ["Project.Alpha/Task-1"],
-  );
+  assert.deepEqual(extractRankedPageIds("page_id: PROJECT.ALPHA/TASK-1", pages), ["Project.Alpha/Task-1"]);
 });
 
 test("extractRankedPageIds ignores page_id substrings inside larger keys", () => {
   const pages = [page("task-1"), page("task-2")];
 
-  assert.deepEqual(
-    extractRankedPageIds(
-      "homepage_id: task-1\nprevious_page_id: task-2\npage_id: task-2",
-      pages,
-    ),
-    ["task-2"],
-  );
+  assert.deepEqual(extractRankedPageIds("homepage_id: task-1\nprevious_page_id: task-2\npage_id: task-2", pages), [
+    "task-2",
+  ]);
 });
 
 test("extractRankedPageIds keeps unknown IDs in recall order", () => {
   const pages = [page("known")];
 
+  assert.deepEqual(extractRankedPageIds("page_id: unknown.value,\npage_id: known", pages), ["unknown.value", "known"]);
+});
+
+test("extractRankedPageIds deduplicates canonical IDs in first-seen order", () => {
+  const pages = [page("Expected"), page("next")];
+
   assert.deepEqual(
-    extractRankedPageIds("page_id: unknown.value,\npage_id: known", pages),
-    ["unknown.value", "known"],
+    extractRankedPageIds('page_id: expected,\npage_id: "EXPECTED"\npage_id: next\npage_id: (expected)', pages),
+    ["Expected", "next"]
   );
 });
 
-test("extractRankedPageIds keeps duplicate hits as occupied ranking slots", () => {
-  const pages = [page("expected")];
+test("extractRankedPageIds can preserve repeated known IDs as occupied miss slots", () => {
+  const pages = [page("Expected"), page("next")];
 
   assert.deepEqual(
-    extractRankedPageIds(
-      "page_id: wrong\npage_id: wrong\npage_id: expected",
-      pages,
-    ),
-    ["wrong", "wrong", "expected"],
+    extractRankedPageIds('page_id: expected,\npage_id: "EXPECTED"\npage_id: next\npage_id: (expected)', pages, {
+      preserveDuplicateRankSlots: true,
+    }),
+    ["Expected", "__duplicate_page_id_slot__:2:Expected", "next", "__duplicate_page_id_slot__:3:Expected"]
   );
+});
+
+test("extractRankedPageIds preserves repeated unknown IDs as occupied ranking slots", () => {
+  const pages = [page("expected")];
+
+  assert.deepEqual(extractRankedPageIds("page_id: bogus\npage_id: bogus\npage_id: expected", pages), [
+    "bogus",
+    "bogus",
+    "expected",
+  ]);
 });
 
 test("extractRankedPageIds does not rescan markers inside extracted values", () => {
   const pages = [page("known")];
 
-  assert.deepEqual(
-    extractRankedPageIds("page_id: some-page_id:-thing\npage_id: known", pages),
-    ["some-page_id:-thing", "known"],
-  );
+  assert.deepEqual(extractRankedPageIds("page_id: some-page_id:-thing\npage_id: known", pages), [
+    "some-page_id:-thing",
+    "known",
+  ]);
 });
 
 test("extractRankedPageIds does not let a blank marker consume the next marker", () => {
   const pages = [page("expected")];
 
-  assert.deepEqual(
-    extractRankedPageIds("page_id:\npage_id: expected", pages),
-    ["expected"],
-  );
+  assert.deepEqual(extractRankedPageIds("page_id:\npage_id: expected", pages), ["expected"]);
 });

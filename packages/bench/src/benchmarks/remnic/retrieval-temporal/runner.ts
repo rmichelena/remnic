@@ -3,24 +3,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type {
-  BenchmarkDefinition,
-  BenchmarkResult,
-  ResolvedRunBenchmarkOptions,
-  TaskResult,
-} from "../../../types.js";
-import { getGitSha, getRemnicVersion } from "../../../reporter.js";
 import type { SchemaTierPage } from "../../../fixtures/schema-tiers/index.js";
-import {
-  buildTieredAggregates,
-} from "../retrieval-shared.js";
+import { getGitSha, getRemnicVersion } from "../../../reporter.js";
+import type { BenchmarkDefinition, BenchmarkResult, ResolvedRunBenchmarkOptions, TaskResult } from "../../../types.js";
 import { extractRankedPageIds } from "../retrieval-page-ids.js";
 import { buildSchemaTierMessages } from "../retrieval-schema-messages.js";
-import {
-  RETRIEVAL_TEMPORAL_FIXTURE,
-  RETRIEVAL_TEMPORAL_SMOKE_FIXTURE,
-  type RetrievalTemporalCase,
-} from "./fixture.js";
+import { buildTieredAggregates } from "../retrieval-shared.js";
+import { RETRIEVAL_TEMPORAL_FIXTURE, RETRIEVAL_TEMPORAL_SMOKE_FIXTURE, type RetrievalTemporalCase } from "./fixture.js";
 
 export const retrievalTemporalDefinition: BenchmarkDefinition = {
   id: "retrieval-temporal",
@@ -31,16 +20,13 @@ export const retrievalTemporalDefinition: BenchmarkDefinition = {
   meta: {
     name: "retrieval-temporal",
     version: "1.0.0",
-    description:
-      "Deterministic clean-vs-dirty retrieval benchmark for temporal qrels under half-open windows.",
+    description: "Deterministic clean-vs-dirty retrieval benchmark for temporal qrels under half-open windows.",
     category: "retrieval",
     citation: "Remnic internal synthetic benchmark for issue #448",
   },
 };
 
-export async function runRetrievalTemporalBenchmark(
-  options: ResolvedRunBenchmarkOptions,
-): Promise<BenchmarkResult> {
+export async function runRetrievalTemporalBenchmark(options: ResolvedRunBenchmarkOptions): Promise<BenchmarkResult> {
   const cases = loadCases(options.mode, options.limit);
   const tasks: TaskResult[] = [];
 
@@ -52,14 +38,11 @@ export async function runRetrievalTemporalBenchmark(
     await options.system.reset(sessionId);
     await options.system.store(sessionId, buildSchemaTierMessages(sample.pages));
     await options.system.drain?.();
-    const recallText = await options.system.recall(
-      sessionId,
-      sample.query,
-      12_000,
-      { asOf: sample.window.end },
-    );
+    const recallText = await options.system.recall(sessionId, sample.query, 12_000, { asOf: sample.window.end });
     const latencyMs = Math.round(performance.now() - startedAt);
-    const retrievedPageIds = extractRankedPageIds(recallText, sample.pages);
+    const retrievedPageIds = extractRankedPageIds(recallText, sample.pages, {
+      preserveDuplicateRankSlots: true,
+    });
     const topRetrievedPageIds = retrievedPageIds.slice(0, 5);
     const matchedPageIds = matchingPageIds(retrievedPageIds, sample);
     const expectedJson = JSON.stringify({
@@ -136,13 +119,8 @@ export async function runRetrievalTemporalBenchmark(
   };
 }
 
-function loadCases(
-  mode: "quick" | "full",
-  limit?: number,
-): RetrievalTemporalCase[] {
-  const baseCases = mode === "quick"
-    ? RETRIEVAL_TEMPORAL_SMOKE_FIXTURE
-    : RETRIEVAL_TEMPORAL_FIXTURE;
+function loadCases(mode: "quick" | "full", limit?: number): RetrievalTemporalCase[] {
+  const baseCases = mode === "quick" ? RETRIEVAL_TEMPORAL_SMOKE_FIXTURE : RETRIEVAL_TEMPORAL_FIXTURE;
 
   if (limit === undefined) {
     return baseCases;
@@ -159,17 +137,15 @@ function loadCases(
   return limited;
 }
 
-function temporalQrelAtK(
-  rankedPageIds: string[],
-  sample: RetrievalTemporalCase,
-  k: number,
-): number {
+function temporalQrelAtK(rankedPageIds: string[], sample: RetrievalTemporalCase, k: number): number {
   const pageById = new Map(sample.pages.map((page) => [page.id, page]));
   const topK = rankedPageIds.slice(0, k);
   return topK.some((pageId) => {
     const page = pageById.get(pageId);
     return page ? pageQualifies(page, sample) : false;
-  }) ? 1 : 0;
+  })
+    ? 1
+    : 0;
 }
 
 function pageQualifies(page: SchemaTierPage, sample: RetrievalTemporalCase): boolean {
@@ -177,21 +153,14 @@ function pageQualifies(page: SchemaTierPage, sample: RetrievalTemporalCase): boo
   return pageHasTemporalEvidenceInWindow(page, sample.window.start, sample.window.end);
 }
 
-function pageHasTemporalEvidenceInWindow(
-  page: SchemaTierPage,
-  startIso: string,
-  endIso: string,
-): boolean {
+function pageHasTemporalEvidenceInWindow(page: SchemaTierPage, startIso: string, endIso: string): boolean {
   const { startMs, endMs } = validateHalfOpenWindow(startIso, endIso);
 
   const evidenceTimestamps = collectEvidenceTimestamps(page);
   return evidenceTimestamps.some((timestamp) => timestamp >= startMs && timestamp < endMs);
 }
 
-function validateHalfOpenWindow(
-  startIso: string,
-  endIso: string,
-): { startMs: number; endMs: number } {
+function validateHalfOpenWindow(startIso: string, endIso: string): { startMs: number; endMs: number } {
   const startMs = parseStrictIsoTimestamp(startIso);
   const endMs = parseStrictIsoTimestamp(endIso);
 
@@ -208,7 +177,7 @@ function validateExpectedPageIds(sample: RetrievalTemporalCase): void {
 
   if (missingPageIds.length > 0) {
     throw new Error(
-      `retrieval-temporal expectedPageIds must reference pages present in the fixture: ${sample.id} -> ${missingPageIds.join(", ")}`,
+      `retrieval-temporal expectedPageIds must reference pages present in the fixture: ${sample.id} -> ${missingPageIds.join(", ")}`
     );
   }
 }
@@ -244,11 +213,7 @@ function parseTimelineEntry(entry: string): number | null {
   const day = Number(match[3]);
   const date = new Date(Date.UTC(year, month - 1, day));
 
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month - 1 ||
-    date.getUTCDate() !== day
-  ) {
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
     return null;
   }
 
@@ -268,10 +233,7 @@ function parseStrictIsoTimestamp(value: string): number | null {
   return date.toISOString() === value ? date.getTime() : null;
 }
 
-function matchingPageIds(
-  rankedPageIds: string[],
-  sample: RetrievalTemporalCase,
-): string[] {
+function matchingPageIds(rankedPageIds: string[], sample: RetrievalTemporalCase): string[] {
   const pageById = new Map(sample.pages.map((page) => [page.id, page]));
   return rankedPageIds.filter((pageId) => {
     const page = pageById.get(pageId);

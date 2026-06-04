@@ -3,23 +3,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type {
-  BenchmarkDefinition,
-  BenchmarkResult,
-  ResolvedRunBenchmarkOptions,
-  TaskResult,
-} from "../../../types.js";
-import { precisionAtK } from "../../../scorer.js";
 import { getGitSha, getRemnicVersion } from "../../../reporter.js";
-import {
-  buildTieredAggregates,
-} from "../retrieval-shared.js";
+import { precisionAtK } from "../../../scorer.js";
+import type { BenchmarkDefinition, BenchmarkResult, ResolvedRunBenchmarkOptions, TaskResult } from "../../../types.js";
 import { extractRankedPageIds } from "../retrieval-page-ids.js";
 import { buildSchemaTierMessages } from "../retrieval-schema-messages.js";
-import {
-  selectRetrievalPersonalizationCases,
-  type RetrievalPersonalizationCase,
-} from "./fixture.js";
+import { buildTieredAggregates } from "../retrieval-shared.js";
+import { type RetrievalPersonalizationCase, selectRetrievalPersonalizationCases } from "./fixture.js";
 
 export const retrievalPersonalizationDefinition: BenchmarkDefinition = {
   id: "retrieval-personalization",
@@ -30,15 +20,14 @@ export const retrievalPersonalizationDefinition: BenchmarkDefinition = {
   meta: {
     name: "retrieval-personalization",
     version: "1.0.0",
-    description:
-      "Deterministic clean-vs-dirty retrieval benchmark for personal-scope ranking precision.",
+    description: "Deterministic clean-vs-dirty retrieval benchmark for personal-scope ranking precision.",
     category: "retrieval",
     citation: "Remnic internal synthetic benchmark for issue #448",
   },
 };
 
 export async function runRetrievalPersonalizationBenchmark(
-  options: ResolvedRunBenchmarkOptions,
+  options: ResolvedRunBenchmarkOptions
 ): Promise<BenchmarkResult> {
   const cases = loadCases(options.mode, options.limit);
   const tasks: TaskResult[] = [];
@@ -51,7 +40,9 @@ export async function runRetrievalPersonalizationBenchmark(
     await options.system.drain?.();
     const recallText = await options.system.recall(sessionId, sample.query, 12_000);
     const latencyMs = Math.round(performance.now() - startedAt);
-    const rankedPageIds = extractRankedPageIds(recallText, sample.pages);
+    const rankedPageIds = extractRankedPageIds(recallText, sample.pages, {
+      preserveDuplicateRankSlots: true,
+    });
     const topRetrievedPageIds = rankedPageIds.slice(0, 5);
     const expectedJson = JSON.stringify(sample.expectedPageIds);
     const actualJson = JSON.stringify(topRetrievedPageIds);
@@ -122,10 +113,7 @@ export async function runRetrievalPersonalizationBenchmark(
   };
 }
 
-function loadCases(
-  mode: "quick" | "full",
-  limit?: number,
-): RetrievalPersonalizationCase[] {
+function loadCases(mode: "quick" | "full", limit?: number): RetrievalPersonalizationCase[] {
   if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
     throw new Error("retrieval-personalization limit must be a positive integer");
   }
