@@ -49,14 +49,24 @@ async function withTrajectoryStore<T>(
 
 function llmStub() {
   let calls = 0;
+  let availableOptions: unknown;
+  let completionOptions: unknown;
   return {
     get calls() {
       return calls;
     },
-    isAvailable() {
+    get availableOptions() {
+      return availableOptions;
+    },
+    get completionOptions() {
+      return completionOptions;
+    },
+    isAvailable(options?: unknown) {
+      availableOptions = options;
       return true;
     },
-    async chatCompletion() {
+    async chatCompletion(_messages?: unknown, options?: unknown) {
+      completionOptions = options;
       calls += 1;
       return {
         content: JSON.stringify({
@@ -150,6 +160,41 @@ test("deriveCausalPromotionCandidates calls LLM when recurrence session and succ
       assert.equal(llm.calls, 1);
       assert.equal(candidates.length, 1);
       assert.equal(candidates[0]?.content, "Prefer focused regressions before broad benchmark reruns.");
+    },
+  );
+});
+
+test("deriveCausalPromotionCandidates forwards task model chain to availability and chat completion", async () => {
+  const llm = llmStub();
+  const modelChain = {
+    primary: "openai/task-primary",
+    fallbacks: ["openai/task-fallback"],
+  };
+  await withTrajectoryStore(
+    [
+      trajectory("t1", "a", "success"),
+      trajectory("t2", "b", "success"),
+      trajectory("t3", "c", "partial"),
+    ],
+    async ({ memoryDir, storeDir }) => {
+      const candidates = await deriveCausalPromotionCandidates({
+        memoryDir,
+        causalTrajectoryStoreDir: storeDir,
+        config: { minRecurrence: 3, minSessions: 2, successThreshold: 0.7 },
+        gatewayAgentId: "expensive-agent",
+        modelChain,
+        llmClient: llm,
+      });
+
+      assert.equal(llm.calls, 1);
+      assert.equal(candidates.length, 1);
+      assert.deepEqual(llm.availableOptions, { agentId: "expensive-agent", modelChain });
+      assert.deepEqual(llm.completionOptions, {
+        temperature: 0.2,
+        maxTokens: 2000,
+        agentId: "expensive-agent",
+        modelChain,
+      });
     },
   );
 });

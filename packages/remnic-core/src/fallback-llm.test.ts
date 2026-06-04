@@ -210,6 +210,31 @@ test("fallback llm tries an explicit model override before a model chain overrid
   }
 });
 
+test("fallback llm availability checks an explicit model chain override", () => {
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  assert.equal(llm.isAvailable({ modelChain: { primary: "openai/task-primary" } }), true);
+  assert.equal(llm.isAvailable({ modelChain: {} }), true);
+});
+
 test("fallback llm deduplicates a model override that matches the model chain primary", { concurrency: false }, async () => {
   clearModelsJsonCache();
   clearSecretCache();

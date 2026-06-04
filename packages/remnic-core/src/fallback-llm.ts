@@ -31,6 +31,11 @@ export interface FallbackLlmOptions {
   agentId?: string;
 }
 
+export interface FallbackLlmAvailabilityOptions {
+  agentId?: string;
+  modelChain?: AgentPersonaModelConfig;
+}
+
 export interface FallbackLlmResponse {
   content: string;
   modelUsed: string;
@@ -122,8 +127,11 @@ export class FallbackLlmClient {
   /**
    * Check if fallback is available (gateway config has at least one model).
    */
-  isAvailable(agentId?: string): boolean {
-    const models = this.getModelChain(agentId);
+  isAvailable(agentIdOrOptions?: string | FallbackLlmAvailabilityOptions): boolean {
+    const options = typeof agentIdOrOptions === "string"
+      ? { agentId: agentIdOrOptions }
+      : (agentIdOrOptions ?? {});
+    const models = this.getModelChain(options.agentId, undefined, options.modelChain);
     return models.length > 0;
   }
 
@@ -280,9 +288,11 @@ export class FallbackLlmClient {
     // Resolve the model config: explicit task chain, agent persona chain, or global defaults
     let modelConfig: AgentPersonaModelConfig | undefined;
 
-    if (modelChainOverride) {
+    if (modelChainOverride?.primary) {
       modelConfig = modelChainOverride;
       log.debug("fallback LLM: using explicit model chain override");
+    } else if (modelChainOverride) {
+      log.warn("fallback LLM: ignoring explicit model chain override without primary model");
     }
 
     if (!modelConfig && agentId) {

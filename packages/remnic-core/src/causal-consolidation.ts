@@ -18,7 +18,7 @@ import { readChainIndex, resolveChainsDir, type CausalChainIndex, type CausalEdg
 import { listJsonFiles, readJsonFile } from "./json-store.js";
 import { isRecord } from "./store-contract.js";
 import { FallbackLlmClient, fallbackLlmRuntimeContextFromConfig } from "./fallback-llm.js";
-import type { GatewayConfig, MemoryFile, PluginConfig } from "./types.js";
+import type { AgentPersonaModelConfig, GatewayConfig, MemoryFile, PluginConfig } from "./types.js";
 import path from "node:path";
 import { log } from "./logger.js";
 import { runPostConsolidationMaterialize } from "./connectors/codex-materialize-runner.js";
@@ -64,10 +64,10 @@ export interface LlmConsolidationResult {
 const CAUSAL_RULE_CATEGORIES = new Set(["rule", "principle", "preference"]);
 
 interface ConsolidationLlmClient {
-  isAvailable(agentId?: string): boolean;
+  isAvailable(options?: { agentId?: string; modelChain?: AgentPersonaModelConfig }): boolean;
   chatCompletion(
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-    options?: { temperature?: number; maxTokens?: number; agentId?: string },
+    options?: { temperature?: number; maxTokens?: number; agentId?: string; modelChain?: AgentPersonaModelConfig },
   ): Promise<{ content: string } | null>;
 }
 
@@ -188,14 +188,14 @@ If no clear patterns exist, return {"rules": [], "preferences": []}.`;
 async function consolidateWithLlm(
   context: string,
   llm: ConsolidationLlmClient,
-  agentId?: string,
+  options: { agentId?: string; modelChain?: AgentPersonaModelConfig } = {},
 ): Promise<LlmConsolidationResult> {
   const response = await llm.chatCompletion(
     [
       { role: "system", content: CONSOLIDATION_PROMPT },
       { role: "user", content: context },
     ],
-    { temperature: 0.2, maxTokens: 2000, agentId },
+    { temperature: 0.2, maxTokens: 2000, agentId: options.agentId, modelChain: options.modelChain },
   );
 
   if (!response?.content) {
@@ -369,6 +369,7 @@ export async function deriveCausalPromotionCandidates(options: {
   config: ConsolidationConfig;
   gatewayConfig?: GatewayConfig;
   gatewayAgentId?: string;
+  modelChain?: AgentPersonaModelConfig;
   workspaceDir?: string;
   pluginConfig?: PluginConfig;
   llmClient?: ConsolidationLlmClient;
@@ -400,13 +401,14 @@ export async function deriveCausalPromotionCandidates(options: {
           })
         : { workspaceDir: options.workspaceDir },
     );
-    if (!llm.isAvailable(options.gatewayAgentId)) {
+    const llmOptions = { agentId: options.gatewayAgentId, modelChain: options.modelChain };
+    if (!llm.isAvailable(llmOptions)) {
       log.debug("[cmc] no LLM available for consolidation — skipping");
       return [];
     }
 
     // Call LLM for pattern analysis
-    const result = await consolidateWithLlm(context, llm, options.gatewayAgentId);
+    const result = await consolidateWithLlm(context, llm, llmOptions);
     const candidates = llmResultToCandidates(result);
 
     log.debug(`[cmc] LLM consolidation produced ${candidates.length} rule(s) and ${result.preferences.length} preference(s)`);
@@ -426,6 +428,7 @@ export async function synthesizeCausalPreferencesViaLlm(options: {
   causalTrajectoryStoreDir?: string;
   gatewayConfig?: GatewayConfig;
   gatewayAgentId?: string;
+  modelChain?: AgentPersonaModelConfig;
   workspaceDir?: string;
   minTrajectories?: number;
 }): Promise<string | null> {
@@ -440,9 +443,10 @@ export async function synthesizeCausalPreferencesViaLlm(options: {
     const llm = new FallbackLlmClient(options.gatewayConfig, {
       workspaceDir: options.workspaceDir,
     });
-    if (!llm.isAvailable(options.gatewayAgentId)) return null;
+    const llmOptions = { agentId: options.gatewayAgentId, modelChain: options.modelChain };
+    if (!llm.isAvailable(llmOptions)) return null;
 
-    const result = await consolidateWithLlm(context, llm, options.gatewayAgentId);
+    const result = await consolidateWithLlm(context, llm, llmOptions);
     if (result.preferences.length === 0 && result.rules.length === 0) return null;
 
     const lines: string[] = ["## Behavioral Insights (from Causal Chain Analysis)", ""];
