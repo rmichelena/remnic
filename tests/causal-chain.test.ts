@@ -1,20 +1,20 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile } from "node:fs/promises";
+import test from "node:test";
 import {
-  makeEdgeId,
-  validateCausalEdge,
-  scoreStitchCandidate,
-  readChainIndex,
-  writeChainIndex,
-  resolveChainsDir,
-  stitchCausalChain,
-  type CausalEdge,
   type CausalChainIndex,
+  type CausalEdge,
+  makeEdgeId,
+  readChainIndex,
+  resolveChainsDir,
+  scoreStitchCandidate,
+  stitchCausalChain,
+  validateCausalEdge,
+  writeChainIndex,
 } from "../src/causal-chain.js";
-import { recordCausalTrajectory, type CausalTrajectoryRecord } from "../src/causal-trajectory.js";
+import { type CausalTrajectoryRecord, recordCausalTrajectory } from "../src/causal-trajectory.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ test("validateCausalEdge rejects invalid schemaVersion", () => {
       confidence: 0.5,
       stitchMethod: "lexical",
       createdAt: "2026-03-16T10:00:00.000Z",
-    }),
+    })
   );
 });
 
@@ -77,7 +77,7 @@ test("validateCausalEdge rejects invalid edgeType", () => {
       confidence: 0.5,
       stitchMethod: "lexical",
       createdAt: "2026-03-16T10:00:00.000Z",
-    }),
+    })
   );
 });
 
@@ -92,7 +92,7 @@ test("validateCausalEdge rejects confidence out of range", () => {
       confidence: 1.5,
       stitchMethod: "lexical",
       createdAt: "2026-03-16T10:00:00.000Z",
-    }),
+    })
   );
 });
 
@@ -192,6 +192,23 @@ test("scoreStitchCandidate returns zero for unrelated trajectories", () => {
   const result = scoreStitchCandidate(newTraj, candidate);
   // unrelated goals with no overlapping tokens/entities should score low
   assert.ok(result.score < 2.5, `Expected low score for unrelated, got ${result.score}`);
+});
+
+test("scoreStitchCandidate does not inflate CJK n-gram overlap for opposite goals", () => {
+  const newTraj = makeTrajectory({
+    trajectoryId: "new-1",
+    sessionKey: "session-2",
+    goal: "记录用户喜欢深色模式",
+    followUpSummary: "用户喜欢深色模式",
+  });
+  const candidate = makeTrajectory({
+    trajectoryId: "old-1",
+    sessionKey: "session-1",
+    goal: "用户讨厌深色模式",
+  });
+
+  const result = scoreStitchCandidate(newTraj, candidate);
+  assert.ok(result.score < 2.5, `Expected low score for opposite CJK goals, got ${result.score}`);
 });
 
 // ─── Chain Index ─────────────────────────────────────────────────────────────
@@ -360,9 +377,7 @@ test("stitchCausalChain serializes concurrent index updates", async () => {
   ]);
 
   const index = await readChainIndex(resolveChainsDir(memoryDir));
-  const destinations = new Set(
-    Object.values(index.edges).map((edge) => edge.toTrajectoryId),
-  );
+  const destinations = new Set(Object.values(index.edges).map((edge) => edge.toTrajectoryId));
   assert.ok(destinations.has("traj-new-a"));
   assert.ok(destinations.has("traj-new-b"));
 });

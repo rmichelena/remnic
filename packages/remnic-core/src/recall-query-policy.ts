@@ -1,3 +1,5 @@
+import { normalizeRecallTokens } from "./recall-tokenization.js";
+
 export type RecallPromptShape = "standard" | "instruction_heavy";
 export type CronConversationRecallMode = "auto" | "always" | "never";
 export type RecallBudgetMode = "full" | "minimal";
@@ -16,7 +18,7 @@ export interface RecallQueryPolicyResult {
   retrievalBudgetMode: RecallBudgetMode;
 }
 
-const DEFAULT_STOPWORDS = new Set([
+const DEFAULT_STOPWORDS = [
   "the",
   "and",
   "for",
@@ -72,7 +74,9 @@ const DEFAULT_STOPWORDS = new Set([
   "data",
   "gathering",
   "context",
-]);
+];
+const MAX_COMPACT_TOKENS_PER_SOURCE_TERM = 8;
+const COMPACT_IDENTIFIER_RE = /^[a-z0-9]+(?:[:_-][a-z0-9]+)+$/i;
 
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -83,6 +87,24 @@ function stripFilesystemLikePaths(text: string): string {
     .replace(/(?:^|\s)(~\/[^\s)]+)(?=\s|$)/g, " ")
     .replace(/(?:^|\s)(\/[A-Za-z0-9._\-\/]+)(?=\s|$)/g, " ")
     .replace(/(?:^|\s)([A-Za-z]:\\[^\s)]+)(?=\s|$)/g, " ");
+}
+
+function trimCompactSourceTerm(term: string): string {
+  return term.replace(/^[^\p{L}\p{N}\p{M}]+|[^\p{L}\p{N}\p{M}]+$/gu, "");
+}
+
+function splitCompactSourceTerm(term: string): string[] {
+  return term
+    .split(/[^\p{L}\p{N}\p{M}:_-]+/gu)
+    .map((part) => trimCompactSourceTerm(part))
+    .filter((part) => part.length > 0);
+}
+
+function capCompactSourceTermTokens(tokens: string[]): string[] {
+  if (tokens.length <= MAX_COMPACT_TOKENS_PER_SOURCE_TERM) return tokens;
+  const last = tokens.at(-1);
+  if (!last) return tokens.slice(0, MAX_COMPACT_TOKENS_PER_SOURCE_TERM);
+  return [...tokens.slice(0, MAX_COMPACT_TOKENS_PER_SOURCE_TERM - 1), last];
 }
 
 function isBulletOrNumberedLine(line: string): boolean {
@@ -112,16 +134,14 @@ function scoreInstructionHeavyShape(prompt: string): number {
   const headingLineCount = lines.filter(
     (line) =>
       /^(goal|output format|tone rules|grounding rules|data gathering|date computation|crm context|follow-up|social|current time|return)\b/i.test(
-        line,
-      ) || /^[A-Z][A-Z\s/-]{4,}:$/.test(line),
+        line
+      ) || /^[A-Z][A-Z\s/-]{4,}:$/.test(line)
   ).length;
   const bulletLineCount = lines.filter((line) => isBulletOrNumberedLine(line)).length;
   const longLineCount = lines.filter((line) => line.length >= 180).length;
-  const hasPathDensity =
-    (prompt.match(/(?:~\/|\/Users\/|[A-Za-z]:\\)/g)?.length ?? 0) >= 2;
+  const hasPathDensity = (prompt.match(/(?:~\/|\/Users\/|[A-Za-z]:\\)/g)?.length ?? 0) >= 2;
   const hasImperativeDensity =
-    (prompt.match(/\b(run|extract|read|parse|determine|include|omit|skip)\b/gi)?.length ?? 0) >=
-    8;
+    (prompt.match(/\b(run|extract|read|parse|determine|include|omit|skip)\b/gi)?.length ?? 0) >= 8;
 
   let score = 0;
   if (lineCount >= 24) score += 2;
@@ -139,27 +159,29 @@ export function classifyRecallPromptShape(prompt: string): RecallPromptShape {
 }
 
 function tokenizeForCompactQuery(text: string): string[] {
-  const raw = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s:_-]+/g, " ")
-    .split(/\s+/)
-    .filter((token) => token.length >= 3);
-  const deduped: string[] = [];
+  const tokens: string[] = [];
   const seen = new Set<string>();
-  for (const token of raw) {
-    if (DEFAULT_STOPWORDS.has(token)) continue;
-    if (seen.has(token)) continue;
+  const addToken = (token: string) => {
+    if (token.length === 0 || seen.has(token)) return;
     seen.add(token);
-    deduped.push(token);
+    tokens.push(token);
+  };
+
+  for (const rawTerm of text.split(/\s+/)) {
+    for (const sourceTerm of splitCompactSourceTerm(trimCompactSourceTerm(rawTerm))) {
+      if (COMPACT_IDENTIFIER_RE.test(sourceTerm)) {
+        addToken(sourceTerm.toLowerCase());
+        continue;
+      }
+      for (const token of capCompactSourceTermTokens(normalizeRecallTokens(sourceTerm, DEFAULT_STOPWORDS))) {
+        addToken(token);
+      }
+    }
   }
-  return deduped;
+  return tokens;
 }
 
-function buildInstructionHeavyQuery(
-  prompt: string,
-  tokenCap: number,
-  maxChars: number,
-): string {
+function buildInstructionHeavyQuery(prompt: string, tokenCap: number, maxChars: number): string {
   const cleaned = stripFilesystemLikePaths(prompt);
   const tokens = tokenizeForCompactQuery(cleaned).slice(0, Math.max(8, tokenCap));
   const joined = tokens.join(" ");
@@ -182,7 +204,7 @@ function buildStandardQuery(prompt: string, maxChars: number): string {
 export function buildRecallQueryPolicy(
   prompt: string,
   sessionKey: string | undefined,
-  cfg: RecallQueryPolicyConfig,
+  cfg: RecallQueryPolicyConfig
 ): RecallQueryPolicyResult {
   const normalizedPrompt = collapseWhitespace(prompt);
   const isCron = (sessionKey ?? "").includes(":cron:");
@@ -207,8 +229,8 @@ export function buildRecallQueryPolicy(
     cfg.cronConversationRecallMode === "never"
       ? true
       : cfg.cronConversationRecallMode === "always"
-      ? false
-      : promptShape === "instruction_heavy";
+        ? false
+        : promptShape === "instruction_heavy";
 
   const retrievalBudgetMode = promptShape === "instruction_heavy" ? "minimal" : "full";
 

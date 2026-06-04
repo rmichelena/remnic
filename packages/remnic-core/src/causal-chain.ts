@@ -6,20 +6,15 @@
  * another session. Persists edges in a graph index for later retrieval.
  */
 
-import path from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { listJsonFiles, readJsonFile } from "./json-store.js";
-import { resolveCausalTrajectoryStoreDir, type CausalTrajectoryRecord } from "./causal-trajectory.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { topicOverlapScore } from "./boxes.js";
-import { countRecallTokenOverlap, normalizeRecallTokens } from "./recall-tokenization.js";
-import {
-  assertIsoRecordedAt,
-  assertString,
-  isRecord,
-  recordStoreDay,
-} from "./store-contract.js";
+import { type CausalTrajectoryRecord, resolveCausalTrajectoryStoreDir } from "./causal-trajectory.js";
+import { listJsonFiles, readJsonFile } from "./json-store.js";
 import { log } from "./logger.js";
+import { normalizeRecallTokens } from "./recall-tokenization.js";
+import { assertIsoRecordedAt, assertString, isRecord, recordStoreDay } from "./store-contract.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +60,59 @@ const STITCH_WEIGHTS = {
   temporalProximity: 1.0,
 } as const;
 
+function hasUnsegmentableRecallChar(token: string): boolean {
+  if (token.includes("ー") || token.includes("ｰ")) return true;
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(token);
+}
+
+function extractUnsegmentableStitchPhrases(value: string): string[] {
+  const phrases = new Set<string>();
+  let segment = "";
+
+  const flushSegment = () => {
+    if ([...segment].length >= 4) {
+      phrases.add(segment);
+    }
+    segment = "";
+  };
+
+  for (const ch of value.toLowerCase().normalize("NFC")) {
+    if (hasUnsegmentableRecallChar(ch)) {
+      segment += ch;
+      continue;
+    }
+    if (/\p{M}/u.test(ch) && segment.length > 0) {
+      segment += ch;
+      continue;
+    }
+    if (/\s/u.test(ch) && segment.length > 0) {
+      continue;
+    }
+    flushSegment();
+  }
+  flushSegment();
+
+  return [...phrases];
+}
+
+function normalizeStitchLexicalTokens(value: string, extraStopWords: string[] = []): string[] {
+  const tokens = new Set(
+    normalizeRecallTokens(value, extraStopWords).filter((token) => !hasUnsegmentableRecallChar(token))
+  );
+  for (const phrase of extractUnsegmentableStitchPhrases(value)) {
+    tokens.add(phrase);
+  }
+  return [...tokens];
+}
+
+function countTokenSetOverlap(queryTokens: Set<string>, valueTokens: Set<string>): number {
+  let matches = 0;
+  for (const token of queryTokens) {
+    if (valueTokens.has(token)) matches += 1;
+  }
+  return matches;
+}
+
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 export function validateCausalEdge(raw: unknown): CausalEdge {
@@ -97,9 +145,7 @@ export function validateCausalEdge(raw: unknown): CausalEdge {
     createdAt: assertIsoRecordedAt(assertString(raw.createdAt, "createdAt")),
     metadata: isRecord(raw.metadata)
       ? Object.fromEntries(
-          Object.entries(raw.metadata).filter(
-            (entry): entry is [string, string] => typeof entry[1] === "string",
-          ),
+          Object.entries(raw.metadata).filter((entry): entry is [string, string] => typeof entry[1] === "string")
         )
       : undefined,
   };
@@ -108,10 +154,7 @@ export function validateCausalEdge(raw: unknown): CausalEdge {
 // ─── Stable Edge ID ──────────────────────────────────────────────────────────
 
 export function makeEdgeId(fromId: string, toId: string): string {
-  const digest = createHash("sha256")
-    .update(`${fromId}\0${toId}`)
-    .digest("hex")
-    .slice(0, 12);
+  const digest = createHash("sha256").update(`${fromId}\0${toId}`).digest("hex").slice(0, 12);
   return `edge-${digest}`;
 }
 
@@ -153,9 +196,9 @@ export async function readChainIndex(chainsDir: string): Promise<CausalChainInde
   try {
     const raw = JSON.parse(await readFile(chainIndexPath(chainsDir), "utf8"));
     return {
-      outgoing: isRecord(raw.outgoing) ? raw.outgoing as Record<string, string[]> : {},
-      incoming: isRecord(raw.incoming) ? raw.incoming as Record<string, string[]> : {},
-      edges: isRecord(raw.edges) ? raw.edges as Record<string, CausalEdge> : {},
+      outgoing: isRecord(raw.outgoing) ? (raw.outgoing as Record<string, string[]>) : {},
+      incoming: isRecord(raw.incoming) ? (raw.incoming as Record<string, string[]>) : {},
+      edges: isRecord(raw.edges) ? (raw.edges as Record<string, CausalEdge>) : {},
       updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
     };
   } catch {
@@ -202,19 +245,18 @@ function addEdgeToIndex(index: CausalChainIndex, edge: CausalEdge): void {
  */
 export function scoreStitchCandidate(
   newTrajectory: CausalTrajectoryRecord,
-  candidate: CausalTrajectoryRecord,
+  candidate: CausalTrajectoryRecord
 ): StitchCandidate {
   let score = 0;
   let dominantMethod: CausalEdge["stitchMethod"] = "lexical";
   let maxComponent = 0;
 
   // 1. Follow-up → Goal match (token overlap)
-  const newFollowUpTokens = new Set(
-    normalizeRecallTokens(newTrajectory.followUpSummary ?? "", []),
-  );
-  const candidateGoalTokens = normalizeRecallTokens(candidate.goal, []);
+  const newFollowUpTokens = new Set(normalizeStitchLexicalTokens(newTrajectory.followUpSummary ?? "", []));
+  const candidateGoalTokens = normalizeStitchLexicalTokens(candidate.goal, []);
+  const candidateGoalTokenSet = new Set(candidateGoalTokens);
   if (newFollowUpTokens.size > 0 && candidateGoalTokens.length > 0) {
-    const overlap = countRecallTokenOverlap(newFollowUpTokens, candidate.goal, []);
+    const overlap = countTokenSetOverlap(newFollowUpTokens, candidateGoalTokenSet);
     const normalized = overlap / Math.max(newFollowUpTokens.size, candidateGoalTokens.length);
     const component = normalized * STITCH_WEIGHTS.followUpToGoal;
     score += component;
@@ -225,12 +267,11 @@ export function scoreStitchCandidate(
   }
 
   // 1b. Candidate follow-up → New goal match (reverse direction)
-  const candidateFollowUpTokens = new Set(
-    normalizeRecallTokens(candidate.followUpSummary ?? "", []),
-  );
-  const newGoalTokens = normalizeRecallTokens(newTrajectory.goal, []);
+  const candidateFollowUpTokens = new Set(normalizeStitchLexicalTokens(candidate.followUpSummary ?? "", []));
+  const newGoalTokens = normalizeStitchLexicalTokens(newTrajectory.goal, []);
+  const newGoalTokenSet = new Set(newGoalTokens);
   if (candidateFollowUpTokens.size > 0 && newGoalTokens.length > 0) {
-    const overlap = countRecallTokenOverlap(candidateFollowUpTokens, newTrajectory.goal, []);
+    const overlap = countTokenSetOverlap(candidateFollowUpTokens, newGoalTokenSet);
     const normalized = overlap / Math.max(candidateFollowUpTokens.size, newGoalTokens.length);
     const component = normalized * 3.0;
     score += component;
@@ -241,11 +282,9 @@ export function scoreStitchCandidate(
   }
 
   // 2. Outcome → Goal match
-  const newOutcomeTokens = new Set(
-    normalizeRecallTokens(newTrajectory.outcomeSummary, []),
-  );
+  const newOutcomeTokens = new Set(normalizeStitchLexicalTokens(newTrajectory.outcomeSummary, []));
   if (newOutcomeTokens.size > 0) {
-    const overlap = countRecallTokenOverlap(newOutcomeTokens, candidate.goal, []);
+    const overlap = countTokenSetOverlap(newOutcomeTokens, candidateGoalTokenSet);
     const normalized = overlap / Math.max(newOutcomeTokens.size, candidateGoalTokens.length || 1);
     const component = normalized * STITCH_WEIGHTS.outcomeToGoal;
     score += component;
@@ -297,9 +336,8 @@ export function scoreStitchCandidate(
 
   // Determine edge type by heuristic
   let edgeType: CausalEdge["edgeType"] = "continuation";
-  const goalTokens = new Set(normalizeRecallTokens(newTrajectory.goal, []));
-  const candidateGoalSet = new Set(candidateGoalTokens);
-  const goalOverlap = [...goalTokens].filter((t) => candidateGoalSet.has(t)).length;
+  const goalTokens = new Set(newGoalTokens);
+  const goalOverlap = countTokenSetOverlap(goalTokens, candidateGoalTokenSet);
   const goalSimilarity = goalTokens.size > 0 ? goalOverlap / goalTokens.size : 0;
 
   if (goalSimilarity > 0.7 && candidate.outcomeKind === "failure") {
@@ -307,7 +345,7 @@ export function scoreStitchCandidate(
   } else if (goalSimilarity > 0.7 && newTrajectory.outcomeKind !== candidate.outcomeKind) {
     edgeType = "correction";
   } else if (newFollowUpTokens.size > 0 && candidateGoalTokens.length > 0) {
-    const followUpGoalOverlap = countRecallTokenOverlap(newFollowUpTokens, candidate.goal, []);
+    const followUpGoalOverlap = countTokenSetOverlap(newFollowUpTokens, candidateGoalTokenSet);
     if (followUpGoalOverlap > 0) {
       edgeType = "follow_up_to_goal";
     }
@@ -324,7 +362,7 @@ async function readRecentTrajectories(
   memoryDir: string,
   causalTrajectoryStoreDir: string | undefined,
   currentSessionKey: string,
-  lookbackDays: number,
+  lookbackDays: number
 ): Promise<CausalTrajectoryRecord[]> {
   const root = resolveCausalTrajectoryStoreDir(memoryDir, causalTrajectoryStoreDir);
   const trajectoriesDir = path.join(root, "trajectories");
@@ -370,7 +408,7 @@ export async function stitchCausalChain(options: {
     memoryDir,
     causalTrajectoryStoreDir,
     newTrajectory.sessionKey,
-    stitchConfig.lookbackDays,
+    stitchConfig.lookbackDays
   );
 
   if (candidates.length === 0) return [];
