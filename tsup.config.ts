@@ -121,6 +121,8 @@ export default defineConfig({
     "src/store-contract.ts",
     "src/summarizer.ts",
     "src/summary-snapshot.ts",
+    "src/temporal-index.ts",
+    "src/temporal-validity.ts",
     "src/threading.ts",
     "src/tmt.ts",
     "src/topics.ts",

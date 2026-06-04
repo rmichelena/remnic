@@ -747,6 +747,18 @@
     "./summary-snapshot.js": {
       "import": "./dist/summary-snapshot.js"
     },
+    "./temporal-index": {
+      "import": "./dist/temporal-index.js"
+    },
+    "./temporal-index.js": {
+      "import": "./dist/temporal-index.js"
+    },
+    "./temporal-validity": {
+      "import": "./dist/temporal-validity.js"
+    },
+    "./temporal-validity.js": {
+      "import": "./dist/temporal-validity.js"
+    },
     "./threading": {
       "import": "./dist/threading.js"
     },
