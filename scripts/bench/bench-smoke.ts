@@ -24,10 +24,10 @@
  *   1 — regression detected OR CLI usage error
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type {
   BenchJudge,
@@ -418,8 +418,20 @@ function extractMetrics(aggregates: Record<string, { mean: number }>): Record<st
   return out;
 }
 
-const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
-if (import.meta.url === invokedPath) {
+async function isDirectInvocation(argvPath: string | undefined): Promise<boolean> {
+  if (!argvPath) {
+    return false;
+  }
+
+  const [invokedPath, modulePath] = await Promise.all([
+    realpath(argvPath).catch(() => path.resolve(argvPath)),
+    realpath(fileURLToPath(import.meta.url)).catch(() => fileURLToPath(import.meta.url)),
+  ]);
+
+  return pathToFileURL(invokedPath).href === pathToFileURL(modulePath).href;
+}
+
+if (await isDirectInvocation(process.argv[1])) {
   main(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

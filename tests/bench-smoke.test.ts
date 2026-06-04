@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -16,7 +16,8 @@ const committedBaseline = path.join(repoRoot, "tests", "fixtures", "bench-smoke"
 
 function runSmoke(
   args: readonly string[],
-  cwd: string = repoRoot
+  cwd: string = repoRoot,
+  targetScript: string = scriptPath
 ): {
   code: number;
   stdout: string;
@@ -24,7 +25,7 @@ function runSmoke(
 } {
   const result = spawnSync(
     process.execPath,
-    [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), scriptPath, ...args],
+    [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), targetScript, ...args],
     {
       cwd,
       env: process.env,
@@ -70,6 +71,20 @@ test("bench-smoke creates a fresh adapter for each benchmark family", async () =
 
   assert.equal(adapters.length, 2);
   assert.notEqual(adapters[0], adapters[1]);
+});
+
+test("bench-smoke runs when invoked through a symlinked script path", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-smoke-symlink-"));
+  try {
+    const linkedScript = path.join(dir, "bench-smoke.ts");
+    await symlink(scriptPath, linkedScript);
+
+    const { code, stdout } = runSmoke(["--help"], repoRoot, linkedScript);
+    assert.equal(code, 0);
+    assert.match(stdout, /LongMemEval \+ LoCoMo smoke regression gate/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("bench-smoke rejects invalid --seed", () => {
