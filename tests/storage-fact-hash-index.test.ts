@@ -76,6 +76,37 @@ test("hasFactContentHash normalizes unsafe input to the persisted sanitized body
   }
 });
 
+test("writeMemoryFrontmatter fail-opens when fact hash index sync fails after rewriting", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "engram-fact-hash-frontmatter-failopen-"));
+  const originalSave = ContentHashIndex.prototype.save;
+  try {
+    const storage = new StorageManager(dir);
+    const id = await storage.writeMemory("fact", "Fact hash rewrite failure should not abort persistence.", {
+      source: "test",
+    });
+    const memory = await storage.getMemoryById(id);
+    assert.ok(memory, "expected written fact memory");
+
+    ContentHashIndex.prototype.save = async function failSave() {
+      throw new Error("hash index unavailable");
+    };
+
+    const updated = await storage.writeMemoryFrontmatter(memory, {
+      status: "superseded",
+      supersededBy: "replacement-id",
+      supersededAt: "2026-06-03T12:00:00.000Z",
+    });
+
+    const persisted = await readFile(memory.path, "utf-8");
+    assert.equal(updated, true);
+    assert.match(persisted, /^status: superseded$/m);
+    assert.match(persisted, /^supersededBy: replacement-id$/m);
+  } finally {
+    ContentHashIndex.prototype.save = originalSave;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Rebuild-from-frontmatter tests (issue #369 round 10 — Uhol fix)
 // ---------------------------------------------------------------------------

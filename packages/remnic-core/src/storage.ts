@@ -3226,6 +3226,35 @@ export class StorageManager {
     return ContentHashIndex.computeHash(sanitizeMemoryContent(hashSource).text);
   }
 
+  private async addActiveFactContentHash(memory: MemoryFile): Promise<void> {
+    if (memory.frontmatter.category !== "fact") return;
+    if (inferMemoryStatus(memory.frontmatter, memory.path) !== "active") return;
+    const hash = this.factContentHashForRemoval(memory);
+    if (!hash) return;
+
+    await this.ensureFactHashIndexAuthoritative();
+    const factHashIndex = await this.getFactHashIndex();
+    factHashIndex.addByHash(hash);
+    await factHashIndex.save();
+  }
+
+  private async syncFactHashIndexAfterRewrite(before: MemoryFile, after: MemoryFile): Promise<void> {
+    if (before.frontmatter.category !== "fact" && after.frontmatter.category !== "fact") return;
+
+    const beforeHash = this.factContentHashForRemoval(before);
+    const afterHash = this.factContentHashForRemoval(after);
+    const beforeStatus = inferMemoryStatus(before.frontmatter, before.path);
+    const afterStatus = inferMemoryStatus(after.frontmatter, after.path);
+    if (beforeHash === afterHash && beforeStatus === afterStatus) return;
+
+    if (beforeStatus === "active" && beforeHash && (beforeHash !== afterHash || afterStatus !== "active")) {
+      await this.removeFactContentHashesForMemories([before]);
+    }
+    if (afterStatus === "active" && afterHash && (beforeHash !== afterHash || beforeStatus !== "active")) {
+      await this.addActiveFactContentHash(after);
+    }
+  }
+
   async removeFactContentHashesForMemories(memories: MemoryFile[]): Promise<void> {
     await this.ensureFactHashIndexAuthoritative();
     const factHashIndex = await this.getFactHashIndex();
@@ -4491,6 +4520,17 @@ export class StorageManager {
     // call (Finding UvUy fix).
     if (memory.path.includes(`${path.sep}cold${path.sep}`)) {
       this.invalidateColdMemoriesCache();
+    }
+    try {
+      await this.syncFactHashIndexAfterRewrite(
+        memory,
+        {
+          ...memory,
+          frontmatter: updated,
+        },
+      );
+    } catch (err) {
+      log.warn(`storage.writeMemoryFrontmatter completed but failed to update fact hash index: ${err}`);
     }
     await this.appendGeneratedMemoryLifecycleEventFailOpen(
       "storage.writeMemoryFrontmatter",

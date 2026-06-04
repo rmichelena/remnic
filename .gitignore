@@ -1,5 +1,6 @@
 # Build output
 dist/
+packages/belief-ledger/dist/
 *.map
 __pycache__/
 *.pyc

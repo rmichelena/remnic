@@ -37,6 +37,10 @@ async function makeFixture() {
   return { root, home, stateHome, transcript };
 }
 
+async function removeFixture(fixture) {
+  await rm(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 function runHook(hookCase, fixture, sessionId) {
   return spawnSync("bash", [hookCase.scriptPath], {
     cwd: process.cwd(),
@@ -94,7 +98,7 @@ for (const hookCase of hookCases) {
       assert.equal(existsSync(path.join(os.tmpdir(), `remnic-cursor-${sessionId}`)), false);
       assert.equal(existsSync(path.join(os.tmpdir(), `engram-cursor-${sessionId}`)), false);
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
       await rm(path.join(os.tmpdir(), `remnic-cursor-${sessionId}`), { force: true });
       await rm(path.join(os.tmpdir(), `engram-cursor-${sessionId}`), { force: true });
     }
@@ -124,7 +128,7 @@ for (const hookCase of hookCases) {
 
       assert.equal(await readFile(symlinkTarget, "utf8"), "unchanged\n");
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
     }
   });
 
@@ -152,7 +156,7 @@ for (const hookCase of hookCases) {
 
       assert.equal(existsSync(remnicCursorPath), false);
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
     }
   });
 
@@ -183,7 +187,7 @@ for (const hookCase of hookCases) {
       assert.equal(await readFile(cursorPath, "utf8"), "1\n");
       assert.equal(existsSync(tmpCursorPath), false);
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
       await rm(tmpCursorPath, { force: true });
     }
   });
@@ -219,7 +223,7 @@ for (const hookCase of hookCases) {
       assert.equal(existsSync(remnicTmpCursorPath), false);
       assert.equal(existsSync(engramTmpCursorPath), false);
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
       await rm(remnicTmpCursorPath, { force: true });
       await rm(engramTmpCursorPath, { force: true });
     }
@@ -245,7 +249,7 @@ for (const hookCase of hookCases) {
 
       assert.equal(await readFile(cursorPath, "utf8"), "0\n");
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      await removeFixture(fixture);
     }
   });
 }
@@ -282,7 +286,7 @@ test("codex package session-end skips final flush when cursor is unsafe", async 
     assert.doesNotMatch(logContent, /final flush for /);
     assert.equal(await readFile(symlinkTarget, "utf8"), "unchanged\n");
   } finally {
-    await rm(fixture.root, { recursive: true, force: true });
+    await removeFixture(fixture);
   }
 });
 
@@ -312,7 +316,7 @@ test("codex package session-end migrates tmp cursor before final flush", async (
       assert.doesNotMatch(await readFile(logPath, "utf8"), /final flush for /);
     }
   } finally {
-    await rm(fixture.root, { recursive: true, force: true });
+    await removeFixture(fixture);
     await rm(remnicTmpCursorPath, { force: true });
     await rm(engramTmpCursorPath, { force: true });
   }

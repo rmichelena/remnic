@@ -839,6 +839,34 @@ test("entity retrieval can surface relevant structured section facts for mixed e
   assert.match(section!, /Alice Example prefers small teams owning whole systems\./);
 });
 
+test("entity retrieval suppresses inactive belief-ledger facts by latest claim status", async () => {
+  const { config, storage } = await buildHarness("engram-entity-belief-ledger-status-filter");
+  await storage.writeEntity("Memory Tools", "topic", [], {
+    structuredSections: [
+      {
+        key: "belief-ledger",
+        title: "Belief Ledger",
+        facts: [
+          "claim=claim-1; status=active; updatedAt=2026-06-01T00:00:00.000Z; claim: Memory Tools will ship the local ledger.",
+          "claim=claim-1; status=ignored; updatedAt=2026-06-02T00:00:00.000Z; claim: Memory Tools will ship the local ledger.",
+          "claim=claim-2; status=active; updatedAt=2026-06-03T00:00:00.000Z; claim: Memory Tools preserve current beliefs.",
+          "claim=claim-3; status=ignored; updatedAt=2026-06-03T00:00:00.000Z; claim: Memory Tools use stale conflict notes.",
+          "claim=claim-3; status=active; updatedAt=2026-06-03T00:00:00.000Z; claim: Memory Tools use stale conflict notes.",
+        ],
+      },
+    ],
+  });
+
+  const section = await buildSection(config, storage, "What do we know about Memory Tools?");
+
+  assert.ok(section);
+  assert.match(section!, /Memory Tools preserve current beliefs\./);
+  assert.doesNotMatch(section!, /local ledger/);
+  assert.doesNotMatch(section!, /stale conflict notes/);
+  assert.doesNotMatch(section!, /claim=claim-2/);
+  assert.doesNotMatch(section!, /status=active/);
+});
+
 test("entity retrieval does not prefer fallback structured section facts over timeline evidence when a summary exists", async () => {
   const { config, storage } = await buildHarness("engram-entity-direct-structured-fallback-summary");
   await storage.writeEntity("Alice Example", "person", [], {
