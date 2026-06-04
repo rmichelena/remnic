@@ -15,8 +15,10 @@
  * - Both indexes are plain JSON; no external dependencies
  */
 
-import * as fs from "fs";
-import * as path from "path";
+import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export interface TemporalIndex {
   /** version bumped when schema changes */
@@ -46,6 +48,19 @@ const INDEX_VERSION = 1;
 const TEMPORAL_INDEX_FILE = "index_time.json";
 const TAG_INDEX_FILE = "index_tags.json";
 const TAG_INDEX_VERSION = 2;
+const INDEX_LOCK_STALE_MS = 60_000;
+const INDEX_LOCK_POLL_MS = 10;
+const INDEX_PROCESS_START_TOLERANCE_MS = 2_000;
+const INDEX_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+const INDEX_PROCESS_STARTED_AT_MS = Date.now() - process.uptime() * 1000;
+
+interface IndexLockOwner {
+  pid: number;
+  createdAt?: string;
+  processStartedAtMs?: number;
+}
+
+type IndexLockCleanupResult = "removed" | "wait" | "blocked";
 
 function stateDir(memoryDir: string): string {
   return path.join(memoryDir, "state");
@@ -83,20 +98,184 @@ function writeJsonSafe(filePath: string, data: unknown): void {
   }
 }
 
+function sleepSync(ms: number): void {
+  Atomics.wait(INDEX_LOCK_SLEEP, 0, 0, ms);
+}
+
+function uniqueTempPath(filePath: string): string {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const nonce = crypto.randomBytes(6).toString("hex");
+  return path.join(dir, `.${base}.${process.pid}.${Date.now()}.${nonce}.tmp`);
+}
+
+function lockOwnerPath(lockDir: string): string {
+  return path.join(lockDir, "owner.json");
+}
+
+function writeIndexLockOwner(lockDir: string): void {
+  try {
+    fs.writeFileSync(
+      lockOwnerPath(lockDir),
+      JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+        processStartedAtMs: INDEX_PROCESS_STARTED_AT_MS,
+      }),
+      {
+        encoding: "utf8",
+        flag: "wx",
+      }
+    );
+  } catch {
+    // Fail silently — the directory lock is still the serialization primitive.
+  }
+}
+
+function readIndexLockOwner(lockDir: string): IndexLockOwner | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(lockOwnerPath(lockDir), "utf8")) as { pid?: unknown };
+    if (!(typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0)) return null;
+    const owner: IndexLockOwner = { pid: parsed.pid };
+    if (
+      "createdAt" in parsed &&
+      typeof (parsed as { createdAt?: unknown }).createdAt === "string" &&
+      (parsed as { createdAt: string }).createdAt.length > 0
+    ) {
+      owner.createdAt = (parsed as { createdAt: string }).createdAt;
+    }
+    const processStartedAtMs = (parsed as { processStartedAtMs?: unknown }).processStartedAtMs;
+    if (typeof processStartedAtMs === "number" && Number.isFinite(processStartedAtMs) && processStartedAtMs > 0) {
+      owner.processStartedAtMs = processStartedAtMs;
+    }
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    return code === "EPERM";
+  }
+}
+
+function readProcessStartedAtMs(pid: number): number | null {
+  try {
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1_000,
+    }).trim();
+    if (!output) return null;
+    const startedAtMs = Date.parse(output);
+    return Number.isFinite(startedAtMs) ? startedAtMs : null;
+  } catch {
+    return null;
+  }
+}
+
+function lockOwnerIsRunning(owner: IndexLockOwner): boolean {
+  if (!processIsAlive(owner.pid)) return false;
+  if (owner.processStartedAtMs === undefined) return true;
+  const runningStartedAtMs = readProcessStartedAtMs(owner.pid);
+  if (runningStartedAtMs === null) return true;
+  return runningStartedAtMs <= owner.processStartedAtMs + INDEX_PROCESS_START_TOLERANCE_MS;
+}
+
+function removeAbandonedIndexLock(lockDir: string): IndexLockCleanupResult {
+  try {
+    const info = fs.lstatSync(lockDir);
+    if (info.isSymbolicLink()) return "blocked";
+    if (!info.isDirectory()) {
+      fs.rmSync(lockDir, { force: true });
+      return "removed";
+    }
+    const owner = readIndexLockOwner(lockDir);
+    if (owner !== null && lockOwnerIsRunning(owner)) return "wait";
+    if (owner === null && Date.now() - info.mtimeMs < INDEX_LOCK_STALE_MS) return "wait";
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    return "removed";
+  } catch {
+    // Fail silently — indexes are advisory only
+    return "blocked";
+  }
+}
+
+function withIndexFileLock(filePath: string, update: () => void): void {
+  const lockDir = `${filePath}.lock.d`;
+  let acquired = false;
+
+  while (!acquired) {
+    try {
+      fs.mkdirSync(lockDir);
+      writeIndexLockOwner(lockDir);
+      acquired = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") return;
+      const cleanupResult = removeAbandonedIndexLock(lockDir);
+      if (cleanupResult === "blocked") return;
+      sleepSync(INDEX_LOCK_POLL_MS);
+    }
+  }
+
+  try {
+    update();
+  } finally {
+    try {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+      // Fail silently — indexes are advisory only
+    }
+  }
+}
+
 /**
- * Atomic write: write to a `.tmp` sibling then rename so readers never
- * observe a partially-written file.  Falls back to direct write on error.
+ * Atomic write: write to a unique `.tmp` sibling then rename so readers never
+ * observe a partially-written file.
  */
 function writeJsonAtomic(filePath: string, data: unknown): void {
-  const tmp = `${filePath}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(tmp, filePath);
-  } catch {
-    // Attempt direct write as fallback; indexes are advisory only
-    writeJsonSafe(filePath, data);
-    try { fs.unlinkSync(tmp); } catch { /* ignore stale tmp */ }
+  const payload = JSON.stringify(data, null, 2);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const tmp = uniqueTempPath(filePath);
+    try {
+      fs.writeFileSync(tmp, payload, "utf8");
+      fs.renameSync(tmp, filePath);
+      return;
+    } catch {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // Fail silently — indexes are advisory only
+      }
+      sleepSync(INDEX_LOCK_POLL_MS);
+    }
   }
+}
+
+function updateTemporalIndex(memoryDir: string, update: (index: TemporalIndex) => void): void {
+  const indexPath = temporalIndexPath(memoryDir);
+  withIndexFileLock(indexPath, () => {
+    const index = readJsonSafe<TemporalIndex>(indexPath, { version: INDEX_VERSION, dates: {} });
+    update(index);
+    writeJsonAtomic(indexPath, index);
+  });
+}
+
+function updateTagIndex(memoryDir: string, update: (index: TagIndex) => void): void {
+  const indexPath = tagIndexPath(memoryDir);
+  withIndexFileLock(indexPath, () => {
+    const index = normalizeTagIndex(
+      readJsonSafe<TagIndex>(indexPath, { version: TAG_INDEX_VERSION, tags: {}, aliases: {} })
+    );
+    update(index);
+    writeJsonAtomic(indexPath, index);
+  });
 }
 
 function isoDateFromTimestamp(isoString: string): string {
@@ -353,31 +532,22 @@ function promptContainsAlias(prompt: string, alias: string): boolean {
  * @param createdAt ISO timestamp of the memory's creation date
  * @param tags Array of tag strings from the memory's frontmatter
  */
-export function indexMemory(
-  memoryDir: string,
-  memoryPath: string,
-  createdAt: string,
-  tags: string[],
-): void {
+export function indexMemory(memoryDir: string, memoryPath: string, createdAt: string, tags: string[]): void {
   try {
     ensureStateDir(memoryDir);
 
-    // Temporal index
-    const tPath = temporalIndexPath(memoryDir);
-    const tIndex = readJsonSafe<TemporalIndex>(tPath, { version: INDEX_VERSION, dates: {} });
     const dateKey = isoDateFromTimestamp(createdAt);
-    addPathToSet(tIndex.dates, dateKey, memoryPath);
-    writeJsonAtomic(tPath, tIndex);
+    updateTemporalIndex(memoryDir, (index) => {
+      addPathToSet(index.dates, dateKey, memoryPath);
+    });
 
-    // Tag index
-    const gPath = tagIndexPath(memoryDir);
-    const gIndex = normalizeTagIndex(readJsonSafe<TagIndex>(gPath, { version: TAG_INDEX_VERSION, tags: {}, aliases: {} }));
-    for (const tag of tags) {
-      if (tag && typeof tag === "string") {
-        addTagGraphEntry(gIndex, tag, memoryPath);
+    updateTagIndex(memoryDir, (index) => {
+      for (const tag of tags) {
+        if (tag && typeof tag === "string") {
+          addTagGraphEntry(index, tag, memoryPath);
+        }
       }
-    }
-    writeJsonAtomic(gPath, gIndex);
+    });
   } catch {
     // Fail silently
   }
@@ -386,29 +556,22 @@ export function indexMemory(
 /**
  * Remove a memory file from both indexes (called on deletion/archival).
  */
-export function deindexMemory(
-  memoryDir: string,
-  memoryPath: string,
-  createdAt: string,
-  tags: string[],
-): void {
+export function deindexMemory(memoryDir: string, memoryPath: string, createdAt: string, tags: string[]): void {
   try {
     ensureStateDir(memoryDir);
 
-    const tPath = temporalIndexPath(memoryDir);
-    const tIndex = readJsonSafe<TemporalIndex>(tPath, { version: INDEX_VERSION, dates: {} });
     const dateKey = isoDateFromTimestamp(createdAt);
-    removePathFromSet(tIndex.dates, dateKey, memoryPath);
-    writeJsonAtomic(tPath, tIndex);
+    updateTemporalIndex(memoryDir, (index) => {
+      removePathFromSet(index.dates, dateKey, memoryPath);
+    });
 
-    const gPath = tagIndexPath(memoryDir);
-    const gIndex = normalizeTagIndex(readJsonSafe<TagIndex>(gPath, { version: TAG_INDEX_VERSION, tags: {}, aliases: {} }));
-    for (const tag of tags) {
-      if (tag && typeof tag === "string") {
-        removeTagGraphEntry(gIndex, tag, memoryPath);
+    updateTagIndex(memoryDir, (index) => {
+      for (const tag of tags) {
+        if (tag && typeof tag === "string") {
+          removeTagGraphEntry(index, tag, memoryPath);
+        }
       }
-    }
-    writeJsonAtomic(gPath, gIndex);
+    });
   } catch {
     // Fail silently
   }
@@ -422,8 +585,17 @@ export function deindexMemory(
 export function clearIndexes(memoryDir: string): void {
   try {
     ensureStateDir(memoryDir);
-    writeJsonAtomic(temporalIndexPath(memoryDir), { version: INDEX_VERSION, dates: {} });
-    writeJsonAtomic(tagIndexPath(memoryDir), { version: TAG_INDEX_VERSION, tags: {}, aliases: {} });
+    updateTemporalIndex(memoryDir, (index) => {
+      index.version = INDEX_VERSION;
+      index.lastRebuildAt = undefined;
+      index.dates = {};
+    });
+    updateTagIndex(memoryDir, (index) => {
+      index.version = TAG_INDEX_VERSION;
+      index.lastRebuildAt = undefined;
+      index.tags = {};
+      index.aliases = {};
+    });
   } catch {
     // Fail silently — indexes are advisory only
   }
@@ -435,10 +607,7 @@ export function clearIndexes(memoryDir: string): void {
  */
 export function indexesExist(memoryDir: string): boolean {
   try {
-    return (
-      fs.existsSync(temporalIndexPath(memoryDir)) &&
-      fs.existsSync(tagIndexPath(memoryDir))
-    );
+    return fs.existsSync(temporalIndexPath(memoryDir)) && fs.existsSync(tagIndexPath(memoryDir));
   } catch {
     return false;
   }
@@ -450,30 +619,28 @@ export function indexesExist(memoryDir: string): boolean {
  */
 export function indexMemoriesBatch(
   memoryDir: string,
-  entries: Array<{ path: string; createdAt: string; tags: string[] }>,
+  entries: Array<{ path: string; createdAt: string; tags: string[] }>
 ): void {
   if (entries.length === 0) return;
   try {
     ensureStateDir(memoryDir);
 
-    const tPath = temporalIndexPath(memoryDir);
-    const tIndex = readJsonSafe<TemporalIndex>(tPath, { version: INDEX_VERSION, dates: {} });
+    updateTemporalIndex(memoryDir, (index) => {
+      for (const entry of entries) {
+        const dateKey = isoDateFromTimestamp(entry.createdAt);
+        addPathToSet(index.dates, dateKey, entry.path);
+      }
+    });
 
-    const gPath = tagIndexPath(memoryDir);
-    const gIndex = normalizeTagIndex(readJsonSafe<TagIndex>(gPath, { version: TAG_INDEX_VERSION, tags: {}, aliases: {} }));
-
-    for (const entry of entries) {
-      const dateKey = isoDateFromTimestamp(entry.createdAt);
-      addPathToSet(tIndex.dates, dateKey, entry.path);
-      for (const tag of entry.tags) {
-        if (tag && typeof tag === "string") {
-          addTagGraphEntry(gIndex, tag, entry.path);
+    updateTagIndex(memoryDir, (index) => {
+      for (const entry of entries) {
+        for (const tag of entry.tags) {
+          if (tag && typeof tag === "string") {
+            addTagGraphEntry(index, tag, entry.path);
+          }
         }
       }
-    }
-
-    writeJsonAtomic(tPath, tIndex);
-    writeJsonAtomic(gPath, gIndex);
+    });
   } catch {
     // Fail silently
   }
@@ -497,7 +664,7 @@ export function indexMemoriesBatch(
 export async function queryByDateRangeAsync(
   memoryDir: string,
   fromDate: string,
-  toDate?: string,
+  toDate?: string
 ): Promise<Set<string> | null> {
   try {
     const tPath = temporalIndexPath(memoryDir);
@@ -534,10 +701,7 @@ export async function queryByDateRangeAsync(
  * Async version of queryByTags — uses non-blocking fs.promises.readFile
  * to avoid blocking the Node.js event loop.
  */
-export async function queryByTagsAsync(
-  memoryDir: string,
-  tags: string[],
-): Promise<Set<string> | null> {
+export async function queryByTagsAsync(memoryDir: string, tags: string[]): Promise<Set<string> | null> {
   if (tags.length === 0) return null;
   try {
     const gPath = tagIndexPath(memoryDir);
@@ -593,7 +757,7 @@ export function extractTagsFromPrompt(prompt: string): string[] {
 
 export async function resolvePromptTagPrefilterAsync(
   memoryDir: string,
-  prompt: string,
+  prompt: string
 ): Promise<{
   matchedTags: string[];
   expandedTags: string[];
@@ -635,7 +799,7 @@ export async function resolvePromptTagPrefilterAsync(
  */
 export function isTemporalQuery(prompt: string): boolean {
   return /\b(today|yesterday|this week|last week|this month|last month|recent(?:ly)?|lately|just now|earlier today|this morning|last night|last year|this year|\d+ days? ago|\d+ hours? ago|\d+ weeks? ago|\d+ months? ago|(?:in |on |during |since |before |after )?(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{1,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4}|(?:spring|summer|fall|autumn|winter)\s+\d{4}|on the \d{1,2}(?:st|nd|rd|th)?|last (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(
-    prompt,
+    prompt
   );
 }
 
@@ -669,12 +833,26 @@ export function recencyWindowFromPrompt(prompt: string, nowMs: number = Date.now
     return jan1LastYear.toISOString().slice(0, 10);
   } else {
     // Try specific month references: "in March", "during January", "since February"
-    const monthNames = ["january", "february", "march", "april", "may", "june",
-      "july", "august", "september", "october", "november", "december"];
-    const monthMatch = p.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b/);
+    const monthNames = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december",
+    ];
+    const monthMatch = p.match(
+      /\b(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b/
+    );
     if (monthMatch) {
       const monthIdx = monthNames.indexOf(monthMatch[1]);
-      const year = monthMatch[2] ? parseInt(monthMatch[2], 10) : now.getFullYear();
+      const year = monthMatch[2] ? Number.parseInt(monthMatch[2], 10) : now.getFullYear();
       // "before <month>" means everything prior to that month: use 2-year lookback
       // as fromDate so the window isn't unbounded. toDate is set to the month start
       // in recencyWindowBoundsFromPrompt.
@@ -698,21 +876,21 @@ export function recencyWindowFromPrompt(prompt: string, nowMs: number = Date.now
     // Try "N weeks ago"
     const weekMatch = p.match(/(\d{1,5})\s*weeks?\s*ago/);
     if (weekMatch) {
-      daysBack = Math.min(365, parseInt(weekMatch[1], 10) * 7);
+      daysBack = Math.min(365, Number.parseInt(weekMatch[1], 10) * 7);
     } else {
       // Try "N months ago"
       const monthsAgoMatch = p.match(/(\d{1,5})\s*months?\s*ago/);
       if (monthsAgoMatch) {
-        daysBack = Math.min(730, parseInt(monthsAgoMatch[1], 10) * 31);
+        daysBack = Math.min(730, Number.parseInt(monthsAgoMatch[1], 10) * 31);
       } else {
         const numMatch = p.match(/(\d{1,5})\s*days?\s*ago/);
         if (numMatch) {
-          daysBack = Math.min(365, parseInt(numMatch[1], 10)); // no off-by-one: "3 days ago" → 3
+          daysBack = Math.min(365, Number.parseInt(numMatch[1], 10)); // no off-by-one: "3 days ago" → 3
         } else {
           const hrMatch = p.match(/(\d{1,5})\s*hours?\s*ago/);
           if (hrMatch) {
             // Convert hours to days (ceiling); at least 1 day window
-            daysBack = Math.max(1, Math.ceil(parseInt(hrMatch[1], 10) / 24));
+            daysBack = Math.max(1, Math.ceil(Number.parseInt(hrMatch[1], 10) / 24));
           }
         }
       }
@@ -725,7 +903,7 @@ export function recencyWindowFromPrompt(prompt: string, nowMs: number = Date.now
     }
     const usMatch = p.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
     if (usMatch) {
-      const year = usMatch[3].length === 2 ? 2000 + parseInt(usMatch[3], 10) : parseInt(usMatch[3], 10);
+      const year = usMatch[3].length === 2 ? 2000 + Number.parseInt(usMatch[3], 10) : Number.parseInt(usMatch[3], 10);
       return `${year}-${usMatch[1].padStart(2, "0")}-${usMatch[2].padStart(2, "0")}`;
     }
 
@@ -735,7 +913,7 @@ export function recencyWindowFromPrompt(prompt: string, nowMs: number = Date.now
       const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
       const targetDay = dayNames.indexOf(dayOfWeekMatch[1]);
       const currentDay = now.getDay();
-      daysBack = ((currentDay - targetDay + 7) % 7) || 7; // at least 7 days back
+      daysBack = (currentDay - targetDay + 7) % 7 || 7; // at least 7 days back
     }
   }
 
@@ -766,7 +944,7 @@ export function recencyWindowFromPrompt(prompt: string, nowMs: number = Date.now
  */
 export function recencyWindowBoundsFromPrompt(
   prompt: string,
-  nowMs: number = Date.now(),
+  nowMs: number = Date.now()
 ): { fromDate: string; toDate: string } {
   const fromDate = recencyWindowFromPrompt(prompt, nowMs);
   const p = prompt.toLowerCase();
@@ -794,15 +972,29 @@ export function recencyWindowBoundsFromPrompt(
     // working offset, then ISO/US/weekday patterns run AFTER ago patterns
     // and can override them — matching the priority ordering in recencyWindowFromPrompt.
 
-    const monthNames = ["january", "february", "march", "april", "may", "june",
-      "july", "august", "september", "october", "november", "december"];
-    const monthMatch = p.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b/);
+    const monthNames = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december",
+    ];
+    const monthMatch = p.match(
+      /\b(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b/
+    );
     if (monthMatch) {
       // "since <month>" / "after <month>" — open-ended: everything from that month to now.
       // "before <month>" — closed upper bound: everything before that month starts.
       // Plain "<month>" — just that calendar month.
       const monthIdx = monthNames.indexOf(monthMatch[1]);
-      const year = monthMatch[2] ? parseInt(monthMatch[2], 10) : now.getFullYear();
+      const year = monthMatch[2] ? Number.parseInt(monthMatch[2], 10) : now.getFullYear();
       const isSinceOrAfter = /\b(since|after)\b/.test(p);
       const isBefore = /\bbefore\b/.test(p);
       if (isSinceOrAfter) {
@@ -822,17 +1014,17 @@ export function recencyWindowBoundsFromPrompt(
       let toDaysBack = -1;
       const weekMatch = p.match(/(\d{1,5})\s*weeks?\s*ago/);
       if (weekMatch) {
-        toDaysBack = Math.max(0, Math.min(52, parseInt(weekMatch[1], 10)) - 1) * 7;
+        toDaysBack = Math.max(0, Math.min(52, Number.parseInt(weekMatch[1], 10)) - 1) * 7;
       } else {
         const monthsAgoMatch = p.match(/(\d{1,5})\s*months?\s*ago/);
         if (monthsAgoMatch) {
-          toDaysBack = Math.max(0, Math.min(24, parseInt(monthsAgoMatch[1], 10)) - 1) * 31;
+          toDaysBack = Math.max(0, Math.min(24, Number.parseInt(monthsAgoMatch[1], 10)) - 1) * 31;
         } else {
           const numMatch = p.match(/(\d{1,5})\s*days?\s*ago/);
           if (numMatch) {
             // (N-1) mirrors the weeks/months ago formula: "3 days ago" → window [today-3, today-2]
             // N=1 → toDaysBack=0 → toDate=today (exclusive) → window [yesterday, today) = 1 day. ✓
-            toDaysBack = Math.max(0, Math.min(365, parseInt(numMatch[1], 10)) - 1);
+            toDaysBack = Math.max(0, Math.min(365, Number.parseInt(numMatch[1], 10)) - 1);
           } else {
             const hrMatch = p.match(/(\d{1,5})\s*hours?\s*ago/);
             if (hrMatch) {
@@ -854,7 +1046,8 @@ export function recencyWindowBoundsFromPrompt(
       } else {
         const usMatch = p.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
         if (usMatch) {
-          const year = usMatch[3].length === 2 ? 2000 + parseInt(usMatch[3], 10) : parseInt(usMatch[3], 10);
+          const year =
+            usMatch[3].length === 2 ? 2000 + Number.parseInt(usMatch[3], 10) : Number.parseInt(usMatch[3], 10);
           // +1 day: exclusive upper bound includes the named date
           const d = new Date(`${year}-${usMatch[1].padStart(2, "0")}-${usMatch[2].padStart(2, "0")}T00:00:00Z`);
           toDate = new Date(d.getTime() + 86_400_000).toISOString().slice(0, 10);
@@ -864,7 +1057,7 @@ export function recencyWindowBoundsFromPrompt(
             const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
             const targetDay = dayNames.indexOf(dayOfWeekMatch[1]);
             const currentDay = now.getDay();
-            const daysBack = ((currentDay - targetDay + 7) % 7) || 7;
+            const daysBack = (currentDay - targetDay + 7) % 7 || 7;
             // +1 day: exclusive upper bound includes the named weekday
             toDate = new Date(nowMs - (daysBack - 1) * 86_400_000).toISOString().slice(0, 10);
           } else {
@@ -872,9 +1065,7 @@ export function recencyWindowBoundsFromPrompt(
             // toDaysBack=-1 means no pattern matched (or hours-ago): use tomorrow so today
             // is included in the window. toDaysBack=0 means N=1 ago (e.g. "1 day ago"):
             // toDate = today (exclusive) correctly creates a 1-day window [yesterday, today).
-            toDate = toDaysBack < 0
-              ? tomorrow
-              : new Date(nowMs - toDaysBack * 86_400_000).toISOString().slice(0, 10);
+            toDate = toDaysBack < 0 ? tomorrow : new Date(nowMs - toDaysBack * 86_400_000).toISOString().slice(0, 10);
           }
         }
       }
