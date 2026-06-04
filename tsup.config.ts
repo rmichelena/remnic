@@ -70,6 +70,8 @@ export default defineConfig({
     "src/qmd.ts",
     "src/qmd-recall-cache.ts",
     "src/reconstruct.ts",
+    "src/retrieval.ts",
+    "src/retrieval-agents.ts",
     "src/replay/normalizers/chatgpt.ts",
     "src/replay/normalizers/claude.ts",
     "src/replay/normalizers/openclaw.ts",
