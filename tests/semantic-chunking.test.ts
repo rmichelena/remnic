@@ -564,6 +564,44 @@ test("semanticChunkContent: recursive fallback path caps targetTokens to maxToke
   }
 });
 
+test("semanticChunkContent: mismatched embedding dimensions fall back when enabled", async () => {
+  const text = [
+    "Alpha planning details span enough words to require semantic processing.",
+    "Alpha implementation notes continue the same topic for comparison.",
+    "Beta release details switch topics after the malformed embedding.",
+  ].join(" ");
+  const mismatchedEmbedFn: EmbedFn = async () => [[1, 0], [1], [0, 1]];
+
+  const result = await semanticChunkContent(text, mismatchedEmbedFn, {
+    fallbackToRecursive: true,
+    minTokens: 1,
+    targetTokens: 20,
+    maxTokens: 40,
+  });
+
+  assert.equal(result.method, "recursive-fallback");
+});
+
+test("semanticChunkContent: mismatched embedding dimensions reject when fallback is disabled", async () => {
+  const text = [
+    "Alpha planning details span enough words to require semantic processing.",
+    "Alpha implementation notes continue the same topic for comparison.",
+    "Beta release details switch topics after the malformed embedding.",
+  ].join(" ");
+  const mismatchedEmbedFn: EmbedFn = async () => [[1, 0], [1], [0, 1]];
+
+  await assert.rejects(
+    () =>
+      semanticChunkContent(text, mismatchedEmbedFn, {
+        fallbackToRecursive: false,
+        minTokens: 1,
+        targetTokens: 20,
+        maxTokens: 40,
+      }),
+    /embedding vectors have mismatched dimensions \(2 vs 1 at index 1\)/,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Finding 4 (PR #420): even window sizes are rounded up to odd
 // ---------------------------------------------------------------------------

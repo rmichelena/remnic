@@ -241,6 +241,20 @@ async function batchEmbed(
   return allEmbeddings;
 }
 
+function findEmbeddingDimensionMismatch(
+  embeddings: number[][],
+): { expected: number; actual: number; index: number } | null {
+  if (embeddings.length <= 1) return null;
+  const expected = embeddings[0].length;
+  for (let i = 1; i < embeddings.length; i++) {
+    const actual = embeddings[i].length;
+    if (actual !== expected) {
+      return { expected, actual, index: i };
+    }
+  }
+  return null;
+}
+
 /**
  * Build segments from boundary indices.
  * boundaries are sentence indices at which splits occur (i.e., the split
@@ -420,6 +434,17 @@ export async function semanticChunkContent(
     }
     throw new Error(
       `Semantic chunking failed: expected ${sentences.length} embeddings but received ${embeddings.length}`,
+    );
+  }
+
+  const dimensionMismatch = findEmbeddingDimensionMismatch(embeddings);
+  if (dimensionMismatch) {
+    if (cfg.fallbackToRecursive) {
+      return buildRecursiveFallback(content, cfg);
+    }
+    throw new Error(
+      `Semantic chunking failed: embedding vectors have mismatched dimensions ` +
+        `(${dimensionMismatch.expected} vs ${dimensionMismatch.actual} at index ${dimensionMismatch.index})`,
     );
   }
 
