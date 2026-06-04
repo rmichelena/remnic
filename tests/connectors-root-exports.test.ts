@@ -7,11 +7,20 @@ import {
   materializeForNamespace,
   runCodexMaterialize as runFromIndexShim,
 } from "../src/connectors/index.js";
+import * as secureStore from "../src/secure-store/index.js";
 
 test("root connector shims expose Codex materialize exports", () => {
   assert.equal(typeof runFromRunnerShim, "function");
   assert.equal(typeof runFromIndexShim, "function");
   assert.equal(typeof materializeForNamespace, "function");
+});
+
+test("root secure-store shim exposes the core secure-store surface", () => {
+  assert.equal(typeof secureStore.seal, "function");
+  assert.equal(typeof secureStore.open, "function");
+  assert.equal(typeof secureStore.keyring, "object");
+  assert.equal(typeof secureStore.keyring.unlock, "function");
+  assert.equal(typeof secureStore.keyring.size, "function");
 });
 
 test("root package export map exposes LCM shims", async () => {
@@ -55,6 +64,8 @@ test("root package export map exposes compat and source shims", async () => {
     ["consolidation-provenance-check", "./dist/consolidation-provenance-check.js"],
     ["entity-retrieval", "./dist/entity-retrieval.js"],
     ["extraction", "./dist/extraction.js"],
+    ["secure-store", "./dist/secure-store/index.js"],
+    ["secure-store/index", "./dist/secure-store/index.js"],
   ] as const) {
     assert.deepEqual(exportsMap[`./${subpath}`], { import: expectedTarget }, subpath);
     assert.deepEqual(exportsMap[`./${subpath}.js`], { import: expectedTarget }, `${subpath}.js`);

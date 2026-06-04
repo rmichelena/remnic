@@ -75,6 +75,18 @@
     "./access-cli.js": {
       "import": "./dist/access-cli.js"
     },
+    "./secure-store": {
+      "import": "./dist/secure-store/index.js"
+    },
+    "./secure-store.js": {
+      "import": "./dist/secure-store/index.js"
+    },
+    "./secure-store/index": {
+      "import": "./dist/secure-store/index.js"
+    },
+    "./secure-store/index.js": {
+      "import": "./dist/secure-store/index.js"
+    },
     "./adapters": {
       "import": "./dist/adapters/index.js"
     },
