@@ -27,17 +27,39 @@ interface FileToggleStoreOptions {
   secondaryReadOnlyPath?: string;
 }
 
+const TOGGLE_KEY_SEPARATOR = "::";
+
+function encodeToggleComponent(value: string): string {
+  return encodeURIComponent(value).replaceAll(":", "%3A");
+}
+
 function encodeToggleKey(sessionKey: string, agentId: string): string {
-  return `${encodeURIComponent(sessionKey)}::${encodeURIComponent(agentId)}`;
+  return `${encodeToggleComponent(sessionKey)}${TOGGLE_KEY_SEPARATOR}${encodeToggleComponent(agentId)}`;
+}
+
+function encodeLegacyToggleKey(sessionKey: string, agentId: string): string {
+  return `${encodeURIComponent(sessionKey)}${TOGGLE_KEY_SEPARATOR}${encodeURIComponent(agentId)}`;
+}
+
+function toggleKeyCandidates(sessionKey: string, agentId: string): string[] {
+  const key = encodeToggleKey(sessionKey, agentId);
+  const legacyKey = encodeLegacyToggleKey(sessionKey, agentId);
+  return key === legacyKey ? [key] : [key, legacyKey];
 }
 
 function decodeToggleKey(key: string): { sessionKey: string; agentId: string } | null {
-  const [encodedSessionKey, encodedAgentId] = key.split("::");
+  const parts = key.split(TOGGLE_KEY_SEPARATOR);
+  if (parts.length !== 2) return null;
+  const [encodedSessionKey, encodedAgentId] = parts;
   if (!encodedSessionKey || !encodedAgentId) return null;
-  return {
-    sessionKey: decodeURIComponent(encodedSessionKey),
-    agentId: decodeURIComponent(encodedAgentId),
-  };
+  try {
+    return {
+      sessionKey: decodeURIComponent(encodedSessionKey),
+      agentId: decodeURIComponent(encodedAgentId),
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function safeReadToggleFile(filePath: string): Promise<ToggleFile> {
@@ -97,21 +119,23 @@ export function createFileToggleStore(
     },
 
     async resolve(sessionKey: string, agentId: string) {
-      const key = encodeToggleKey(sessionKey, agentId);
+      const keys = toggleKeyCandidates(sessionKey, agentId);
       const primary = await readPrimary();
-      if (primary.entries[key]) {
+      const primaryKey = keys.find((key) => primary.entries[key]);
+      if (primaryKey) {
         return {
-          disabled: primary.entries[key].disabled,
+          disabled: primary.entries[primaryKey].disabled,
           source: "primary" as const,
-          updatedAt: primary.entries[key].updatedAt,
+          updatedAt: primary.entries[primaryKey].updatedAt,
         };
       }
       const secondary = await readSecondary();
-      if (secondary.entries[key]) {
+      const secondaryKey = keys.find((key) => secondary.entries[key]);
+      if (secondaryKey) {
         return {
-          disabled: secondary.entries[key].disabled,
+          disabled: secondary.entries[secondaryKey].disabled,
           source: "secondary" as const,
-          updatedAt: secondary.entries[key].updatedAt,
+          updatedAt: secondary.entries[secondaryKey].updatedAt,
         };
       }
       return { disabled: false, source: "none" as const };
@@ -130,10 +154,12 @@ export function createFileToggleStore(
     },
 
     async clear(sessionKey: string, agentId: string): Promise<void> {
-      const key = encodeToggleKey(sessionKey, agentId);
+      const keys = toggleKeyCandidates(sessionKey, agentId);
       await queueWrite(async () => {
         const current = await readPrimary();
-        delete current.entries[key];
+        for (const key of keys) {
+          delete current.entries[key];
+        }
         await writeToggleFile(current);
       });
     },

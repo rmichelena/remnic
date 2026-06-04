@@ -24,6 +24,26 @@ test("createFileToggleStore round-trips disabled state for encoded session keys"
   assert.equal(Object.keys(raw.entries).length, 1);
 });
 
+test("createFileToggleStore lists and clears keys containing the separator", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-toggle-store-separator-"));
+  const filePath = path.join(root, "session-toggles.json");
+  const store = createFileToggleStore(filePath);
+
+  await store.setDisabled("pi::session", "agent::one", true);
+
+  assert.equal(await store.isDisabled("pi::session", "agent::one"), true);
+  const listed = await store.list();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.sessionKey, "pi::session");
+  assert.equal(listed[0]?.agentId, "agent::one");
+  assert.equal(listed[0]?.disabled, true);
+
+  await store.clear("pi::session", "agent::one");
+
+  assert.equal(await store.isDisabled("pi::session", "agent::one"), false);
+  assert.deepEqual(await store.list(), []);
+});
+
 test("createFileToggleStore recovers from malformed primary store contents", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "remnic-toggle-store-bad-"));
   const filePath = path.join(root, "session-toggles.json");
