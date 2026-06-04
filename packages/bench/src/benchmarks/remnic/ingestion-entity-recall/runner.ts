@@ -79,6 +79,35 @@ export async function runIngestionEntityRecallBenchmark(
       return buildResult(options, tasks, durationMs);
     }
 
+    try {
+      await options.ingestionAdapter.drain?.();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const tasks: TaskResult[] = [
+        {
+          taskId: `entity-recall-${fixture.id}`,
+          question: `Extract entities from ${fixture.id} fixture`,
+          expected: `${fixture.goldGraph.entities.length} entities`,
+          actual: `(ingestion drain error: ${message})`,
+          scores: {
+            entity_recall: -1,
+          },
+          latencyMs: durationMs,
+          tokens: { input: 0, output: 0 },
+          details: {
+            fixtureId: fixture.id,
+            goldEntityCount: fixture.goldGraph.entities.length,
+            ingestionErrors: ingestionLog.errors,
+            drainError: message,
+            commandsIssued: ingestionLog.commandsIssued,
+            promptsShown: ingestionLog.promptsShown,
+          },
+        },
+      ];
+
+      return buildResult(options, tasks, durationMs);
+    }
+
     const graph = await options.ingestionAdapter.getMemoryGraph();
     const { overall, byType } = entityRecall(graph.entities, fixture.goldGraph.entities);
 

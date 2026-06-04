@@ -71,6 +71,8 @@ export interface IngestionLog {
 
 export interface IngestionBenchAdapter {
   ingest(inputDir: string): Promise<IngestionLog>;
+  /** Flush asynchronous ingestion work before graph scoring. */
+  drain?(): Promise<void>;
   getMemoryGraph(): Promise<MemoryGraph>;
   reset(): Promise<void>;
   destroy(): Promise<void>;
