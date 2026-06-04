@@ -73,6 +73,207 @@ test("fallback llm prefers the active gateway provider config over models.json",
   }
 });
 
+test("fallback llm uses an explicit model chain override instead of gateway defaults", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+          fallbacks: ["openai/default-fallback"],
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    if (body.model === "cheap-primary") {
+      return new Response(JSON.stringify({ error: { message: "try fallback" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "fallback ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        modelChain: {
+          primary: "openai/cheap-primary",
+          fallbacks: ["openai/cheap-primary", "openai/cheap-fallback"],
+        },
+      },
+    );
+
+    assert.equal(response?.content, "fallback ok");
+    assert.equal(response?.modelUsed, "openai/cheap-fallback");
+    assert.deepEqual(attemptedModels, ["cheap-primary", "cheap-fallback"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm tries an explicit model override before a model chain override", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    if (body.model === "judge-model") {
+      return new Response(JSON.stringify({ error: { message: "try task chain" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "task chain ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Judge this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        model: "openai/judge-model",
+        modelChain: { primary: "openai/task-primary" },
+      },
+    );
+
+    assert.equal(response?.content, "task chain ok");
+    assert.equal(response?.modelUsed, "openai/task-primary");
+    assert.deepEqual(attemptedModels, ["judge-model", "task-primary"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm deduplicates a model override that matches the model chain primary", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "dedupe ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Judge this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        model: "openai/task-primary",
+        modelChain: {
+          primary: "openai/task-primary",
+          fallbacks: ["openai/task-fallback"],
+        },
+      },
+    );
+
+    assert.equal(response?.content, "dedupe ok");
+    assert.equal(response?.modelUsed, "openai/task-primary");
+    assert.deepEqual(attemptedModels, ["task-primary"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
 test("fallback llm tries an explicit model override before the configured chain", { concurrency: false }, async () => {
   clearModelsJsonCache();
   clearSecretCache();

@@ -1268,6 +1268,12 @@ export interface PluginConfig {
   modelSource: "plugin" | "gateway";
   gatewayAgentId: string;
   fastGatewayAgentId: string;
+  /**
+   * Optional task-specific model chain for extraction/consolidation/summarization
+   * fallback calls. When set, this chain is resolved through gateway providers
+   * instead of using gatewayAgentId or agents.defaults.model.
+   */
+  extractionModelChain?: AgentPersonaModelConfig;
 
   // v3.0 Multi-agent memory (namespaces)
   namespacesEnabled: boolean;

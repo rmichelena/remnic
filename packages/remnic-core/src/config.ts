@@ -13,6 +13,7 @@ import type {
   HeartbeatConfig,
   IdentityInjectionMode,
   MemoryOsPresetName,
+  AgentPersonaModelConfig,
   PluginConfig,
   PrincipalRule,
   RecallPipelineConfig,
@@ -67,6 +68,30 @@ function parseBoundedIntegerMs(
   const coerced = coerceNumber(value);
   if (coerced === undefined) return fallback;
   return Math.min(max, Math.max(min, Math.floor(coerced)));
+}
+
+function parseModelChainConfig(value: unknown): AgentPersonaModelConfig | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const primary = typeof raw.primary === "string" && raw.primary.trim().length > 0
+    ? raw.primary.trim()
+    : undefined;
+  if (!primary) return undefined;
+
+  const fallbacks = Array.isArray(raw.fallbacks)
+    ? raw.fallbacks
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim())
+    : undefined;
+
+  const dedupedFallbacks = fallbacks
+    ? [...new Set(fallbacks.filter((item) => item !== primary))]
+    : undefined;
+
+  return {
+    primary,
+    ...(dedupedFallbacks && dedupedFallbacks.length > 0 ? { fallbacks: dedupedFallbacks } : {}),
+  };
 }
 
 function parsePositiveInteger(value: unknown, keyName: string): number | undefined {
@@ -2425,6 +2450,7 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.fastGatewayAgentId === "string" && cfg.fastGatewayAgentId.length > 0
         ? cfg.fastGatewayAgentId
         : "",
+    extractionModelChain: parseModelChainConfig(cfg.extractionModelChain),
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,

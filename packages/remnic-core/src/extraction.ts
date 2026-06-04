@@ -123,7 +123,8 @@ export class ExtractionEngine {
     if (config.modelSource === "gateway") {
       log.debug(
         `extraction engine: gateway model source active; extraction uses the gateway chain as its primary path` +
-          (config.gatewayAgentId ? ` (agent: ${config.gatewayAgentId})` : " (defaults)"),
+          (config.extractionModelChain ? " (extractionModelChain)" :
+            config.gatewayAgentId ? ` (agent: ${config.gatewayAgentId})` : " (defaults)"),
       );
     }
   }
@@ -157,6 +158,8 @@ export class ExtractionEngine {
    */
   private withGatewayAgent(options: import("./fallback-llm.js").FallbackLlmOptions): import("./fallback-llm.js").FallbackLlmOptions {
     if (!this.useGatewayModelSource) return options;
+    const modelChain = this.config.extractionModelChain;
+    if (modelChain) return { ...options, modelChain };
     const agentId = this.config.gatewayAgentId || undefined;
     return agentId ? { ...options, agentId } : options;
   }
@@ -1098,7 +1101,8 @@ export class ExtractionEngine {
     if (this.useGatewayModelSource) {
       log.debug(
         `extraction: using gateway model chain as primary path` +
-          (this.config.gatewayAgentId ? ` (agent: ${this.config.gatewayAgentId})` : " (defaults)"),
+          (this.config.extractionModelChain ? " (extractionModelChain)" :
+            this.config.gatewayAgentId ? ` (agent: ${this.config.gatewayAgentId})` : " (defaults)"),
       );
     } else {
       log.info("extraction: falling back to gateway default AI");

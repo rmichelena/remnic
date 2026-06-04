@@ -193,6 +193,27 @@ test("parseConfig modelSource=gateway does not inherit OPENAI_API_KEY from the p
   }
 });
 
+test("parseConfig normalizes extractionModelChain", () => {
+  const cfg = parseConfig({
+    extractionModelChain: {
+      primary: " openai/cheap-primary ",
+      fallbacks: ["openai/cheap-primary", " fireworks/accounts/fireworks/models/glm-5p1 ", ""],
+    },
+  });
+
+  assert.deepEqual(cfg.extractionModelChain, {
+    primary: "openai/cheap-primary",
+    fallbacks: ["fireworks/accounts/fireworks/models/glm-5p1"],
+  });
+});
+
+test("parseConfig ignores invalid extractionModelChain", () => {
+  assert.equal(parseConfig({ extractionModelChain: null }).extractionModelChain, undefined);
+  assert.equal(parseConfig({ extractionModelChain: [] }).extractionModelChain, undefined);
+  assert.equal(parseConfig({ extractionModelChain: { primary: " " } }).extractionModelChain, undefined);
+  assert.equal(parseConfig({ extractionModelChain: { fallbacks: ["openai/fallback-only"] } }).extractionModelChain, undefined);
+});
+
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {
   const original = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "sk-env-should-not-be-used";

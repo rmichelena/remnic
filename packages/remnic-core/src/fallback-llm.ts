@@ -1,6 +1,6 @@
 import { log } from "./logger.js";
 import path from "node:path";
-import type { GatewayConfig, ModelProviderConfig, AgentPersona } from "./types.js";
+import type { AgentPersonaModelConfig, GatewayConfig, ModelProviderConfig } from "./types.js";
 import { extractJsonCandidates } from "./json-extract.js";
 import {
   buildChatCompletionTemperature,
@@ -25,6 +25,8 @@ export interface FallbackLlmOptions {
   signal?: AbortSignal;
   /** Explicit "provider/model" override to try before the configured chain. */
   model?: string;
+  /** Explicit model chain override to use instead of the configured agent/default chain. */
+  modelChain?: AgentPersonaModelConfig;
   /** Override which agent persona's model chain to use (by ID from agents.list[]). */
   agentId?: string;
 }
@@ -134,7 +136,7 @@ export class FallbackLlmClient {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     options: FallbackLlmOptions = {},
   ): Promise<FallbackLlmResponse | null> {
-    const models = this.getModelChain(options.agentId, options.model);
+    const models = this.getModelChain(options.agentId, options.model, options.modelChain);
     if (models.length === 0) {
       log.warn("fallback LLM: no models configured in gateway");
       return null;
@@ -262,18 +264,28 @@ export class FallbackLlmClient {
    * Get the full model chain from gateway config.
    * Returns array of models in order: [primary, fallback1, fallback2, ...]
    *
-   * When agentId is provided, looks up the matching entry in agents.list[]
-   * and uses that persona's model chain. Falls back to agents.defaults.model
-   * if agentId is not found or not provided.
+   * When modelChainOverride is provided, uses it instead of any configured
+   * agent/default chain. Otherwise, when agentId is provided, looks up the
+   * matching entry in agents.list[] and uses that persona's model chain.
+   * Falls back to agents.defaults.model if agentId is not found or not provided.
    */
-  private getModelChain(agentId?: string, modelOverride?: string): ModelRef[] {
+  private getModelChain(
+    agentId?: string,
+    modelOverride?: string,
+    modelChainOverride?: AgentPersonaModelConfig,
+  ): ModelRef[] {
     const chain: ModelRef[] = [];
     const providers = this.gatewayConfig?.models?.providers ?? {};
 
-    // Resolve the model config: agent persona chain or global defaults
-    let modelConfig: { primary?: string; fallbacks?: string[] } | undefined;
+    // Resolve the model config: explicit task chain, agent persona chain, or global defaults
+    let modelConfig: AgentPersonaModelConfig | undefined;
 
-    if (agentId) {
+    if (modelChainOverride) {
+      modelConfig = modelChainOverride;
+      log.debug("fallback LLM: using explicit model chain override");
+    }
+
+    if (!modelConfig && agentId) {
       const persona = this.gatewayConfig?.agents?.list?.find(
         (a) => a.id === agentId,
       );
@@ -294,21 +306,20 @@ export class FallbackLlmClient {
     // Build list of model strings: primary + fallbacks
     const modelStrings: string[] = [];
 
-    if (typeof modelOverride === "string" && modelOverride.trim().length > 0) {
-      modelStrings.push(modelOverride.trim());
-    }
-
-    if (modelConfig?.primary) {
-      if (!modelStrings.includes(modelConfig.primary)) {
-        modelStrings.push(modelConfig.primary);
+    const addModelString = (value: unknown): void => {
+      if (typeof value !== "string") return;
+      const trimmed = value.trim();
+      if (trimmed.length > 0 && !modelStrings.includes(trimmed)) {
+        modelStrings.push(trimmed);
       }
-    }
+    };
+
+    addModelString(modelOverride);
+    addModelString(modelConfig?.primary);
 
     if (Array.isArray(modelConfig?.fallbacks)) {
       for (const fb of modelConfig.fallbacks) {
-        if (typeof fb === "string" && !modelStrings.includes(fb)) {
-          modelStrings.push(fb);
-        }
+        addModelString(fb);
       }
     }
 
