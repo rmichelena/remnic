@@ -53,6 +53,10 @@ await Promise.all(requiredFiles.map(assertFile));
 
 await Promise.all(
   [
+    "remnic-workspace/consolidation-operator",
+    "remnic-workspace/consolidation-operator.js",
+    "remnic-workspace/consolidation-undo",
+    "remnic-workspace/consolidation-undo.js",
     "remnic-workspace/delinearize",
     "remnic-workspace/delinearize.js",
     "remnic-workspace/embedding-fallback",
