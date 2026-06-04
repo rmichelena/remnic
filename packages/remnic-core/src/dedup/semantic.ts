@@ -138,7 +138,13 @@ export async function decideSemanticDedup(
   // Defensive: callers ought to return sorted, but don't trust it.
   let top: SemanticDedupHit | undefined;
   for (const hit of hits) {
-    if (!hit || typeof hit.score !== "number" || !Number.isFinite(hit.score)) {
+    if (
+      !hit ||
+      typeof hit.id !== "string" ||
+      hit.id.trim().length === 0 ||
+      typeof hit.score !== "number" ||
+      !Number.isFinite(hit.score)
+    ) {
       continue;
     }
     if (!top || hit.score > top.score) {
