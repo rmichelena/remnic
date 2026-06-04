@@ -509,3 +509,58 @@ test("timeout guard wraps ingestion adapter calls", async () => {
   );
   assert.equal(destroyed, true);
 });
+
+test("timeout guard preserves ingestion adapter drain hook", async () => {
+  let drained = false;
+  const guarded = createTimeoutGuardedIngestionAdapter(
+    {
+      async ingest() {
+        return { commandsIssued: [], promptsShown: [], errors: [], durationMs: 0 };
+      },
+      async getMemoryGraph() {
+        return { entities: [], links: [], pages: [] };
+      },
+      async reset() {},
+      async drain() {
+        drained = true;
+      },
+      async destroy() {},
+    },
+    {
+      benchmarkId: "timeout-test",
+      timeoutMs: 100,
+    },
+  );
+
+  assert.equal(typeof guarded.drain, "function");
+  await guarded.drain?.();
+  assert.equal(drained, true);
+});
+
+test("timeout guard uses separate ingestion drain timeout", async () => {
+  const guarded = createTimeoutGuardedIngestionAdapter(
+    {
+      async ingest() {
+        return { commandsIssued: [], promptsShown: [], errors: [], durationMs: 0 };
+      },
+      async getMemoryGraph() {
+        return { entities: [], links: [], pages: [] };
+      },
+      async reset() {},
+      async drain() {
+        return new Promise<void>(() => {});
+      },
+      async destroy() {},
+    },
+    {
+      benchmarkId: "timeout-test",
+      timeoutMs: 100,
+      drainTimeoutMs: 5,
+    },
+  );
+
+  await assert.rejects(
+    () => guarded.drain!(),
+    /benchmark phase timed out after 5ms: timeout-test:ingestion.drain/,
+  );
+});

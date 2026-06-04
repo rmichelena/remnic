@@ -254,12 +254,17 @@ export function createTimeoutGuardedIngestionAdapter(
   options: TimeoutGuardOptions & { timeoutMs: number },
 ): IngestionBenchAdapter {
   assertPositiveTimeout(options.timeoutMs, "benchmark phase timeout");
+  if (options.drainTimeoutMs !== undefined) {
+    assertPositiveTimeout(options.drainTimeoutMs, "benchmark drain timeout");
+  }
+  const drainTimeoutMs = options.drainTimeoutMs ?? options.timeoutMs;
 
   const run = async <T>(
     phase: string,
     fn: (signal: AbortSignal) => Promise<T>,
+    timeoutMs = options.timeoutMs,
   ): Promise<T> =>
-    runWithBenchmarkPhaseTimeout(`${options.benchmarkId}:${phase}`, options.timeoutMs, fn, options);
+    runWithBenchmarkPhaseTimeout(`${options.benchmarkId}:${phase}`, timeoutMs, fn, options);
 
   return {
     ingest(inputDir: string): Promise<IngestionLog> {
@@ -271,6 +276,17 @@ export function createTimeoutGuardedIngestionAdapter(
     reset(): Promise<void> {
       return run("ingestion.reset", () => adapter.reset());
     },
+    ...(adapter.drain
+      ? {
+          drain(): Promise<void> {
+            return run(
+              "ingestion.drain",
+              () => adapter.drain?.() ?? Promise.resolve(),
+              drainTimeoutMs,
+            );
+          },
+        }
+      : {}),
     destroy(): Promise<void> {
       return adapter.destroy();
     },
