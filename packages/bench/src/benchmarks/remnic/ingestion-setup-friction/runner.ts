@@ -90,6 +90,7 @@ export async function runIngestionSetupFrictionBenchmark(
         },
       },
     ];
+    options.onTaskComplete?.(tasks[0], 1, tasks.length);
 
     const remnicVersion = await getRemnicVersion();
     return {
