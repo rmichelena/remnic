@@ -90,7 +90,7 @@ export async function generateContextTree(options: GenerateOptions): Promise<Gen
   const resolvedMemoryDir = path.resolve(memoryDir);
   const resolvedOutputDir = path.resolve(outputDir);
   const requestedCategories = validateProjectionCategories(filterCategories);
-  const realMemoryDir = fs.realpathSync(resolvedMemoryDir);
+  const realMemoryDir = assertSafeMemoryRoot(resolvedMemoryDir);
 
   // Ensure output directory exists
   assertNotSymlink(resolvedOutputDir, "context tree outputDir");
@@ -238,6 +238,17 @@ function assertNotSymlink(targetPath: string, label: string): void {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
   }
+}
+
+function assertSafeMemoryRoot(targetPath: string): string {
+  const stat = fs.lstatSync(targetPath);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`memoryDir must not be a symlink: ${targetPath}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`memoryDir must be a directory: ${targetPath}`);
+  }
+  return fs.realpathSync(targetPath);
 }
 
 function assertSafeInputRoot(realMemoryDir: string, targetPath: string, label: string): void {

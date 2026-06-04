@@ -159,6 +159,34 @@ test("generateContextTree rejects symlinked memory category roots", async () => 
   }
 });
 
+test("generateContextTree rejects symlinked memoryDir roots", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "remnic-projection-root-symlink-"));
+  try {
+    const outsideMemoryDir = path.join(root, "outside-memory");
+    const memoryDir = path.join(root, "memory");
+    const outputDir = path.join(root, "context-tree");
+    await writeFact(outsideMemoryDir);
+    await symlink(outsideMemoryDir, memoryDir, "dir");
+
+    await assert.rejects(
+      generateContextTree({
+        memoryDir,
+        outputDir,
+        categories: ["fact"],
+        includeEntities: false,
+        includeQuestions: false,
+      }),
+      /memoryDir must not be a symlink/,
+    );
+    await assert.rejects(
+      readFile(path.join(outputDir, "fact", "fact-1.md"), "utf-8"),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("generateContextTree rejects symlinked output path components", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "remnic-projection-output-symlink-"));
   try {
