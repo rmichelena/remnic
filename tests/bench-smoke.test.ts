@@ -1,40 +1,36 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { createDeterministicAdapter, runSmokeBenchmarks } from "../scripts/bench/bench-smoke.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const scriptPath = path.join(repoRoot, "scripts", "bench", "bench-smoke.ts");
-const committedBaseline = path.join(
-  repoRoot,
-  "tests",
-  "fixtures",
-  "bench-smoke",
-  "baseline.json",
-);
+const committedBaseline = path.join(repoRoot, "tests", "fixtures", "bench-smoke", "baseline.json");
 
-function runSmoke(args: readonly string[], cwd: string = repoRoot): {
+function runSmoke(
+  args: readonly string[],
+  cwd: string = repoRoot,
+  targetScript: string = scriptPath
+): {
   code: number;
   stdout: string;
   stderr: string;
 } {
   const result = spawnSync(
     process.execPath,
-    [
-      path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
-      scriptPath,
-      ...args,
-    ],
+    [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), targetScript, ...args],
     {
       cwd,
       env: process.env,
       encoding: "utf8",
-    },
+    }
   );
   return {
     code: result.status ?? -1,
@@ -45,12 +41,50 @@ function runSmoke(args: readonly string[], cwd: string = repoRoot): {
 
 test("bench-smoke passes against the committed baseline", () => {
   const { code, stdout } = runSmoke([]);
-  assert.equal(
-    code,
-    0,
-    `bench-smoke exited non-zero:\n${stdout}`,
-  );
+  assert.equal(code, 0, `bench-smoke exited non-zero:\n${stdout}`);
   assert.match(stdout, /all metrics within tolerance/);
+});
+
+test("deterministic adapter instances do not share search state", async () => {
+  const first = createDeterministicAdapter();
+  const second = createDeterministicAdapter();
+
+  await first.store("longmemeval-session", [
+    {
+      role: "user",
+      content: "adapter isolation sentinel only in the first benchmark",
+    },
+  ]);
+
+  assert.equal((await first.search("adapter isolation sentinel", 10)).length, 1);
+  assert.equal((await second.search("adapter isolation sentinel", 10)).length, 0);
+});
+
+test("bench-smoke creates a fresh adapter for each benchmark family", async () => {
+  const adapters: ReturnType<typeof createDeterministicAdapter>[] = [];
+
+  await runSmokeBenchmarks(1, () => {
+    const adapter = createDeterministicAdapter();
+    adapters.push(adapter);
+    return adapter;
+  });
+
+  assert.equal(adapters.length, 2);
+  assert.notEqual(adapters[0], adapters[1]);
+});
+
+test("bench-smoke runs when invoked through a symlinked script path", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-smoke-symlink-"));
+  try {
+    const linkedScript = path.join(dir, "bench-smoke.ts");
+    await symlink(scriptPath, linkedScript);
+
+    const { code, stdout } = runSmoke(["--help"], repoRoot, linkedScript);
+    assert.equal(code, 0);
+    assert.match(stdout, /LongMemEval \+ LoCoMo smoke regression gate/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("bench-smoke rejects invalid --seed", () => {
@@ -106,7 +140,7 @@ test("bench-smoke fails when a baseline metric disappears from the current run",
     // will never produce. This simulates a runner-side regression that
     // stops emitting a metric.
     for (const benchmarkId of Object.keys(baseline.benchmarks)) {
-      baseline.benchmarks[benchmarkId]!.metrics["phantom_metric"] = 0.5;
+      baseline.benchmarks[benchmarkId]!.metrics.phantom_metric = 0.5;
     }
     const tamperedPath = path.join(dir, "baseline.json");
     await writeFile(tamperedPath, JSON.stringify(baseline, null, 2), "utf8");
@@ -128,7 +162,7 @@ test("bench-smoke fails when an entire baseline benchmark disappears", async () 
       benchmarks: Record<string, { metrics: Record<string, number> }>;
     };
     // Inject a phantom benchmark entirely.
-    baseline.benchmarks["phantom_bench"] = { metrics: { score: 0.5 } };
+    baseline.benchmarks.phantom_bench = { metrics: { score: 0.5 } };
     const tamperedPath = path.join(dir, "baseline.json");
     await writeFile(tamperedPath, JSON.stringify(baseline, null, 2), "utf8");
     const { code, stderr } = runSmoke(["--baseline", tamperedPath]);
@@ -203,11 +237,7 @@ test("bench-smoke rejects baseline with bad schemaVersion", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "bench-smoke-shape-"));
   try {
     const tamperedPath = path.join(dir, "baseline.json");
-    await writeFile(
-      tamperedPath,
-      JSON.stringify({ schemaVersion: 99, benchmarks: {} }),
-      "utf8",
-    );
+    await writeFile(tamperedPath, JSON.stringify({ schemaVersion: 99, benchmarks: {} }), "utf8");
     const { code, stderr } = runSmoke(["--baseline", tamperedPath]);
     assert.equal(code, 1);
     assert.match(stderr, /schemaVersion must be 1/);
@@ -220,11 +250,7 @@ test("bench-smoke rejects baseline with non-finite metric", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "bench-smoke-infinite-"));
   try {
     const tamperedPath = path.join(dir, "baseline.json");
-    await writeFile(
-      tamperedPath,
-      '{"schemaVersion":1,"benchmarks":{"longmemeval":{"metrics":{"f1":1e309}}}}',
-      "utf8",
-    );
+    await writeFile(tamperedPath, '{"schemaVersion":1,"benchmarks":{"longmemeval":{"metrics":{"f1":1e309}}}}', "utf8");
     const { code, stderr } = runSmoke(["--baseline", tamperedPath]);
     assert.equal(code, 1);
     assert.match(stderr, /must be a finite number/);
@@ -258,7 +284,7 @@ test("bench-smoke --update-baseline writes a stable file (no timestamp)", async 
     assert.ok(parsed.benchmarks.locomo);
     assert.ok(
       !Object.prototype.hasOwnProperty.call(parsed, "generatedAt"),
-      "baseline must not carry a generatedAt timestamp",
+      "baseline must not carry a generatedAt timestamp"
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

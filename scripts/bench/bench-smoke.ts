@@ -24,18 +24,11 @@
  *   1 — regression detected OR CLI usage error
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
-  locomoDefinition,
-  runLoCoMoBenchmark,
-} from "../../packages/bench/src/benchmarks/published/locomo/runner.js";
-import {
-  longMemEvalDefinition,
-  runLongMemEvalBenchmark,
-} from "../../packages/bench/src/benchmarks/published/longmemeval/runner.js";
 import type {
   BenchJudge,
   BenchMemoryAdapter,
@@ -43,6 +36,11 @@ import type {
   Message,
   SearchResult,
 } from "../../packages/bench/src/adapters/types.js";
+import { locomoDefinition, runLoCoMoBenchmark } from "../../packages/bench/src/benchmarks/published/locomo/runner.js";
+import {
+  longMemEvalDefinition,
+  runLongMemEvalBenchmark,
+} from "../../packages/bench/src/benchmarks/published/longmemeval/runner.js";
 
 // Tolerance for each metric. Issue #566 spec: fail if score drops > 5%
 // vs committed baseline. This is a RELATIVE drop: a metric regresses
@@ -82,30 +80,20 @@ interface CliArgs {
  * tokens (`--foo`, `-x`). This prevents `--baseline --update-baseline`
  * from silently swallowing the next flag as a path (CLAUDE.md rule 14).
  */
-function requireFlagValue(
-  argv: readonly string[],
-  index: number,
-  flag: string,
-  kind: string,
-): string {
+function requireFlagValue(argv: readonly string[], index: number, flag: string, kind: string): string {
   const value = argv[index + 1];
   if (value === undefined || value.length === 0) {
     throw new Error(`${flag} requires ${kind}`);
   }
   if (value.startsWith("-")) {
-    throw new Error(
-      `${flag} requires ${kind}; got option-like token "${value}"`,
-    );
+    throw new Error(`${flag} requires ${kind}; got option-like token "${value}"`);
   }
   return value;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
   let seed = 1;
-  let baselinePath = path.resolve(
-    process.cwd(),
-    "tests/fixtures/bench-smoke/baseline.json",
-  );
+  let baselinePath = path.resolve(process.cwd(), "tests/fixtures/bench-smoke/baseline.json");
   let updateBaseline = false;
   let tolerance = REGRESSION_TOLERANCE;
 
@@ -132,9 +120,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
         const value = requireFlagValue(argv, index, "--tolerance", "a number");
         const parsed = Number(value);
         if (!Number.isFinite(parsed) || parsed < 0) {
-          throw new Error(
-            `--tolerance must be a non-negative number; got ${value}`,
-          );
+          throw new Error(`--tolerance must be a non-negative number; got ${value}`);
         }
         tolerance = parsed;
         index += 1;
@@ -149,9 +135,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
         process.exit(0);
         break;
       default:
-        throw new Error(
-          `Unknown argument: ${arg}. Run --help for usage.`,
-        );
+        throw new Error(`Unknown argument: ${arg}. Run --help for usage.`);
     }
   }
 
@@ -172,7 +156,7 @@ function printUsage(): void {
       "  --tolerance N        Max allowed RELATIVE metric drop (default 0.05 = 5%)",
       "  --update-baseline    Overwrite the baseline JSON with current run",
       "",
-    ].join("\n"),
+    ].join("\n")
   );
 }
 
@@ -180,7 +164,7 @@ function printUsage(): void {
 // Deterministic adapter + responder + judge
 // ---------------------------------------------------------------------------
 
-function createDeterministicAdapter(): BenchMemoryAdapter {
+export function createDeterministicAdapter(): BenchMemoryAdapter {
   const store = new Map<string, Message[]>();
   const responder: BenchResponder = {
     async respond(_question, recalledText) {
@@ -223,10 +207,7 @@ function createDeterministicAdapter(): BenchMemoryAdapter {
       for (const [sessionId, messages] of store) {
         for (let turnIndex = 0; turnIndex < messages.length; turnIndex += 1) {
           const message = messages[turnIndex]!;
-          if (
-            typeof message.content === "string" &&
-            message.content.toLowerCase().includes(lowered)
-          ) {
+          if (typeof message.content === "string" && message.content.toLowerCase().includes(lowered)) {
             results.push({
               turnIndex,
               role: message.role,
@@ -250,15 +231,33 @@ function createDeterministicAdapter(): BenchMemoryAdapter {
     },
     async getStats() {
       return {
-        totalMessages: [...store.values()].reduce(
-          (total, messages) => total + messages.length,
-          0,
-        ),
+        totalMessages: [...store.values()].reduce((total, messages) => total + messages.length, 0),
         totalSummaryNodes: 0,
         maxDepth: 0,
       };
     },
   };
+}
+
+export async function runSmokeBenchmarks(
+  seed: number,
+  createAdapter: () => BenchMemoryAdapter = createDeterministicAdapter
+) {
+  const longmemeval = await runLongMemEvalBenchmark({
+    benchmark: longMemEvalDefinition,
+    mode: "quick",
+    seed,
+    system: createAdapter(),
+  });
+
+  const locomo = await runLoCoMoBenchmark({
+    benchmark: locomoDefinition,
+    mode: "quick",
+    seed,
+    system: createAdapter(),
+  });
+
+  return { longmemeval, locomo };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,32 +269,14 @@ async function main(argv: readonly string[]): Promise<number> {
   try {
     args = parseArgs(argv);
   } catch (error) {
-    process.stderr.write(
-      `bench-smoke: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    process.stderr.write(`bench-smoke: ${error instanceof Error ? error.message : String(error)}\n`);
     printUsage();
     return 1;
   }
 
-  const adapter = createDeterministicAdapter();
+  process.stdout.write(`bench-smoke: running LongMemEval + LoCoMo smoke fixtures (seed=${args.seed})\n`);
 
-  process.stdout.write(
-    `bench-smoke: running LongMemEval + LoCoMo smoke fixtures (seed=${args.seed})\n`,
-  );
-
-  const longmemeval = await runLongMemEvalBenchmark({
-    benchmark: longMemEvalDefinition,
-    mode: "quick",
-    seed: args.seed,
-    system: adapter,
-  });
-
-  const locomo = await runLoCoMoBenchmark({
-    benchmark: locomoDefinition,
-    mode: "quick",
-    seed: args.seed,
-    system: adapter,
-  });
+  const { longmemeval, locomo } = await runSmokeBenchmarks(args.seed);
 
   const current: SmokeBaseline = {
     schemaVersion: 1,
@@ -306,14 +287,8 @@ async function main(argv: readonly string[]): Promise<number> {
   };
 
   if (args.updateBaseline) {
-    await writeFile(
-      args.baselinePath,
-      JSON.stringify(current, null, 2) + "\n",
-      "utf8",
-    );
-    process.stdout.write(
-      `bench-smoke: wrote baseline → ${args.baselinePath}\n`,
-    );
+    await writeFile(args.baselinePath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+    process.stdout.write(`bench-smoke: wrote baseline → ${args.baselinePath}\n`);
     return 0;
   }
 
@@ -328,49 +303,31 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     const record = parsed as Record<string, unknown>;
     if (record.schemaVersion !== 1) {
-      throw new Error(
-        `baseline schemaVersion must be 1; got ${String(record.schemaVersion)}`,
-      );
+      throw new Error(`baseline schemaVersion must be 1; got ${String(record.schemaVersion)}`);
     }
-    if (
-      !record.benchmarks ||
-      typeof record.benchmarks !== "object" ||
-      Array.isArray(record.benchmarks)
-    ) {
+    if (!record.benchmarks || typeof record.benchmarks !== "object" || Array.isArray(record.benchmarks)) {
       throw new Error("baseline.benchmarks must be an object");
     }
-    for (const [benchmarkId, bench] of Object.entries(
-      record.benchmarks as Record<string, unknown>,
-    )) {
+    for (const [benchmarkId, bench] of Object.entries(record.benchmarks as Record<string, unknown>)) {
       if (!bench || typeof bench !== "object" || Array.isArray(bench)) {
-        throw new Error(
-          `baseline.benchmarks.${benchmarkId} must be an object`,
-        );
+        throw new Error(`baseline.benchmarks.${benchmarkId} must be an object`);
       }
       const metrics = (bench as { metrics?: unknown }).metrics;
       if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
-        throw new Error(
-          `baseline.benchmarks.${benchmarkId}.metrics must be an object`,
-        );
+        throw new Error(`baseline.benchmarks.${benchmarkId}.metrics must be an object`);
       }
-      for (const [metric, value] of Object.entries(
-        metrics as Record<string, unknown>,
-      )) {
+      for (const [metric, value] of Object.entries(metrics as Record<string, unknown>)) {
         if (typeof value !== "number" || !Number.isFinite(value)) {
-          throw new Error(
-            `baseline.benchmarks.${benchmarkId}.metrics.${metric} must be a finite number`,
-          );
+          throw new Error(`baseline.benchmarks.${benchmarkId}.metrics.${metric} must be a finite number`);
         }
       }
     }
     baseline = parsed as SmokeBaseline;
   } catch (error) {
     process.stderr.write(
-      `bench-smoke: failed to read baseline from ${args.baselinePath}: ${error instanceof Error ? error.message : String(error)}\n`,
+      `bench-smoke: failed to read baseline from ${args.baselinePath}: ${error instanceof Error ? error.message : String(error)}\n`
     );
-    process.stderr.write(
-      "bench-smoke: run with --update-baseline to generate one.\n",
-    );
+    process.stderr.write("bench-smoke: run with --update-baseline to generate one.\n");
     return 1;
   }
 
@@ -383,9 +340,7 @@ async function main(argv: readonly string[]): Promise<number> {
     for (const [metric, value] of Object.entries(bench.metrics)) {
       const baselineValue = baselineMetrics[metric];
       if (baselineValue === undefined) {
-        process.stdout.write(
-          `bench-smoke: [${benchmarkId}] ${metric}=${value.toFixed(4)} (new metric, no baseline)\n`,
-        );
+        process.stdout.write(`bench-smoke: [${benchmarkId}] ${metric}=${value.toFixed(4)} (new metric, no baseline)\n`);
         continue;
       }
       const delta = value - baselineValue;
@@ -396,18 +351,14 @@ async function main(argv: readonly string[]): Promise<number> {
       const denom = Math.abs(baselineValue);
       const relativeDrop = denom === 0 ? -delta : (baselineValue - value) / denom;
       const regressed = relativeDrop > args.tolerance;
-      const verdict = regressed
-        ? `REGRESSION (tol=${args.tolerance} relative)`
-        : "ok";
-      const relDisplay = denom === 0
-        ? `abs-delta=${delta.toFixed(4)}`
-        : `rel-drop=${(relativeDrop * 100).toFixed(2)}%`;
+      const verdict = regressed ? `REGRESSION (tol=${args.tolerance} relative)` : "ok";
+      const relDisplay = denom === 0 ? `abs-delta=${delta.toFixed(4)}` : `rel-drop=${(relativeDrop * 100).toFixed(2)}%`;
       process.stdout.write(
-        `bench-smoke: [${benchmarkId}] ${metric} baseline=${baselineValue.toFixed(4)} current=${value.toFixed(4)} delta=${delta >= 0 ? "+" : ""}${delta.toFixed(4)} ${relDisplay} ${verdict}\n`,
+        `bench-smoke: [${benchmarkId}] ${metric} baseline=${baselineValue.toFixed(4)} current=${value.toFixed(4)} delta=${delta >= 0 ? "+" : ""}${delta.toFixed(4)} ${relDisplay} ${verdict}\n`
       );
       if (regressed) {
         regressions.push(
-          `${benchmarkId}.${metric} dropped ${Math.abs(delta).toFixed(4)} (baseline=${baselineValue.toFixed(4)}, current=${value.toFixed(4)}, relative=${(relativeDrop * 100).toFixed(2)}%, tolerance=${(args.tolerance * 100).toFixed(2)}%)`,
+          `${benchmarkId}.${metric} dropped ${Math.abs(delta).toFixed(4)} (baseline=${baselineValue.toFixed(4)}, current=${value.toFixed(4)}, relative=${(relativeDrop * 100).toFixed(2)}%, tolerance=${(args.tolerance * 100).toFixed(2)}%)`
         );
       }
     }
@@ -416,27 +367,17 @@ async function main(argv: readonly string[]): Promise<number> {
   // 2) Verify every baseline benchmark + metric still exists in the
   // current run. A silently vanished metric (e.g. scorer bug drops
   // `f1`) must fail the gate instead of passing quietly.
-  for (const [benchmarkId, benchBaseline] of Object.entries(
-    baseline.benchmarks,
-  )) {
+  for (const [benchmarkId, benchBaseline] of Object.entries(baseline.benchmarks)) {
     const currentBench = current.benchmarks[benchmarkId];
     if (!currentBench) {
-      missing.push(
-        `${benchmarkId}: entire benchmark missing from current run`,
-      );
-      process.stdout.write(
-        `bench-smoke: [${benchmarkId}] MISSING (benchmark absent from current run)\n`,
-      );
+      missing.push(`${benchmarkId}: entire benchmark missing from current run`);
+      process.stdout.write(`bench-smoke: [${benchmarkId}] MISSING (benchmark absent from current run)\n`);
       continue;
     }
     for (const metric of Object.keys(benchBaseline.metrics)) {
       if (currentBench.metrics[metric] === undefined) {
-        missing.push(
-          `${benchmarkId}.${metric}: present in baseline, absent in current run`,
-        );
-        process.stdout.write(
-          `bench-smoke: [${benchmarkId}] ${metric} MISSING (metric absent from current run)\n`,
-        );
+        missing.push(`${benchmarkId}.${metric}: present in baseline, absent in current run`);
+        process.stdout.write(`bench-smoke: [${benchmarkId}] ${metric} MISSING (metric absent from current run)\n`);
       }
     }
   }
@@ -444,7 +385,7 @@ async function main(argv: readonly string[]): Promise<number> {
   if (regressions.length > 0 || missing.length > 0) {
     if (regressions.length > 0) {
       process.stderr.write(
-        `\nbench-smoke: REGRESSION detected (${regressions.length} metric${regressions.length === 1 ? "" : "s"}):\n`,
+        `\nbench-smoke: REGRESSION detected (${regressions.length} metric${regressions.length === 1 ? "" : "s"}):\n`
       );
       for (const regression of regressions) {
         process.stderr.write(`  - ${regression}\n`);
@@ -452,15 +393,13 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (missing.length > 0) {
       process.stderr.write(
-        `\nbench-smoke: MISSING metric(s) present in baseline but absent in current run (${missing.length}):\n`,
+        `\nbench-smoke: MISSING metric(s) present in baseline but absent in current run (${missing.length}):\n`
       );
       for (const entry of missing) {
         process.stderr.write(`  - ${entry}\n`);
       }
     }
-    process.stderr.write(
-      "\nIf this change is intentional, re-run with --update-baseline.\n",
-    );
+    process.stderr.write("\nIf this change is intentional, re-run with --update-baseline.\n");
     return 1;
   }
 
@@ -468,9 +407,7 @@ async function main(argv: readonly string[]): Promise<number> {
   return 0;
 }
 
-function extractMetrics(
-  aggregates: Record<string, { mean: number }>,
-): Record<string, number> {
+function extractMetrics(aggregates: Record<string, { mean: number }>): Record<string, number> {
   const out: Record<string, number> = {};
   for (const key of Object.keys(aggregates).sort()) {
     const mean = aggregates[key]?.mean;
@@ -481,13 +418,28 @@ function extractMetrics(
   return out;
 }
 
-main(process.argv.slice(2))
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error) => {
-    process.stderr.write(
-      `bench-smoke crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
-    );
-    process.exitCode = 1;
-  });
+async function isDirectInvocation(argvPath: string | undefined): Promise<boolean> {
+  if (!argvPath) {
+    return false;
+  }
+
+  const [invokedPath, modulePath] = await Promise.all([
+    realpath(argvPath).catch(() => path.resolve(argvPath)),
+    realpath(fileURLToPath(import.meta.url)).catch(() => fileURLToPath(import.meta.url)),
+  ]);
+
+  return pathToFileURL(invokedPath).href === pathToFileURL(modulePath).href;
+}
+
+if (await isDirectInvocation(process.argv[1])) {
+  main(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      process.stderr.write(
+        `bench-smoke crashed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+      );
+      process.exitCode = 1;
+    });
+}
