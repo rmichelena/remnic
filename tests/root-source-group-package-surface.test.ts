@@ -11,6 +11,8 @@ type RootPackageJson = {
 };
 
 const sourceGroupShims = [
+  "consolidation-operator",
+  "consolidation-undo",
   "delinearize",
   "embedding-fallback",
   "enrichment",

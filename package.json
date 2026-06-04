@@ -33,9 +33,7 @@
     "url": "https://github.com/joshuaswarren/remnic/issues"
   },
   "author": "Joshua Warren",
-  "workspaces": [
-    "packages/*"
-  ],
+  "workspaces": ["packages/*"],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -202,6 +200,18 @@
     },
     "./consolidation-provenance-check.js": {
       "import": "./dist/consolidation-provenance-check.js"
+    },
+    "./consolidation-operator": {
+      "import": "./dist/consolidation-operator.js"
+    },
+    "./consolidation-operator.js": {
+      "import": "./dist/consolidation-operator.js"
+    },
+    "./consolidation-undo": {
+      "import": "./dist/consolidation-undo.js"
+    },
+    "./consolidation-undo.js": {
+      "import": "./dist/consolidation-undo.js"
     },
     "./delinearize": {
       "import": "./dist/delinearize.js"
@@ -780,12 +790,7 @@
       "import": "./dist/transfer/types.js"
     }
   },
-  "files": [
-    "dist",
-    "bin/engram-access.js",
-    "openclaw.plugin.json",
-    "scripts/ensure-better-sqlite3.mjs"
-  ],
+  "files": ["dist", "bin/engram-access.js", "openclaw.plugin.json", "scripts/ensure-better-sqlite3.mjs"],
   "dependencies": {
     "@honcho-ai/sdk": "^2.0.0",
     "@lancedb/lancedb": "^0.26.2",
@@ -808,9 +813,7 @@
   },
   "openclaw": {
     "plugin": "./openclaw.plugin.json",
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "extensions": ["./dist/index.js"]
   },
   "scripts": {
     "sync:openclaw-plugin": "node scripts/sync-openclaw-plugin.mjs",
@@ -863,12 +866,6 @@
     "typescript": "^5.9.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "sharp",
-      "koffi",
-      "protobufjs"
-    ]
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp", "koffi", "protobufjs"]
   }
 }
