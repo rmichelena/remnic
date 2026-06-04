@@ -53,7 +53,7 @@ export async function findGatewayRuntimeModules(filePrefix: string): Promise<str
     for (const f of files) {
       if (f.startsWith(filePrefix) && f.endsWith(".js")) {
         const candidate = realpathSync(path.join(distDir, f));
-        if (isWithinRoot(packageRoot, candidate)) {
+        if (isWithinRoot(packageRoot, candidate) && isWithinRoot(distDir, candidate)) {
           candidates.push(candidate);
         }
       }
