@@ -86,3 +86,55 @@ test("rerankLocalOrNoop cache is isolated from caller mutations", async () => {
   assert.deepEqual(second, ["a", "b"]);
   assert.equal(calls, 1);
 });
+
+test("rerankLocalOrNoop cache keys distinguish candidate IDs containing commas", async () => {
+  let calls = 0;
+  const cache = new RerankCache();
+  const commonOptions = {
+    query: "API rate limit issue",
+    local: {
+      async chatCompletion() {
+        calls += 1;
+        return {
+          content: JSON.stringify({
+            scores:
+              calls === 1
+                ? [
+                    { id: "c", score: 90 },
+                    { id: "a,b", score: 10 },
+                  ]
+                : [
+                    { id: "b,c", score: 90 },
+                    { id: "a", score: 10 },
+                  ],
+          }),
+        };
+      },
+    },
+    enabled: true,
+    timeoutMs: 1_500,
+    maxCandidates: 5,
+    cache,
+    cacheEnabled: true,
+    cacheTtlMs: 60_000,
+  };
+
+  const first = await rerankLocalOrNoop({
+    ...commonOptions,
+    candidates: [
+      { id: "a,b", snippet: "API rate limit is 1000 requests per minute." },
+      { id: "c", snippet: "Deployment note." },
+    ],
+  });
+  assert.deepEqual(first, ["c", "a,b"]);
+
+  const second = await rerankLocalOrNoop({
+    ...commonOptions,
+    candidates: [
+      { id: "a", snippet: "API rate limit is 1000 requests per minute." },
+      { id: "b,c", snippet: "Deployment note." },
+    ],
+  });
+  assert.deepEqual(second, ["b,c", "a"]);
+  assert.equal(calls, 2);
+});
