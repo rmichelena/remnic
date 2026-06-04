@@ -109,6 +109,7 @@ export default defineConfig({
     "src/search/orama-backend.ts",
     "src/search/port.ts",
     "src/search/remote-backend.ts",
+    "src/secure-store/index.ts",
     "src/schemas.ts",
     "src/sdk-compat.ts",
     "src/session-observer-bands.ts",
