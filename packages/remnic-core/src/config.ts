@@ -13,6 +13,7 @@ import type {
   HeartbeatConfig,
   IdentityInjectionMode,
   MemoryOsPresetName,
+  AgentPersonaModelConfig,
   PluginConfig,
   PrincipalRule,
   RecallPipelineConfig,
@@ -67,6 +68,81 @@ function parseBoundedIntegerMs(
   const coerced = coerceNumber(value);
   if (coerced === undefined) return fallback;
   return Math.min(max, Math.max(min, Math.floor(coerced)));
+}
+
+// A gateway model string must be "provider/model" — at least one "/" with a
+// non-empty provider segment and a non-empty model segment. This mirrors
+// FallbackLlmClient.parseModelString (which requires >= 2 slash-parts), so a
+// model the runtime would silently drop is rejected at config time instead.
+function isQualifiedModelString(value: string): boolean {
+  const slash = value.indexOf("/");
+  return slash > 0 && slash < value.length - 1;
+}
+
+function parseModelChainConfig(
+  value: unknown,
+  keyName: string,
+): AgentPersonaModelConfig | undefined {
+  // Absent → not configured (no error).
+  if (value === undefined || value === null) return undefined;
+
+  // Present but malformed → reject loudly rather than silently dropping it,
+  // so a typo'd chain surfaces instead of quietly reverting to defaults
+  // (gotcha #51). Issue #1365 / PR #1370.
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${keyName} must be an object like { "primary": "provider/model", "fallbacks": ["provider/model", ...] }; got ${JSON.stringify(value)}`,
+    );
+  }
+  const raw = value as Record<string, unknown>;
+  // Reject unknown keys (matches the manifest's additionalProperties:false) so a
+  // misspelled "fallback"/"fallbackModels" doesn't silently drop the fallback
+  // chain (gotcha #51, codex review #1425).
+  const unknownKeys = Object.keys(raw).filter((k) => k !== "primary" && k !== "fallbacks");
+  if (unknownKeys.length > 0) {
+    throw new Error(
+      `${keyName} has unknown propert${unknownKeys.length === 1 ? "y" : "ies"}: ${unknownKeys.join(", ")}. Allowed: "primary", "fallbacks".`,
+    );
+  }
+  if (typeof raw.primary !== "string" || raw.primary.trim().length === 0) {
+    throw new Error(
+      `${keyName}.primary is required and must be a non-empty "provider/model" string; got ${JSON.stringify(raw.primary)}`,
+    );
+  }
+  const primary = raw.primary.trim();
+  if (!isQualifiedModelString(primary)) {
+    throw new Error(
+      `${keyName}.primary must be in "provider/model" form (e.g. "zai/glm-4.7-flash"); got ${JSON.stringify(primary)}`,
+    );
+  }
+
+  let dedupedFallbacks: string[] | undefined;
+  if (raw.fallbacks !== undefined) {
+    if (!Array.isArray(raw.fallbacks)) {
+      throw new Error(
+        `${keyName}.fallbacks must be an array of "provider/model" strings; got ${JSON.stringify(raw.fallbacks)}`,
+      );
+    }
+    if (raw.fallbacks.some((item) => typeof item !== "string")) {
+      throw new Error(`${keyName}.fallbacks must contain only strings`);
+    }
+    const trimmed = raw.fallbacks
+      .map((item) => (item as string).trim())
+      .filter((item) => item.length > 0 && item !== primary);
+    for (const fb of trimmed) {
+      if (!isQualifiedModelString(fb)) {
+        throw new Error(
+          `${keyName}.fallbacks entries must be in "provider/model" form; got ${JSON.stringify(fb)}`,
+        );
+      }
+    }
+    dedupedFallbacks = [...new Set(trimmed)];
+  }
+
+  return {
+    primary,
+    ...(dedupedFallbacks && dedupedFallbacks.length > 0 ? { fallbacks: dedupedFallbacks } : {}),
+  };
 }
 
 function parsePositiveInteger(value: unknown, keyName: string): number | undefined {
@@ -2425,6 +2501,7 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.fastGatewayAgentId === "string" && cfg.fastGatewayAgentId.length > 0
         ? cfg.fastGatewayAgentId
         : "",
+    taskModelChain: parseModelChainConfig(cfg.taskModelChain, "taskModelChain"),
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,

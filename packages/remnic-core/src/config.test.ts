@@ -193,6 +193,82 @@ test("parseConfig modelSource=gateway does not inherit OPENAI_API_KEY from the p
   }
 });
 
+test("parseConfig normalizes taskModelChain", () => {
+  const cfg = parseConfig({
+    taskModelChain: {
+      primary: " openai/cheap-primary ",
+      fallbacks: ["openai/cheap-primary", " fireworks/accounts/fireworks/models/glm-5p1 ", ""],
+    },
+  });
+
+  assert.deepEqual(cfg.taskModelChain, {
+    primary: "openai/cheap-primary",
+    fallbacks: ["fireworks/accounts/fireworks/models/glm-5p1"],
+  });
+});
+
+test("parseConfig treats an absent taskModelChain as not configured", () => {
+  assert.equal(parseConfig({}).taskModelChain, undefined);
+  assert.equal(parseConfig({ taskModelChain: null }).taskModelChain, undefined);
+  assert.equal(parseConfig({ taskModelChain: undefined }).taskModelChain, undefined);
+});
+
+test("parseConfig rejects a present-but-malformed taskModelChain (gotcha #51)", () => {
+  // A typo'd chain must surface loudly instead of silently reverting to defaults.
+  assert.throws(() => parseConfig({ taskModelChain: [] }), /taskModelChain must be an object/);
+  assert.throws(() => parseConfig({ taskModelChain: "openai/x" }), /taskModelChain must be an object/);
+  assert.throws(() => parseConfig({ taskModelChain: { primary: " " } }), /taskModelChain\.primary is required/);
+  assert.throws(() => parseConfig({ taskModelChain: { fallbacks: ["openai/fallback-only"] } }), /taskModelChain\.primary is required/);
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallbacks: "not-an-array" } }),
+    /taskModelChain\.fallbacks must be an array/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallbacks: [123] } }),
+    /taskModelChain\.fallbacks must contain only strings/,
+  );
+});
+
+test("parseConfig rejects unqualified taskModelChain model strings (codex review #1425)", () => {
+  // A slash-less id like "gpt-4.1" parses here but FallbackLlmClient.parseModelString
+  // drops it, leaving the chain silently using a different model — reject at parse.
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "gpt-4.1" } }),
+    /taskModelChain\.primary must be in "provider\/model" form/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/" } }),
+    /taskModelChain\.primary must be in "provider\/model" form/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "/gpt-4.1" } }),
+    /taskModelChain\.primary must be in "provider\/model" form/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/gpt", fallbacks: ["bare-model"] } }),
+    /taskModelChain\.fallbacks entries must be in "provider\/model" form/,
+  );
+  // Multi-slash provider/model paths remain valid.
+  assert.deepEqual(
+    parseConfig({
+      taskModelChain: { primary: "fireworks/accounts/fireworks/models/glm-5p1" },
+    }).taskModelChain,
+    { primary: "fireworks/accounts/fireworks/models/glm-5p1" },
+  );
+});
+
+test("parseConfig rejects unknown taskModelChain keys (codex review #1425)", () => {
+  // A misspelled "fallback" must not silently drop the fallback chain.
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallback: ["openai/q"] } }),
+    /taskModelChain has unknown property: fallback/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallbackModels: ["openai/q"], extra: 1 } }),
+    /taskModelChain has unknown properties:/,
+  );
+});
+
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {
   const original = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "sk-env-should-not-be-used";

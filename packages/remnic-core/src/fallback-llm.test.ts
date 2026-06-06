@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
-import { FallbackLlmClient } from "./fallback-llm.js";
+import { FallbackLlmClient, gatewayTaskChainOptions } from "./fallback-llm.js";
 import { __codexCliFallbackTestHooks } from "./codex-cli-fallback.js";
 import { clearModelsJsonCache, __setModelsJsonForTest } from "./models-json.js";
 import {
@@ -66,6 +66,232 @@ test("fallback llm prefers the active gateway provider config over models.json",
 
     assert.equal(response?.content, "ok");
     assert.equal(capturedUrl, "https://raw.example/v1/chat/completions");
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm uses an explicit model chain override instead of gateway defaults", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+          fallbacks: ["openai/default-fallback"],
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    if (body.model === "cheap-primary") {
+      return new Response(JSON.stringify({ error: { message: "try fallback" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "fallback ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        modelChain: {
+          primary: "openai/cheap-primary",
+          fallbacks: ["openai/cheap-primary", "openai/cheap-fallback"],
+        },
+      },
+    );
+
+    assert.equal(response?.content, "fallback ok");
+    assert.equal(response?.modelUsed, "openai/cheap-fallback");
+    assert.deepEqual(attemptedModels, ["cheap-primary", "cheap-fallback"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm tries an explicit model override before a model chain override", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    if (body.model === "judge-model") {
+      return new Response(JSON.stringify({ error: { message: "try task chain" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "task chain ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Judge this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        model: "openai/judge-model",
+        modelChain: { primary: "openai/task-primary" },
+      },
+    );
+
+    assert.equal(response?.content, "task chain ok");
+    assert.equal(response?.modelUsed, "openai/task-primary");
+    assert.deepEqual(attemptedModels, ["judge-model", "task-primary"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm availability checks an explicit model chain override", () => {
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  assert.equal(llm.isAvailable({ modelChain: { primary: "openai/task-primary" } }), true);
+  assert.equal(llm.isAvailable({ modelChain: {} }), true);
+});
+
+test("fallback llm deduplicates a model override that matches the model chain primary", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "dedupe ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Judge this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        model: "openai/task-primary",
+        modelChain: {
+          primary: "openai/task-primary",
+          fallbacks: ["openai/task-fallback"],
+        },
+      },
+    );
+
+    assert.equal(response?.content, "dedupe ok");
+    assert.equal(response?.modelUsed, "openai/task-primary");
+    assert.deepEqual(attemptedModels, ["task-primary"]);
   } finally {
     globalThis.fetch = originalFetch;
     clearModelsJsonCache();
@@ -1048,6 +1274,379 @@ test("fallback llm normalizes anthropic-compatible base URLs that omit /v1", { c
 
     assert.equal(response?.content, "ok from anthropic");
     assert.equal(capturedUrl, "https://anthropic.example/api/v1/messages");
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm appends gateway default model as implicit last resort when chain is exhausted", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    if (body.model === "stale-primary" || body.model === "stale-fallback") {
+      return new Response(JSON.stringify({ error: { message: "provider gone" } }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "default-model ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        modelChain: {
+          primary: "openai/stale-primary",
+          fallbacks: ["openai/stale-fallback"],
+        },
+      },
+    );
+
+    // All chain models failed, but gateway default model was appended and succeeds
+    assert.equal(response?.content, "default-model ok");
+    assert.equal(response?.modelUsed, "openai/default-model");
+    assert.deepEqual(attemptedModels, ["stale-primary", "stale-fallback", "default-model"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm does not duplicate gateway default model when it is already in chain", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        modelChain: {
+          primary: "openai/default-model",
+        },
+      },
+    );
+
+    // The default model is already primary in the chain — should not be appended again
+    assert.equal(response?.content, "ok");
+    assert.equal(response?.modelUsed, "openai/default-model");
+    assert.deepEqual(attemptedModels, ["default-model"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm does not append gateway default model when no chain is provided", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: {
+        model: {
+          primary: "openai/default-model",
+        },
+      },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "ok" } }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      { temperature: 0, maxTokens: 16 },
+    );
+
+    // Without modelChainOverride, the chain is built from agents.defaults.model;
+    // the default model is already the primary, so no duplication
+    assert.equal(response?.content, "ok");
+    assert.equal(response?.modelUsed, "openai/default-model");
+    assert.deepEqual(attemptedModels, ["default-model"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("gatewayTaskChainOptions resolves the single source of truth for task routing", () => {
+  // taskModelChain wins over gatewayAgentId in gateway mode.
+  assert.deepEqual(
+    gatewayTaskChainOptions({ modelSource: "gateway", gatewayAgentId: "persona", taskModelChain: { primary: "zai/glm-4.7-flash" } }),
+    { modelChain: { primary: "zai/glm-4.7-flash" } },
+  );
+  // Falls back to gatewayAgentId when no taskModelChain.
+  assert.deepEqual(
+    gatewayTaskChainOptions({ modelSource: "gateway", gatewayAgentId: "persona", taskModelChain: undefined }),
+    { agentId: "persona" },
+  );
+  // Empty when gateway mode but neither configured.
+  assert.deepEqual(
+    gatewayTaskChainOptions({ modelSource: "gateway", gatewayAgentId: "", taskModelChain: undefined }),
+    {},
+  );
+  // Plugin mode never routes through the chain, even if taskModelChain is set.
+  assert.deepEqual(
+    gatewayTaskChainOptions({ modelSource: "plugin", gatewayAgentId: "persona", taskModelChain: { primary: "zai/glm-4.7-flash" } }),
+    {},
+  );
+});
+
+test("fallback llm last-resort appends the full gateway default chain (primary + fallbacks)", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  // taskModelChain exhausted AND default primary unreachable — a listed default
+  // fallback must still be tried (cursor review #1425).
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: { model: { primary: "openai/default-primary", fallbacks: ["openai/default-fallback"] } },
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attempted: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attempted.push(String(body.model ?? ""));
+    if (body.model === "default-fallback") {
+      return new Response(JSON.stringify({ choices: [{ message: { content: "default-fallback ok" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ error: { message: "gone" } }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      {
+        temperature: 0,
+        maxTokens: 16,
+        modelChain: { primary: "openai/stale-primary", fallbacks: ["openai/stale-fallback"] },
+      },
+    );
+
+    assert.equal(response?.modelUsed, "openai/default-fallback");
+    assert.deepEqual(attempted, ["stale-primary", "stale-fallback", "default-primary", "default-fallback"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm does NOT append gateway default to a persona chain (last-resort is scoped to task chains)", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  // A persona chain that deliberately excludes the gateway default. Without a
+  // modelChain override, the implicit last-resort must NOT augment it, so the
+  // main agent's persona fallback behavior is preserved (gotcha #39).
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: { model: { primary: "openai/default-model" } },
+      list: [{ id: "main-agent", model: { primary: "openai/persona-model" } }],
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      { temperature: 0, maxTokens: 16, agentId: "main-agent" },
+    );
+
+    assert.equal(response?.modelUsed, "openai/persona-model");
+    // The gateway default must not be appended to the persona chain.
+    assert.deepEqual(attemptedModels, ["persona-model"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
+test("fallback llm does NOT append default for a primary-less override that falls through to a persona chain (cursor #1425)", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  // A primary-less override ({}) is inactive — chain resolution uses the persona
+  // chain. The implicit last-resort must key on the SAME activation condition
+  // (override.primary), so the persona chain is not augmented with the default.
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: { model: { primary: "openai/default-model" } },
+      list: [{ id: "main-agent", model: { primary: "openai/persona-model" } }],
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      { temperature: 0, maxTokens: 16, agentId: "main-agent", modelChain: {} },
+    );
+
+    assert.equal(response?.modelUsed, "openai/persona-model");
+    assert.deepEqual(attemptedModels, ["persona-model"]);
   } finally {
     globalThis.fetch = originalFetch;
     clearModelsJsonCache();

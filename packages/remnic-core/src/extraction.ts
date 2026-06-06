@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import { log } from "./logger.js";
 import { delinearize } from "./delinearize.js";
 import { LocalLlmClient } from "./local-llm.js";
-import { FallbackLlmClient, fallbackLlmRuntimeContextFromConfig } from "./fallback-llm.js";
+import { FallbackLlmClient, fallbackLlmRuntimeContextFromConfig, gatewayTaskChainOptions } from "./fallback-llm.js";
 import {
   ExtractionResultSchema,
   ConsolidationResultSchema,
@@ -123,7 +123,16 @@ export class ExtractionEngine {
     if (config.modelSource === "gateway") {
       log.debug(
         `extraction engine: gateway model source active; extraction uses the gateway chain as its primary path` +
-          (config.gatewayAgentId ? ` (agent: ${config.gatewayAgentId})` : " (defaults)"),
+          (config.taskModelChain ? " (taskModelChain)" :
+            config.gatewayAgentId ? ` (agent: ${config.gatewayAgentId})` : " (defaults)"),
+      );
+    } else if (config.taskModelChain) {
+      // taskModelChain resolves through gateway providers, so it only applies
+      // under modelSource: "gateway". Warn rather than silently ignore it so a
+      // misconfigured plugin-mode setup is visible. Issue #1365 / PR #1370.
+      log.warn(
+        `taskModelChain is set but modelSource is "${config.modelSource}"; the chain is ignored. ` +
+          `Set modelSource: "gateway" to use it for extraction/consolidation/summarization.`,
       );
     }
   }
@@ -157,8 +166,9 @@ export class ExtractionEngine {
    */
   private withGatewayAgent(options: import("./fallback-llm.js").FallbackLlmOptions): import("./fallback-llm.js").FallbackLlmOptions {
     if (!this.useGatewayModelSource) return options;
-    const agentId = this.config.gatewayAgentId || undefined;
-    return agentId ? { ...options, agentId } : options;
+    // Shared resolution (taskModelChain > gatewayAgentId) so every background
+    // task routes identically (gotcha #22). Issue #1365.
+    return { ...options, ...gatewayTaskChainOptions(this.config) };
   }
 
   private emit(event: LlmTraceEvent): void {
@@ -1098,7 +1108,8 @@ export class ExtractionEngine {
     if (this.useGatewayModelSource) {
       log.debug(
         `extraction: using gateway model chain as primary path` +
-          (this.config.gatewayAgentId ? ` (agent: ${this.config.gatewayAgentId})` : " (defaults)"),
+          (this.config.taskModelChain ? " (taskModelChain)" :
+            this.config.gatewayAgentId ? ` (agent: ${this.config.gatewayAgentId})` : " (defaults)"),
       );
     } else {
       log.info("extraction: falling back to gateway default AI");
