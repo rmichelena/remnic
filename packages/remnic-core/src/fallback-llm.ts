@@ -341,6 +341,28 @@ export class FallbackLlmClient {
       }
     }
 
+    // Implicit last-resort: always append the gateway default model so that a
+    // stale or exhausted extractionModelChain never leaves the chain empty.
+    // This guarantees Remnic can never be the reason a chat is interrupted
+    // by a flush failure — there is always at least one reachable model.
+    if (modelStrings.length > 0) {
+      const defaultModel = this.gatewayConfig?.agents?.defaults?.model?.primary;
+      if (
+        defaultModel &&
+        typeof defaultModel === "string" &&
+        defaultModel.trim().length > 0 &&
+        !modelStrings.includes(defaultModel.trim())
+      ) {
+        const defaultRef = this.parseModelString(defaultModel.trim(), providers);
+        if (defaultRef) {
+          chain.push(defaultRef);
+          log.debug(
+            `fallback LLM: appended gateway default model "${defaultModel.trim()}" as implicit last resort`,
+          );
+        }
+      }
+    }
+
     return chain;
   }
 
