@@ -492,7 +492,7 @@ export class CompoundingEngine {
           causalTrajectoryStoreDir: this.config.causalTrajectoryStoreDir,
           gatewayConfig: this.config.gatewayConfig,
           gatewayAgentId: this.config.modelSource === "gateway" ? (this.config.gatewayAgentId || undefined) : undefined,
-          modelChain: this.config.modelSource === "gateway" ? this.config.extractionModelChain : undefined,
+          modelChain: this.config.modelSource === "gateway" ? this.config.taskModelChain : undefined,
           workspaceDir: this.config.workspaceDir,
           pluginConfig: this.config,
           config: {

@@ -193,25 +193,40 @@ test("parseConfig modelSource=gateway does not inherit OPENAI_API_KEY from the p
   }
 });
 
-test("parseConfig normalizes extractionModelChain", () => {
+test("parseConfig normalizes taskModelChain", () => {
   const cfg = parseConfig({
-    extractionModelChain: {
+    taskModelChain: {
       primary: " openai/cheap-primary ",
       fallbacks: ["openai/cheap-primary", " fireworks/accounts/fireworks/models/glm-5p1 ", ""],
     },
   });
 
-  assert.deepEqual(cfg.extractionModelChain, {
+  assert.deepEqual(cfg.taskModelChain, {
     primary: "openai/cheap-primary",
     fallbacks: ["fireworks/accounts/fireworks/models/glm-5p1"],
   });
 });
 
-test("parseConfig ignores invalid extractionModelChain", () => {
-  assert.equal(parseConfig({ extractionModelChain: null }).extractionModelChain, undefined);
-  assert.equal(parseConfig({ extractionModelChain: [] }).extractionModelChain, undefined);
-  assert.equal(parseConfig({ extractionModelChain: { primary: " " } }).extractionModelChain, undefined);
-  assert.equal(parseConfig({ extractionModelChain: { fallbacks: ["openai/fallback-only"] } }).extractionModelChain, undefined);
+test("parseConfig treats an absent taskModelChain as not configured", () => {
+  assert.equal(parseConfig({}).taskModelChain, undefined);
+  assert.equal(parseConfig({ taskModelChain: null }).taskModelChain, undefined);
+  assert.equal(parseConfig({ taskModelChain: undefined }).taskModelChain, undefined);
+});
+
+test("parseConfig rejects a present-but-malformed taskModelChain (gotcha #51)", () => {
+  // A typo'd chain must surface loudly instead of silently reverting to defaults.
+  assert.throws(() => parseConfig({ taskModelChain: [] }), /taskModelChain must be an object/);
+  assert.throws(() => parseConfig({ taskModelChain: "openai/x" }), /taskModelChain must be an object/);
+  assert.throws(() => parseConfig({ taskModelChain: { primary: " " } }), /taskModelChain\.primary is required/);
+  assert.throws(() => parseConfig({ taskModelChain: { fallbacks: ["openai/fallback-only"] } }), /taskModelChain\.primary is required/);
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallbacks: "not-an-array" } }),
+    /taskModelChain\.fallbacks must be an array/,
+  );
+  assert.throws(
+    () => parseConfig({ taskModelChain: { primary: "openai/p", fallbacks: [123] } }),
+    /taskModelChain\.fallbacks must contain only strings/,
+  );
 });
 
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {

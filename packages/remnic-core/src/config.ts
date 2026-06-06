@@ -70,23 +70,44 @@ function parseBoundedIntegerMs(
   return Math.min(max, Math.max(min, Math.floor(coerced)));
 }
 
-function parseModelChainConfig(value: unknown): AgentPersonaModelConfig | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+function parseModelChainConfig(
+  value: unknown,
+  keyName: string,
+): AgentPersonaModelConfig | undefined {
+  // Absent → not configured (no error).
+  if (value === undefined || value === null) return undefined;
+
+  // Present but malformed → reject loudly rather than silently dropping it,
+  // so a typo'd chain surfaces instead of quietly reverting to defaults
+  // (gotcha #51). Issue #1365 / PR #1370.
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${keyName} must be an object like { "primary": "provider/model", "fallbacks": ["provider/model", ...] }; got ${JSON.stringify(value)}`,
+    );
+  }
   const raw = value as Record<string, unknown>;
-  const primary = typeof raw.primary === "string" && raw.primary.trim().length > 0
-    ? raw.primary.trim()
-    : undefined;
-  if (!primary) return undefined;
+  if (typeof raw.primary !== "string" || raw.primary.trim().length === 0) {
+    throw new Error(
+      `${keyName}.primary is required and must be a non-empty "provider/model" string; got ${JSON.stringify(raw.primary)}`,
+    );
+  }
+  const primary = raw.primary.trim();
 
-  const fallbacks = Array.isArray(raw.fallbacks)
-    ? raw.fallbacks
-        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-        .map((item) => item.trim())
-    : undefined;
-
-  const dedupedFallbacks = fallbacks
-    ? [...new Set(fallbacks.filter((item) => item !== primary))]
-    : undefined;
+  let dedupedFallbacks: string[] | undefined;
+  if (raw.fallbacks !== undefined) {
+    if (!Array.isArray(raw.fallbacks)) {
+      throw new Error(
+        `${keyName}.fallbacks must be an array of "provider/model" strings; got ${JSON.stringify(raw.fallbacks)}`,
+      );
+    }
+    if (raw.fallbacks.some((item) => typeof item !== "string")) {
+      throw new Error(`${keyName}.fallbacks must contain only strings`);
+    }
+    const trimmed = raw.fallbacks
+      .map((item) => (item as string).trim())
+      .filter((item) => item.length > 0 && item !== primary);
+    dedupedFallbacks = [...new Set(trimmed)];
+  }
 
   return {
     primary,
@@ -2450,7 +2471,7 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.fastGatewayAgentId === "string" && cfg.fastGatewayAgentId.length > 0
         ? cfg.fastGatewayAgentId
         : "",
-    extractionModelChain: parseModelChainConfig(cfg.extractionModelChain),
+    taskModelChain: parseModelChainConfig(cfg.taskModelChain, "taskModelChain"),
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,

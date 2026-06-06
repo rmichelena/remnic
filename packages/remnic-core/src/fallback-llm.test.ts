@@ -1472,6 +1472,57 @@ test("fallback llm does not append gateway default model when no chain is provid
   }
 });
 
+test("fallback llm does NOT append gateway default to a persona chain (last-resort is scoped to task chains)", { concurrency: false }, async () => {
+  clearModelsJsonCache();
+  clearSecretCache();
+
+  // A persona chain that deliberately excludes the gateway default. Without a
+  // modelChain override, the implicit last-resort must NOT augment it, so the
+  // main agent's persona fallback behavior is preserved (gotcha #39).
+  const llm = new FallbackLlmClient({
+    agents: {
+      defaults: { model: { primary: "openai/default-model" } },
+      list: [{ id: "main-agent", model: { primary: "openai/persona-model" } }],
+    },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "https://openai.example/v1",
+          api: "openai-completions",
+          apiKey: "openai-key",
+          models: [],
+        },
+      },
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  const attemptedModels: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+    attemptedModels.push(String(body.model ?? ""));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await llm.chatCompletion(
+      [{ role: "user", content: "Extract this" }],
+      { temperature: 0, maxTokens: 16, agentId: "main-agent" },
+    );
+
+    assert.equal(response?.modelUsed, "openai/persona-model");
+    // The gateway default must not be appended to the persona chain.
+    assert.deepEqual(attemptedModels, ["persona-model"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearModelsJsonCache();
+    clearSecretCache();
+  }
+});
+
 function disableGatewaySecretResolverForTest(): void {
   __setGatewayResolverForTest(async () => null);
 }

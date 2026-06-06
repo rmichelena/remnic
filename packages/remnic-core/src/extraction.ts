@@ -123,8 +123,16 @@ export class ExtractionEngine {
     if (config.modelSource === "gateway") {
       log.debug(
         `extraction engine: gateway model source active; extraction uses the gateway chain as its primary path` +
-          (config.extractionModelChain ? " (extractionModelChain)" :
+          (config.taskModelChain ? " (taskModelChain)" :
             config.gatewayAgentId ? ` (agent: ${config.gatewayAgentId})` : " (defaults)"),
+      );
+    } else if (config.taskModelChain) {
+      // taskModelChain resolves through gateway providers, so it only applies
+      // under modelSource: "gateway". Warn rather than silently ignore it so a
+      // misconfigured plugin-mode setup is visible. Issue #1365 / PR #1370.
+      log.warn(
+        `taskModelChain is set but modelSource is "${config.modelSource}"; the chain is ignored. ` +
+          `Set modelSource: "gateway" to use it for extraction/consolidation/summarization.`,
       );
     }
   }
@@ -158,7 +166,7 @@ export class ExtractionEngine {
    */
   private withGatewayAgent(options: import("./fallback-llm.js").FallbackLlmOptions): import("./fallback-llm.js").FallbackLlmOptions {
     if (!this.useGatewayModelSource) return options;
-    const modelChain = this.config.extractionModelChain;
+    const modelChain = this.config.taskModelChain;
     if (modelChain) return { ...options, modelChain };
     const agentId = this.config.gatewayAgentId || undefined;
     return agentId ? { ...options, agentId } : options;
@@ -1101,7 +1109,7 @@ export class ExtractionEngine {
     if (this.useGatewayModelSource) {
       log.debug(
         `extraction: using gateway model chain as primary path` +
-          (this.config.extractionModelChain ? " (extractionModelChain)" :
+          (this.config.taskModelChain ? " (taskModelChain)" :
             this.config.gatewayAgentId ? ` (agent: ${this.config.gatewayAgentId})` : " (defaults)"),
       );
     } else {

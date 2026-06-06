@@ -85,7 +85,7 @@ export class HourlySummarizer {
 
   private withGatewayAgent(options: import("./fallback-llm.js").FallbackLlmOptions): import("./fallback-llm.js").FallbackLlmOptions {
     if (!this.useGatewayModelSource) return options;
-    const modelChain = this.config.extractionModelChain;
+    const modelChain = this.config.taskModelChain;
     if (modelChain) return { ...options, modelChain };
     const agentId = this.config.gatewayAgentId || undefined;
     return agentId ? { ...options, agentId } : options;

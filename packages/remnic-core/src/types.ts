@@ -1269,11 +1269,15 @@ export interface PluginConfig {
   gatewayAgentId: string;
   fastGatewayAgentId: string;
   /**
-   * Optional task-specific model chain for extraction/consolidation/summarization
-   * fallback calls. When set, this chain is resolved through gateway providers
+   * Optional task-specific model chain for Remnic's background LLM work —
+   * extraction, fact/profile/identity consolidation, summarization, and causal
+   * consolidation. When set, this chain is resolved through gateway providers
    * instead of using gatewayAgentId or agents.defaults.model.
+   *
+   * Only takes effect when `modelSource: "gateway"`; ignored (with a startup
+   * warning) under `modelSource: "plugin"`. See issue #1365 / PR #1370.
    */
-  extractionModelChain?: AgentPersonaModelConfig;
+  taskModelChain?: AgentPersonaModelConfig;
 
   // v3.0 Multi-agent memory (namespaces)
   namespacesEnabled: boolean;

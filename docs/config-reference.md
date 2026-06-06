@@ -490,6 +490,7 @@ Route all Engram LLM calls through the OpenClaw gateway's agent model chain inst
 | `modelSource` | `gateway` for new OpenClaw installs; `plugin` otherwise | `gateway` delegates to a gateway agent's model chain; `plugin` uses Engram's own openai/localLlm config |
 | `gatewayAgentId` | `""` | Agent persona ID from `openclaw.json → agents.list[]` for primary LLM calls (extraction, consolidation, summarization). Falls back to `agents.defaults.model` if empty. |
 | `fastGatewayAgentId` | `""` | Agent persona ID for fast-tier ops (rerank, entity summaries, compression guidelines). Uses `gatewayAgentId` chain when empty. |
+| `taskModelChain` | _(unset)_ | Optional inline `{ "primary", "fallbacks": [] }` model chain for Remnic's background tasks (extraction, fact/profile/identity consolidation, summarization, causal consolidation). Resolves through gateway providers. When set, it overrides `gatewayAgentId`/`agents.defaults.model` for these tasks only. **Requires `modelSource: "gateway"`** — ignored (with a startup warning) in `plugin` mode. |
 
 When `modelSource` is `gateway`:
 
@@ -498,6 +499,30 @@ When `modelSource` is `gateway`:
 - The existing `openaiApiKey`, `model`, and `localLlm*` settings are ignored for LLM dispatch but retained as config for backward compatibility; `OPENAI_API_KEY` is not inherited in gateway mode
 - `localLlmFast*` settings are also bypassed when `fastGatewayAgentId` is set
 - **Reranking** uses the `fastGatewayAgentId` chain (or `gatewayAgentId` if fast is unset) instead of the local LLM — this can dramatically reduce rerank latency when the fast chain points at a cloud provider
+
+#### Task-specific model chain (`taskModelChain`)
+
+By default, gateway-mode background work (extraction, consolidation, summarization, causal consolidation) shares the `gatewayAgentId` persona chain — or `agents.defaults.model` when no persona is set. That ties lightweight memory tasks to whatever chain the main agent uses, which is often larger/pricier than these tasks need.
+
+Set `taskModelChain` to give those tasks their own cheap/fast chain **without** defining a persona or touching `agents.defaults.model`:
+
+```jsonc
+{
+  "modelSource": "gateway",
+  "taskModelChain": {
+    "primary": "zai/glm-4.7-flash",
+    "fallbacks": ["fireworks/accounts/fireworks/models/glm-5p1"]
+  }
+}
+```
+
+Notes:
+
+- Models resolve through the same `models.providers` auth/routing as everything else — only the chain differs.
+- `taskModelChain` takes precedence over `gatewayAgentId` for these tasks; the main agent persona is unaffected.
+- A reachable `agents.defaults.model` is appended as an implicit last resort to a `taskModelChain` only, so an exhausted task chain never blocks a flush. Persona/default chains are never augmented this way.
+- It **only applies in `gateway` mode.** In `plugin` mode it is ignored and Remnic logs a startup warning. Plugin-mode users who hit non-OpenAI model-ID failures at the direct client should switch to `modelSource: "gateway"` and use `taskModelChain` (see issue #1365).
+- A present-but-malformed value (missing `primary`, wrong types) is rejected at config-parse time rather than silently ignored.
 
 ### Setup
 

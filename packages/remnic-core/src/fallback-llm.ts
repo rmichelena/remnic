@@ -341,11 +341,13 @@ export class FallbackLlmClient {
       }
     }
 
-    // Implicit last-resort: always append the gateway default model so that a
-    // stale or exhausted extractionModelChain never leaves the chain empty.
-    // This guarantees Remnic can never be the reason a chat is interrupted
-    // by a flush failure — there is always at least one reachable model.
-    if (modelStrings.length > 0) {
+    // Implicit last-resort: when a task-specific modelChain override is active,
+    // append the gateway default model so a stale or exhausted taskModelChain
+    // never leaves the chain empty — Remnic should never be the reason a chat is
+    // interrupted by a flush failure. Scoped to the override path so the main
+    // agent's persona/default chains keep their exact configured fallback
+    // behavior (gotcha #39). Issue #1365 / PR #1370.
+    if (modelChainOverride && modelStrings.length > 0) {
       const defaultModel = this.gatewayConfig?.agents?.defaults?.model?.primary;
       if (
         defaultModel &&
