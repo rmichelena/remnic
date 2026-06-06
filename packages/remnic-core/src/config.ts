@@ -139,6 +139,51 @@ function parseQmdChunkStrategy(value: unknown): "auto" | "regex" {
   throw new Error(`qmdChunkStrategy must be "auto" or "regex"; got ${JSON.stringify(value)}`);
 }
 
+// Issue #1335. Default "hybrid" preserves the historical lex+vec+hyde daemon plan.
+function parseQmdSearchStrategy(value: unknown): "hybrid" | "lex-vec" | "lex" {
+  if (value === undefined || value === null) return "hybrid";
+  if (typeof value !== "string") {
+    throw new Error(
+      `qmdSearchStrategy must be one of "hybrid", "lex-vec", or "lex"; got ${JSON.stringify(value)}`,
+    );
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "hybrid" || normalized === "lex-vec" || normalized === "lex") {
+    return normalized;
+  }
+  throw new Error(
+    `qmdSearchStrategy must be one of "hybrid", "lex-vec", or "lex"; got ${JSON.stringify(value)}`,
+  );
+}
+
+// Issue #1335. Reject non-numeric / non-integer timeouts rather than silently
+// coercing them (gotcha #51), then clamp valid integers to the documented bounds.
+function parseQmdDaemonTimeoutMs(value: unknown): number {
+  if (value === undefined || value === null) return 8_000;
+  const coerced = coerceNumber(value);
+  if (coerced === undefined || !Number.isInteger(coerced)) {
+    throw new Error(
+      `qmdDaemonTimeoutMs must be an integer number of milliseconds between 1000 and 120000; got ${JSON.stringify(value)}`,
+    );
+  }
+  return Math.min(120_000, Math.max(1_000, coerced));
+}
+
+// Issue #1335. Default "query" keeps `qmd query` (LLM expansion + rerank) per gotcha #7.
+function parseQmdSubprocessStrategy(value: unknown): "query" | "search" {
+  if (value === undefined || value === null) return "query";
+  if (typeof value !== "string") {
+    throw new Error(
+      `qmdSubprocessStrategy must be one of "query" or "search"; got ${JSON.stringify(value)}`,
+    );
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "query" || normalized === "search") return normalized;
+  throw new Error(
+    `qmdSubprocessStrategy must be one of "query" or "search"; got ${JSON.stringify(value)}`,
+  );
+}
+
 function parseOptionalNonEmptyString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim();
@@ -1379,6 +1424,9 @@ export function parseConfig(raw: unknown): PluginConfig {
     qmdChunkStrategy: parseQmdChunkStrategy(cfg.qmdChunkStrategy),
     qmdCandidateLimit: parsePositiveInteger(cfg.qmdCandidateLimit, "qmdCandidateLimit"),
     qmdQueryRerankEnabled: coerceBooleanLike(cfg.qmdQueryRerankEnabled) ?? true,
+    qmdSearchStrategy: parseQmdSearchStrategy(cfg.qmdSearchStrategy),
+    qmdSubprocessStrategy: parseQmdSubprocessStrategy(cfg.qmdSubprocessStrategy),
+    qmdDaemonTimeoutMs: parseQmdDaemonTimeoutMs(cfg.qmdDaemonTimeoutMs),
     qmdIndexName: parseOptionalNonEmptyString(cfg.qmdIndexName),
     qmdForceCpu: coerceBooleanLike(cfg.qmdForceCpu) ?? false,
     qmdGpuBackend: parseQmdGpuBackend(cfg.qmdGpuBackend),
