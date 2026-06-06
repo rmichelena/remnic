@@ -72,6 +72,33 @@ test("parseConfig codex missing entirely → installExtension defaults to true",
   assert.equal(result.codex.installExtension, true);
 });
 
+test("parseConfig recallPlannerLlmEnabled defaults to false and coerces boolean-like strings (opt-in, issue #1367)", () => {
+  assert.equal(parseConfig({}).recallPlannerLlmEnabled, false);
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: true }).recallPlannerLlmEnabled, true);
+  // CLI/env surfaces pass strings — these must enable the gate (gotcha #36).
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: "true" }).recallPlannerLlmEnabled, true);
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: "1" }).recallPlannerLlmEnabled, true);
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: "on" }).recallPlannerLlmEnabled, true);
+  // Boolean-like falses and junk stay off.
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: "false" }).recallPlannerLlmEnabled, false);
+  assert.equal(parseConfig({ recallPlannerLlmEnabled: "0" }).recallPlannerLlmEnabled, false);
+});
+
+test("parseConfig coerces boolean-like strings for all recallPlanner gates (issue #1367, gotcha #36)", () => {
+  // Rollout switches must honor string config from CLI/env surfaces.
+  assert.equal(parseConfig({ recallPlannerShadowMode: "true" }).recallPlannerShadowMode, true);
+  assert.equal(parseConfig({ recallPlannerShadowMode: "off" }).recallPlannerShadowMode, false);
+  assert.equal(parseConfig({}).recallPlannerShadowMode, false);
+
+  assert.equal(parseConfig({ recallPlannerTelemetryEnabled: "false" }).recallPlannerTelemetryEnabled, false);
+  assert.equal(parseConfig({}).recallPlannerTelemetryEnabled, true);
+
+  // The enable gate must be disableable via string "false" (the old `!== false`
+  // check treated "false" as truthy → could not disable).
+  assert.equal(parseConfig({ recallPlannerEnabled: "false" }).recallPlannerEnabled, false);
+  assert.equal(parseConfig({}).recallPlannerEnabled, true);
+});
+
 test("parseConfig dreaming.maxEntries=0 preserves the runtime disable switch", () => {
   const result = parseConfig({ dreaming: { maxEntries: 0 } });
   assert.equal(result.dreaming.maxEntries, 0);
