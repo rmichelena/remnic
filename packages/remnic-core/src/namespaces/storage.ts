@@ -32,6 +32,28 @@ async function hasStoredEntries(p: string): Promise<boolean> {
   }
 }
 
+// Build a per-namespace directory under `<memoryDir>/namespaces` and assert the
+// resolved path stays inside that base. Namespace identifiers can originate from
+// operator config (config.defaultNamespace) and request-derived routing, so this
+// containment check prevents directory traversal (CodeQL js/path-injection).
+// For safe segments this returns exactly `path.join(base, segment)`, so there is
+// no behavioral change for valid namespaces.
+function resolveNamespaceDir(memoryDir: string, segment: string): string {
+  // Mirror isSafeRouteNamespace's separator/parent-ref rejection (without its
+  // 64-char cap, so identity tokens still pass). Rejecting separators and ".."
+  // up front keeps the value a single contained child of <memoryDir>/namespaces.
+  if (
+    segment.length === 0 ||
+    segment.includes("/") ||
+    segment.includes("\\") ||
+    segment.includes("..") ||
+    path.isAbsolute(segment)
+  ) {
+    throw new Error(`unsafe namespace path segment: ${segment}`);
+  }
+  return path.join(memoryDir, "namespaces", segment);
+}
+
 const LEGACY_NAMESPACE_CONTENT_CHILDREN = [
   ...ALL_CATEGORY_DIRS,
   "entities",
@@ -94,10 +116,9 @@ export class NamespaceStorageRouter {
       return this.defaultNsRootResolved;
     }
 
-    const legacyNsDir = path.join(this.config.memoryDir, "namespaces", this.config.defaultNamespace);
-    const tokenizedNsDir = path.join(
+    const legacyNsDir = resolveNamespaceDir(this.config.memoryDir, this.config.defaultNamespace);
+    const tokenizedNsDir = resolveNamespaceDir(
       this.config.memoryDir,
-      "namespaces",
       namespaceIdentityToken(this.config.defaultNamespace),
     );
     const tokenizedHasData =
@@ -118,8 +139,8 @@ export class NamespaceStorageRouter {
     if (namespace === this.config.defaultNamespace) {
       return this.defaultNsRootResolved ?? this.config.memoryDir;
     }
-    const legacyRoot = path.join(this.config.memoryDir, "namespaces", namespace);
-    const tokenizedRoot = path.join(this.config.memoryDir, "namespaces", namespaceIdentityToken(namespace));
+    const legacyRoot = resolveNamespaceDir(this.config.memoryDir, namespace);
+    const tokenizedRoot = resolveNamespaceDir(this.config.memoryDir, namespaceIdentityToken(namespace));
     if ((await exists(tokenizedRoot)) && (await hasAnyNamespaceStorageMarker(tokenizedRoot, { includeRuntimeState: true }))) {
       return tokenizedRoot;
     }
@@ -131,6 +152,10 @@ export class NamespaceStorageRouter {
     if (ns !== this.config.defaultNamespace && !isSafeRouteNamespace(ns)) {
       throw new Error(`unsafe namespace: ${ns}`);
     }
+    // Even when the default namespace is exempt from the check above, every
+    // on-disk path is built through resolveNamespaceDir(), which rejects
+    // traversal segments — so an unsafe configured default still cannot escape
+    // <memoryDir>/namespaces (CodeQL js/path-injection).
 
     let root: string;
     if (ns === this.config.defaultNamespace) {

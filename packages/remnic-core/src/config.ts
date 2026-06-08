@@ -2537,6 +2537,11 @@ export function parseConfig(raw: unknown): PluginConfig {
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,
+    // NOTE: namespace identifiers are intentionally NOT sanitized here — the
+    // codebase rejects unsafe namespaces at the point of use (see
+    // codex-materialize-runner and NamespaceStorageRouter / resolveNamespaceDir),
+    // so a "../x" value is surfaced as an explicit error rather than silently
+    // rewritten. Containment is enforced at the filesystem sinks.
     defaultNamespace:
       typeof cfg.defaultNamespace === "string" && cfg.defaultNamespace.length > 0 ? cfg.defaultNamespace : "default",
     sharedNamespace:
