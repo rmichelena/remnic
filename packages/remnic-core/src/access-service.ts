@@ -7,7 +7,11 @@ import { AccessIdempotencyStore, hashAccessIdempotencyPayload } from "./access-i
 import { AccessAuditAdapter, type AccessAuditConfig, type AccessAuditResult } from "./access-audit.js";
 import type { AnomalyDetectorResult } from "./recall-audit-anomaly.js";
 import { resolveGitContext } from "./coding/git-context.js";
-import { projectTagProjectId } from "./coding/coding-namespace.js";
+import {
+  combineNamespaces,
+  projectTagProjectId,
+  resolveCodingNamespaceOverlay,
+} from "./coding/coding-namespace.js";
 import { WorkStorage } from "./work/storage.js";
 import {
   exportWorkBoardMarkdown,
@@ -91,6 +95,7 @@ import type {
   EntityFile,
   MemoryFile,
   MemoryActionOutcome,
+  CodingContext,
   MemoryActionType,
   MemoryLifecycleEvent,
   MemoryStatus,
@@ -755,9 +760,25 @@ export interface EngramAccessWriteEnvelope {
   authenticatedPrincipal?: string;
 }
 
-export interface EngramAccessMemoryStoreRequest extends EngramAccessWriteEnvelope, ExplicitCaptureInput {}
+/**
+ * Optional git/project context for project-scoped writes (#1434). When no
+ * explicit `namespace` is supplied, these route the write to the same project
+ * namespace recall/observe resolve from `cwd`/`projectTag` (rule 42 symmetry).
+ */
+export interface CodingScopedWriteInput {
+  cwd?: string;
+  projectTag?: string;
+}
 
-export interface EngramAccessSuggestionSubmitRequest extends EngramAccessWriteEnvelope, ExplicitCaptureInput {}
+export interface EngramAccessMemoryStoreRequest
+  extends EngramAccessWriteEnvelope,
+    ExplicitCaptureInput,
+    CodingScopedWriteInput {}
+
+export interface EngramAccessSuggestionSubmitRequest
+  extends EngramAccessWriteEnvelope,
+    ExplicitCaptureInput,
+    CodingScopedWriteInput {}
 
 export interface EngramAccessWriteResponse {
   schemaVersion: 1;
@@ -1115,6 +1136,144 @@ export class EngramAccessService {
     return resolved;
   }
 
+  /**
+   * Resolve a coding context from `cwd`/`projectTag` WITHOUT persisting it to
+   * any session — the read-only half of `maybeAttachCodingContext`. Returns
+   * null when project scoping is off or nothing resolves. `projectTag` takes
+   * priority over `cwd` (matching `maybeAttachCodingContext`).
+   */
+  private async resolveCodingContextFromOptions(
+    options: CodingScopedWriteInput,
+  ): Promise<CodingContext | null> {
+    if (!this.orchestrator.config.codingMode?.projectScope) return null;
+    if (typeof options.projectTag === "string" && options.projectTag.trim().length > 0) {
+      const projectId = projectTagProjectId(options.projectTag);
+      return { projectId, branch: null, rootPath: projectId, defaultBranch: null };
+    }
+    if (typeof options.cwd === "string" && options.cwd.trim().length > 0) {
+      try {
+        const gitCtx = await resolveGitContext(options.cwd);
+        if (gitCtx) {
+          return {
+            projectId: gitCtx.projectId,
+            branch: gitCtx.branch,
+            rootPath: gitCtx.rootPath,
+            defaultBranch: gitCtx.defaultBranch,
+          };
+        }
+      } catch {
+        // resolveGitContext never throws, but stay defensive — not being in a
+        // repo is normal and must not break the write.
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the write namespace for explicit-write tools (memory_store /
+   * suggestion_submit), project-scoping the write the same way recall does so a
+   * memory stored with a client-injected `cwd`/`projectTag` is discoverable by
+   * project-scoped recall (#1434, rule 42).
+   *
+   * Precedence:
+   *  - An explicit `namespace` always wins and is authorized strictly via
+   *    `resolveWritableNamespace` → `canWriteNamespace`. A coding-overlay
+   *    namespace string (`<base>-project-*`) is NOT a writable target via the
+   *    explicit field — project scoping is requested with `cwd`/`projectTag`,
+   *    never by naming the derived namespace — so there is no way to bypass the
+   *    policy allow-list by guessing/forging an overlay name (Codex review).
+   *  - With NO coding overlay, the write stays on `config.defaultNamespace` —
+   *    exactly the pre-#1434 behavior, so an unqualified write is NOT silently
+   *    moved to a principal self namespace (Codex review).
+   *  - WITH a coding overlay, the base is the principal self namespace
+   *    (`defaultNamespaceForPrincipal`, write-checked) — the SAME base recall,
+   *    observe, and the orchestrator buffer-flush write path overlay onto
+   *    (rule 42 / Cursor) — so a project-scoped store lands exactly where
+   *    project-scoped recall searches. The overlay namespace is always REBUILT
+   *    from the authenticated principal's base, never accepted as a caller
+   *    string, so a caller can never reach another principal's subtree.
+   *
+   * Read-only: this NEVER mutates session coding context, so the idempotency
+   * peeks and dryRun preflights that call it stay side-effect free (Codex
+   * review). It prefers the per-call `cwd`/`projectTag` (the project explicitly
+   * identified for this write), else the session's existing context. The HTTP
+   * surface lets the peek and the write each resolve independently; the peek's
+   * namespace only gates rate-limiting (memory_store/suggestion_submit run their
+   * own idempotency check), so a benign session-context change between the two
+   * never fails a write — there is no namespace to "pin".
+   */
+  private async resolveCodingScopedWriteNamespace(
+    request: CodingScopedWriteInput & {
+      namespace?: string;
+      sessionKey?: string;
+      authenticatedPrincipal?: string;
+    },
+  ): Promise<string> {
+    const hasExplicitNamespace =
+      typeof request.namespace === "string" && request.namespace.trim().length > 0;
+    if (hasExplicitNamespace) {
+      return this.resolveWritableNamespace(
+        request.namespace,
+        request.sessionKey,
+        request.authenticatedPrincipal,
+      );
+    }
+    // Project scoping only applies when namespaces are enabled (else overlaying
+    // would create false isolation over a single storage dir) and projectScope
+    // is on. The coding context MUST be resolved exactly as the recall path
+    // resolves it, or a scoped store won't be discoverable by scoped recall
+    // (the whole point of #1434). Recall calls `maybeAttachCodingContext`, which
+    // returns early when the session already has a context — so recall is
+    // SESSION-FIRST: an existing session binding wins, and the per-call
+    // cwd/projectTag is only used to seed a context when none is attached yet.
+    // Mirror that precedence here: session context first, per-call as fallback
+    // (Codex review — a per-call-wins write would land in a project that the
+    // same session's recall, still on the bound project, never searches).
+    //
+    // A sessionKey is REQUIRED to apply the overlay. The recall path can only
+    // attach/look up coding context per session (`maybeAttachCodingContext` and
+    // `applyCodingNamespaceOverlay` both no-op without a sessionKey), so a
+    // sessionless recall always searches the base namespace. A sessionless
+    // write must therefore also stay on the base — otherwise a client that
+    // injects cwd/projectTag but no sessionKey would store into
+    // `default-project-*` that its own recall never searches (Codex review).
+    const hasSession =
+      typeof request.sessionKey === "string" && request.sessionKey.length > 0;
+    const overlay =
+      hasSession &&
+      this.orchestrator.config.namespacesEnabled &&
+      this.orchestrator.config.codingMode?.projectScope
+        ? resolveCodingNamespaceOverlay(
+            this.orchestrator.getCodingContextForSession(request.sessionKey) ??
+              (await this.resolveCodingContextFromOptions(request)),
+            this.orchestrator.config.codingMode,
+            this.orchestrator.config.defaultNamespace,
+          )
+        : null;
+    if (!overlay) {
+      // No coding overlay → unqualified write stays on config.defaultNamespace,
+      // exactly the pre-#1434 behavior (auth-checked, like the legacy path).
+      return this.resolveWritableNamespace(
+        undefined,
+        request.sessionKey,
+        request.authenticatedPrincipal,
+      );
+    }
+    // Coding overlay → overlay onto the principal self base, the SAME namespace
+    // recall/observe/buffer-flush use. The result is a principal-owned
+    // `project-*` sub-namespace derived from this authorized base, so it needs
+    // no separate write policy.
+    const principal = this.resolveRequestPrincipal(
+      request.sessionKey,
+      request.authenticatedPrincipal,
+    );
+    const base = defaultNamespaceForPrincipal(principal, this.orchestrator.config);
+    if (!canWriteNamespace(principal, base, this.orchestrator.config)) {
+      throw new EngramAccessInputError(`namespace is not writable: ${base}`);
+    }
+    return combineNamespaces(base, overlay.namespace);
+  }
+
   private async objectiveStateStoreLocationForNamespace(namespace: string): Promise<{
     memoryDir: string;
     objectiveStateStoreDir?: string;
@@ -1384,6 +1543,16 @@ export class EngramAccessService {
     idempotencyKey?: string;
     requestFingerprint: unknown;
     skip?: boolean;
+    /**
+     * Invoked exactly once, immediately before an ACTUAL (non-replay, non-skip)
+     * write is committed — atomically with the idempotency miss determination.
+     * The HTTP surface uses this to enforce the write rate limit against the
+     * real write/miss (and the real resolved namespace), so a namespace-divergent
+     * idempotency peek can never let a fresh write skip the quota check (#1434
+     * Codex review). It is NOT called on dryRun (skip) or replay, preserving the
+     * replay-bypasses-a-full-window behavior.
+     */
+    beforeExecute?: () => void | Promise<void>;
     execute: () => Promise<T>;
   }): Promise<T> {
     if (options.skip === true) {
@@ -1391,6 +1560,7 @@ export class EngramAccessService {
     }
     const key = options.idempotencyKey?.trim();
     if (!key) {
+      if (options.beforeExecute) await options.beforeExecute();
       return options.execute();
     }
     return this.withIdempotencyLock(key, async () => {
@@ -1409,6 +1579,7 @@ export class EngramAccessService {
             idempotencyReplay: true,
           };
         }
+        if (options.beforeExecute) await options.beforeExecute();
         const response = await options.execute();
         await this.idempotency.put(key, requestHash, response);
         return response;
@@ -1755,6 +1926,28 @@ export class EngramAccessService {
         // setCodingContext validation might reject edge-case rootPaths.
       }
     }
+  }
+
+  /**
+   * Seed the session's coding binding AFTER a committed, project-scoped explicit
+   * write (memory_store / suggestion_submit), mirroring the recall path's
+   * `maybeAttachCodingContext` so a later bare recall/write on the same session
+   * is scoped to the same project. Called only from the post-persist path, so it
+   * never fires on dryRun, replay/conflict, or quota-rejected requests. Skips
+   * when an explicit `namespace` was supplied — that write bypassed the coding
+   * overlay, so binding the session to a project it never wrote to would make
+   * later bare recalls miss (Codex review).
+   */
+  private async attachCodingContextAfterScopedWrite(
+    request: CodingScopedWriteInput & { namespace?: string; sessionKey?: string },
+  ): Promise<void> {
+    const hasExplicitNamespace =
+      typeof request.namespace === "string" && request.namespace.trim().length > 0;
+    if (hasExplicitNamespace) return;
+    await this.maybeAttachCodingContext(request.sessionKey, {
+      cwd: request.cwd,
+      projectTag: request.projectTag,
+    });
   }
 
   async recall(request: EngramAccessRecallRequest): Promise<EngramAccessRecallResponse> {
@@ -2662,12 +2855,11 @@ export class EngramAccessService {
   // per-tenant) do not block each other.
   private xrayQueue: Promise<void> = Promise.resolve();
 
-  async memoryStore(request: EngramAccessMemoryStoreRequest): Promise<EngramAccessWriteResponse> {
-    const namespace = this.resolveWritableNamespace(
-      request.namespace,
-      request.sessionKey,
-      request.authenticatedPrincipal,
-    );
+  async memoryStore(
+    request: EngramAccessMemoryStoreRequest,
+    hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+  ): Promise<EngramAccessWriteResponse> {
+    const namespace = await this.resolveCodingScopedWriteNamespace(request);
     const schemaVersion = request.schemaVersion ?? ENGRAM_ACCESS_WRITE_SCHEMA_VERSION;
     if (schemaVersion !== ENGRAM_ACCESS_WRITE_SCHEMA_VERSION) {
       throw new EngramAccessInputError(`unsupported schemaVersion: ${schemaVersion}`);
@@ -2687,6 +2879,14 @@ export class EngramAccessService {
         };
       }
       const result = await persistExplicitCapture(this.orchestrator, candidate, "memory_store");
+      // Seed the session's coding binding ONLY after a real write commits, and
+      // only when the namespace came from project scoping (no explicit
+      // namespace). This mirrors recall's maybeAttachCodingContext so a LATER
+      // bare recall/write on the same session is scoped to the same project —
+      // but never binds the session on a dryRun, replay/conflict, quota
+      // rejection, or an explicit-namespace write (which bypasses the overlay),
+      // since those don't reach this point or aren't project-scoped (Codex review).
+      await this.attachCodingContextAfterScopedWrite(request);
       const response: EngramAccessWriteResponse = {
         schemaVersion: ENGRAM_ACCESS_WRITE_SCHEMA_VERSION,
         operation: "memory_store",
@@ -2719,16 +2919,13 @@ export class EngramAccessService {
         sourceReason: request.sourceReason,
       },
       skip: request.dryRun === true,
+      beforeExecute: hooks?.enforceWriteQuota,
       execute,
     });
   }
 
   async peekMemoryStoreIdempotency(request: EngramAccessMemoryStoreRequest): Promise<EngramAccessIdempotencyStatus> {
-    const namespace = this.resolveWritableNamespace(
-      request.namespace,
-      request.sessionKey,
-      request.authenticatedPrincipal,
-    );
+    const namespace = await this.resolveCodingScopedWriteNamespace(request);
     const schemaVersion = request.schemaVersion ?? ENGRAM_ACCESS_WRITE_SCHEMA_VERSION;
     if (schemaVersion !== ENGRAM_ACCESS_WRITE_SCHEMA_VERSION) {
       throw new EngramAccessInputError(`unsupported schemaVersion: ${schemaVersion}`);
@@ -2751,12 +2948,11 @@ export class EngramAccessService {
     });
   }
 
-  async suggestionSubmit(request: EngramAccessSuggestionSubmitRequest): Promise<EngramAccessWriteResponse> {
-    const namespace = this.resolveWritableNamespace(
-      request.namespace,
-      request.sessionKey,
-      request.authenticatedPrincipal,
-    );
+  async suggestionSubmit(
+    request: EngramAccessSuggestionSubmitRequest,
+    hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+  ): Promise<EngramAccessWriteResponse> {
+    const namespace = await this.resolveCodingScopedWriteNamespace(request);
     const schemaVersion = request.schemaVersion ?? ENGRAM_ACCESS_WRITE_SCHEMA_VERSION;
     if (schemaVersion !== ENGRAM_ACCESS_WRITE_SCHEMA_VERSION) {
       throw new EngramAccessInputError(`unsupported schemaVersion: ${schemaVersion}`);
@@ -2781,6 +2977,10 @@ export class EngramAccessService {
         "suggestion_submit",
         new Error(request.sourceReason?.trim() || "submitted via engram suggestion_submit"),
       );
+      // Seed the session binding only after a real, project-scoped submit commits
+      // (mirrors memory_store / recall; skips dryRun, replay, quota-reject, and
+      // explicit-namespace writes — Codex review).
+      await this.attachCodingContextAfterScopedWrite(request);
       const response: EngramAccessWriteResponse = {
         schemaVersion: ENGRAM_ACCESS_WRITE_SCHEMA_VERSION,
         operation: "suggestion_submit",
@@ -2813,6 +3013,7 @@ export class EngramAccessService {
         sourceReason: request.sourceReason,
       },
       skip: request.dryRun === true,
+      beforeExecute: hooks?.enforceWriteQuota,
       execute,
     });
   }
@@ -2820,11 +3021,7 @@ export class EngramAccessService {
   async peekSuggestionSubmitIdempotency(
     request: EngramAccessSuggestionSubmitRequest,
   ): Promise<EngramAccessIdempotencyStatus> {
-    const namespace = this.resolveWritableNamespace(
-      request.namespace,
-      request.sessionKey,
-      request.authenticatedPrincipal,
-    );
+    const namespace = await this.resolveCodingScopedWriteNamespace(request);
     const schemaVersion = request.schemaVersion ?? ENGRAM_ACCESS_WRITE_SCHEMA_VERSION;
     if (schemaVersion !== ENGRAM_ACCESS_WRITE_SCHEMA_VERSION) {
       throw new EngramAccessInputError(`unsupported schemaVersion: ${schemaVersion}`);
@@ -2852,13 +3049,21 @@ export class EngramAccessService {
     namespace: string,
   ): ValidExplicitCapture {
     try {
-      return validateExplicitCaptureInput(
-        {
-          ...request,
-          namespace,
-        },
-        "legacy_tool",
-      );
+      return {
+        ...validateExplicitCaptureInput(
+          {
+            ...request,
+            namespace,
+          },
+          "legacy_tool",
+        ),
+        // The namespace was resolved AND authorized by
+        // resolveCodingScopedWriteNamespace (explicit namespaces via
+        // resolveWritableNamespace; otherwise an auth-checked base + a
+        // session-owned project overlay), so the persist/queue layer must not
+        // re-reject a legitimately-derived dynamic project namespace (#1434).
+        namespacePreResolved: true,
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new EngramAccessInputError(message);

@@ -1094,12 +1094,20 @@ export class EngramAccessHttpServer {
         entityRef: body.entityRef,
         ttl: body.ttl,
         sourceReason: body.sourceReason,
+        cwd: body.cwd,
+        projectTag: body.projectTag,
       };
-      const idempotencyStatus = await this.service.peekMemoryStoreIdempotency(request);
-      if (idempotencyStatus === "miss" && request.dryRun !== true) {
-        this.ensureWriteRateLimitAvailable();
-      }
-      const response = await this.service.memoryStore(request);
+      // Rate-limit enforcement is SOLELY authoritative inside memoryStore via
+      // enforceWriteQuota: it runs atomically with the real idempotency-miss
+      // determination (and the real resolved namespace), and is never invoked
+      // for a replay. We deliberately do NOT pre-check here: the write namespace
+      // is resolved from mutable session/git context, so a stale peek could
+      // report "miss" for a request that is actually an idempotent replay in the
+      // now-scoped namespace and hard-reject a safe replay with 429 (#1434 Codex
+      // review). Letting the in-lock hook be the only hard gate avoids that.
+      const response = await this.service.memoryStore(request, {
+        enforceWriteQuota: () => this.ensureWriteRateLimitAvailable(),
+      });
       if (this.shouldCountWriteRateLimit(response as { dryRun?: boolean; idempotencyReplay?: boolean })) {
         this.recordWriteRateLimitHit();
       }
@@ -1123,12 +1131,15 @@ export class EngramAccessHttpServer {
         entityRef: body.entityRef,
         ttl: body.ttl,
         sourceReason: body.sourceReason,
+        cwd: body.cwd,
+        projectTag: body.projectTag,
       };
-      const idempotencyStatus = await this.service.peekSuggestionSubmitIdempotency(request);
-      if (idempotencyStatus === "miss" && request.dryRun !== true) {
-        this.ensureWriteRateLimitAvailable();
-      }
-      const response = await this.service.suggestionSubmit(request);
+      // Quota enforcement is solely authoritative inside suggestionSubmit
+      // (enforceWriteQuota), atomic with the real miss and never on a replay; no
+      // HTTP pre-check, so a stale peek can't 429 a safe replay (#1434 Codex review).
+      const response = await this.service.suggestionSubmit(request, {
+        enforceWriteQuota: () => this.ensureWriteRateLimitAvailable(),
+      });
       if (this.shouldCountWriteRateLimit(response as { dryRun?: boolean; idempotencyReplay?: boolean })) {
         this.recordWriteRateLimitHit();
       }

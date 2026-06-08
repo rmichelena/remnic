@@ -151,28 +151,43 @@ function createFakeService(): EngramAccessService {
     }),
     peekMemoryStoreIdempotency: async () => "miss",
     peekSuggestionSubmitIdempotency: async () => "miss",
-    memoryStore: async ({ dryRun, idempotencyKey }) => ({
-      schemaVersion: 1,
-      operation: "memory_store",
-      namespace: "global",
-      dryRun: dryRun === true,
-      accepted: true,
-      queued: false,
-      status: dryRun === true ? "validated" : "stored",
-      memoryId: dryRun === true ? undefined : "fact-new",
-      idempotencyKey,
-    }),
-    suggestionSubmit: async ({ dryRun, idempotencyKey }) => ({
-      schemaVersion: 1,
-      operation: "suggestion_submit",
-      namespace: "global",
-      dryRun: dryRun === true,
-      accepted: true,
-      queued: true,
-      status: dryRun === true ? "validated" : "queued_for_review",
-      memoryId: dryRun === true ? undefined : "fact-review",
-      idempotencyKey,
-    }),
+    // Mirror the real service: a real (non-dryRun) write consults the
+    // authoritative quota hook; dryRun never does. (The HTTP surface no longer
+    // pre-checks the quota — enforcement is solely the in-service hook.)
+    memoryStore: async (
+      { dryRun, idempotencyKey }: { dryRun?: boolean; idempotencyKey?: string },
+      hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+    ) => {
+      if (dryRun !== true) await hooks?.enforceWriteQuota?.();
+      return {
+        schemaVersion: 1,
+        operation: "memory_store",
+        namespace: "global",
+        dryRun: dryRun === true,
+        accepted: true,
+        queued: false,
+        status: dryRun === true ? "validated" : "stored",
+        memoryId: dryRun === true ? undefined : "fact-new",
+        idempotencyKey,
+      };
+    },
+    suggestionSubmit: async (
+      { dryRun, idempotencyKey }: { dryRun?: boolean; idempotencyKey?: string },
+      hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+    ) => {
+      if (dryRun !== true) await hooks?.enforceWriteQuota?.();
+      return {
+        schemaVersion: 1,
+        operation: "suggestion_submit",
+        namespace: "global",
+        dryRun: dryRun === true,
+        accepted: true,
+        queued: true,
+        status: dryRun === true ? "validated" : "queued_for_review",
+        memoryId: dryRun === true ? undefined : "fact-review",
+        idempotencyKey,
+      };
+    },
     maintenance: async () => ({
       health: {
         ok: true,
@@ -1542,11 +1557,16 @@ test("access HTTP server does not consume the write rate limit for idempotency r
       ...createFakeService(),
       peekMemoryStoreIdempotency: async ({ idempotencyKey }: { idempotencyKey?: string }) =>
         idempotencyKey === "replay-key" ? "replay" : "miss",
-      memoryStore: async ({ dryRun, idempotencyKey }: { dryRun?: boolean; idempotencyKey?: string }) => {
+      memoryStore: async (
+        { dryRun, idempotencyKey }: { dryRun?: boolean; idempotencyKey?: string },
+        hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+      ) => {
         const replay = Boolean(idempotencyKey && seenKeys.has(idempotencyKey));
         if (idempotencyKey) {
           seenKeys.add(idempotencyKey);
         }
+        // Only a real (non-replay) write consults the quota hook.
+        if (dryRun !== true && !replay) await hooks?.enforceWriteQuota?.();
         return {
           schemaVersion: 1,
           operation: "memory_store",
@@ -1610,18 +1630,25 @@ test("access HTTP server allows idempotent replay writes even after the write li
       ...createFakeService(),
       peekMemoryStoreIdempotency: async ({ idempotencyKey }: { idempotencyKey?: string }) =>
         idempotencyKey === "replay-key" ? "replay" : "miss",
-      memoryStore: async ({ idempotencyKey }: { idempotencyKey?: string }) => ({
-        schemaVersion: 1,
-        operation: "memory_store",
-        namespace: "global",
-        dryRun: false,
-        accepted: true,
-        queued: false,
-        status: "stored",
-        memoryId: idempotencyKey === "replay-key" ? "fact-replay" : "fact-new",
-        idempotencyKey,
-        idempotencyReplay: idempotencyKey === "replay-key",
-      }),
+      memoryStore: async (
+        { idempotencyKey }: { idempotencyKey?: string },
+        hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+      ) => {
+        // The replay bypasses the quota hook entirely; only fresh writes enforce.
+        if (idempotencyKey !== "replay-key") await hooks?.enforceWriteQuota?.();
+        return {
+          schemaVersion: 1,
+          operation: "memory_store",
+          namespace: "global",
+          dryRun: false,
+          accepted: true,
+          queued: false,
+          status: "stored",
+          memoryId: idempotencyKey === "replay-key" ? "fact-replay" : "fact-new",
+          idempotencyKey,
+          idempotencyReplay: idempotencyKey === "replay-key",
+        };
+      },
     } as unknown as EngramAccessService,
     host: "127.0.0.1",
     port: 0,
@@ -1673,6 +1700,71 @@ test("access HTTP server allows idempotent replay writes even after the write li
       }),
     });
     assert.equal(fresh.status, 429);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("access HTTP server enforces the write rate limit at the real miss even when the peek says replay (#1434)", async () => {
+  // Closes the namespace-divergence bypass: if the idempotency peek classifies a
+  // request as a replay (so the HTTP pre-check is skipped) but the actual write
+  // is a fresh miss, the authoritative enforceWriteQuota hook — invoked inside
+  // the service at commit time — still rate-limits it.
+  let quotaCalls = 0;
+  const server = new EngramAccessHttpServer({
+    service: {
+      ...createFakeService(),
+      // Peek always claims replay → HTTP skips its pre-write availability check.
+      peekMemoryStoreIdempotency: async () => "replay",
+      // ...but every store is a real miss that invokes the authoritative hook.
+      memoryStore: async (
+        _request: unknown,
+        hooks?: { enforceWriteQuota?: () => void | Promise<void> },
+      ) => {
+        quotaCalls += 1;
+        await hooks?.enforceWriteQuota?.(); // throws 429 once the window is full
+        return {
+          schemaVersion: 1,
+          operation: "memory_store",
+          namespace: "global",
+          dryRun: false,
+          accepted: true,
+          queued: false,
+          status: "stored",
+          memoryId: "fact-new",
+          idempotencyReplay: false,
+        };
+      },
+    } as unknown as EngramAccessService,
+    host: "127.0.0.1",
+    port: 0,
+    authToken: "secret-token",
+    maxBodyBytes: 1024,
+  });
+  const started = await server.start();
+  const base = `http://${started.host}:${started.port}`;
+  const headers = {
+    Authorization: "Bearer secret-token",
+    "Content-Type": "application/json",
+  };
+  try {
+    for (let index = 0; index < 30; index += 1) {
+      const res = await fetch(`${base}/engram/v1/memories`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ content: `fresh ${index}`, category: "fact" }),
+      });
+      assert.equal(res.status, 201);
+    }
+    // 31st real miss: peek said replay (pre-check skipped), but the in-service
+    // hook enforces the now-full window.
+    const overflow = await fetch(`${base}/engram/v1/memories`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "overflow", category: "fact" }),
+    });
+    assert.equal(overflow.status, 429);
+    assert.equal(quotaCalls, 31, "every store must consult the authoritative quota hook");
   } finally {
     await server.stop();
   }
