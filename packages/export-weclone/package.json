@@ -1,6 +1,6 @@
 {
   "name": "@remnic/export-weclone",
-  "version": "9.3.622",
+  "version": "9.3.623",
   "description": "Export Remnic memories as WeClone-compatible Alpaca-format fine-tuning datasets",
   "type": "module",
   "main": "dist/index.js",
@@ -27,7 +27,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "@remnic/core": "^9.3.622"
+    "@remnic/core": "^9.3.623"
   },
   "devDependencies": {
     "@remnic/core": "workspace:*",
