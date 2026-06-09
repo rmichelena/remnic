@@ -40,8 +40,13 @@ export type ValidExplicitCapture = {
 export type ExplicitCaptureSource = "memory_store" | "memory_capture" | "suggestion_submit" | "inline";
 type ExplicitCaptureValidationMode = "legacy_tool" | "strict_explicit";
 
-const INLINE_NOTE_RE = /<memory_note>\s*([\s\S]*?)\s*<\/memory_note>/gi;
-const INLINE_NOTE_MARKUP_RE = /<memory_note>\s*[\s\S]*?\s*<\/memory_note>/i;
+// Bounded body {0,100000} instead of an unbounded lazy *? so scanning for the
+// closing tag cannot backtrack polynomially on unterminated <memory_note>
+// markup in hostile turn text (CodeQL js/polynomial-redos). 100 000 chars far
+// exceeds any real inline note, so matching is behavior-preserving; the outer
+// \s* groups were also dropped (body absorbs whitespace; captures are trimmed).
+const INLINE_NOTE_RE = /<memory_note>([\s\S]{0,100000}?)<\/memory_note>/gi;
+const INLINE_NOTE_MARKUP_RE = /<memory_note>[\s\S]{0,100000}?<\/memory_note>/i;
 const INLINE_ALLOWED_CATEGORIES = new Set<MemoryCategory>([
   "fact",
   "preference",
