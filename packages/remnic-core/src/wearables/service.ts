@@ -12,7 +12,10 @@ import {
   compileCorrectionRule,
 } from "./corrections.js";
 import { describeErrorForOperator, WearablesInputError } from "./errors.js";
+import { inferMemoryStatus } from "../memory-lifecycle-ledger-utils.js";
 import { isValidTranscriptDate, parseDayTranscript } from "./day-store.js";
+import { stripAttributesSuffix } from "../storage.js";
+import type { MemoryFrontmatter } from "../types.js";
 import type { WearableMemoryGenDeps } from "./memory-gen.js";
 import { WEARABLE_SOURCE_PREFIX, wearableSourceLabel } from "./memory-gen.js";
 import {
@@ -65,6 +68,8 @@ export interface WearableStorageIo {
         created: string;
         tags: string[];
         status?: string;
+        /** Archival timestamp — rows with this set are not support. */
+        archivedAt?: string;
         structuredAttributes?: Record<string, string>;
       };
       content: string;
@@ -72,6 +77,18 @@ export interface WearableStorageIo {
   >;
   writeMemory: WearableMemoryGenDeps["writer"]["writeMemory"];
   hasFactContentHash(content: string): Promise<boolean>;
+  findWearableMemoryByContent(
+    content: string,
+  ): Promise<{ id: string; status: string | undefined } | null>;
+  promoteWearableMemory(
+    id: string,
+    attributeUpdates: Record<string, string>,
+    confidence?: number,
+  ): Promise<boolean>;
+  demoteWearableMemory(
+    id: string,
+    attributeUpdates: Record<string, string>,
+  ): Promise<boolean>;
 }
 
 export interface WearableSearchBackend {
@@ -87,6 +104,12 @@ export interface WearablesServiceDeps {
   getStorage(): Promise<WearableStorageIo>;
   /** Extraction hook; null when no engine is available. */
   extract: WearableMemoryGenDeps["extract"] | null;
+  /**
+   * LLM-as-judge hook for smart memoryMode (the orchestrator wires the
+   * existing extraction judge here). Absent degrades smart mode to
+   * confidence x sourceTrust + corroboration scoring.
+   */
+  judgeFacts?: WearableMemoryGenDeps["judgeFacts"];
   /** Search backend (QMD); null disables indexed search. */
   searchBackend: WearableSearchBackend | null;
   /** Fired after transcript writes so the search index refreshes. */
@@ -136,15 +159,25 @@ export function createWearableMemoryWriter(
 ): WearableMemoryGenDeps["writer"] {
   return {
     writeMemory: storage.writeMemory.bind(storage),
+    findWearableMemoryByContent: async (content: string) =>
+      (await storage.findWearableMemoryByContent(content)) as
+        | { id: string; status: import("../types.js").MemoryStatus | undefined }
+        | null,
+    promoteWearableMemory: storage.promoteWearableMemory.bind(storage),
+    demoteWearableMemory: storage.demoteWearableMemory.bind(storage),
     hasFactContentHash: async (content: string) => {
       if (await storage.hasFactContentHash(content)) return true;
-      const needle = content.trim();
+      // Compare with the "[Attributes: ...]" enrichment suffix removed
+      // on BOTH sides — stored wearable bodies carry it, callers pass
+      // raw fact text. Without the strip, digest/candidate dedup never
+      // matched attribute-bearing memories.
+      const needle = stripAttributesSuffix(content);
       const memories = await storage.readAllMemories();
       return memories.some(
         (memory) =>
           typeof memory.frontmatter.source === "string" &&
           memory.frontmatter.source.startsWith(`${WEARABLE_SOURCE_PREFIX}:`) &&
-          memory.content.trim() === needle,
+          stripAttributesSuffix(memory.content) === needle,
       );
     },
   };
@@ -263,6 +296,9 @@ export class WearablesService {
       ? {
           extract: this.deps.extract,
           writer: createWearableMemoryWriter(storage),
+          ...(this.deps.judgeFacts !== undefined
+            ? { judgeFacts: this.deps.judgeFacts }
+            : {}),
         }
       : null;
 
@@ -293,8 +329,53 @@ export class WearablesService {
           },
           writeDayTranscript: (source, date, serialized) =>
             storage.writeWearableDayTranscript(source, date, serialized),
-          afterTranscriptsWritten: this.deps.reindexSearch,
+          afterWrites: this.deps.reindexSearch,
           memoryGen,
+          // Cross-device corroboration evidence (smart mode): other
+          // sources' stored transcripts for the same day...
+          readOtherSourceDayBodies: async (date, excludeSource) => {
+            const bodies = new Map<string, string>();
+            const days = await storage.listWearableTranscriptDays();
+            for (const entry of days) {
+              if (entry.date !== date || entry.source === excludeSource) continue;
+              if (bodies.size >= 4) break;
+              const raw = await storage.readWearableDayTranscript(entry.source, entry.date);
+              if (raw === null) continue;
+              bodies.set(entry.source, parseDayTranscript(raw)?.body ?? raw);
+            }
+            return bodies;
+          },
+          // ...and existing memories for the support boost. Status
+          // resolves through the canonical inferMemoryStatus so rows
+          // archived via `archivedAt` (or an archive/ path) without an
+          // explicit status never count. Explicit allow-list: active
+          // rows AND pending_review rows — a borderline fact observed
+          // again on a later day is repetition signal and the support
+          // boost is how it earns promotion. Rejected/quarantined/
+          // superseded/archived/forgotten rows never count (CLAUDE.md
+          // rule 53). Bodies feed token matching with the
+          // "[Attributes: ...]" enrichment suffix stripped — attribute
+          // metadata must never grant corroboration.
+          listSupportMemories: async () => {
+            const memories = await storage.readAllMemories();
+            const support: Array<{ id: string; content: string }> = [];
+            for (const memory of memories) {
+              // WearableStorageIo narrows MemoryFrontmatter for
+              // testability; production hands us the real thing.
+              const status = inferMemoryStatus(
+                memory.frontmatter as MemoryFrontmatter,
+                memory.path,
+              );
+              if (status !== "active" && status !== "pending_review") {
+                continue;
+              }
+              support.push({
+                id: memory.frontmatter.id,
+                content: stripAttributesSuffix(memory.content),
+              });
+            }
+            return support;
+          },
         },
       );
       summaries.push(summary);

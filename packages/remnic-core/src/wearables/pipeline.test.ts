@@ -34,6 +34,10 @@ function config(overrides: Partial<WearablesConfig> = {}): WearablesConfig {
     ...defaultWearablesConfig(),
     enabled: true,
     timezone: "UTC",
+    // Pinned off so per-stage tests stay focused; defaults are covered
+    // in config.test.ts and the dedicated digest test below.
+    digestEnabled: false,
+    offTheRecordEnabled: false,
     ...overrides,
   };
 }
@@ -119,7 +123,7 @@ function makeDeps(memoryDir: string): {
       files.set(`${sourceId}/${date}`, serialized);
       written.push({ source: sourceId, date, serialized });
     },
-    async afterTranscriptsWritten() {
+    async afterWrites() {
       reindexes.count += 1;
     },
     memoryGen: {
@@ -571,6 +575,310 @@ test("page-capped days carry a visible partial marker and keep warning", async (
     const second = await syncWearableSource(endlessConnector, settings(), config(), { days: 1 }, deps);
     assert.equal(second.transcriptsWritten.length, 0);
     assert.ok(second.warnings.some((warning) => warning.includes("stopped paginating")));
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("a judge outage does not re-run the memory pass forever", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const byDate = {
+      "2026-06-11": [
+        makeConversation("c1", "2026-06-11", [
+          { speaker: "user", isWearer: true, text: "The vendor contract was renewed for another year today." },
+          { speaker: "Speaker 2", text: "Renewal confirmed, the paperwork went through this afternoon." },
+        ]),
+      ],
+    };
+    const { deps, memoryWrites } = makeDeps(memoryDir);
+    assert.ok(deps.memoryGen);
+    let extractCalls = 0;
+    const baseExtract = deps.memoryGen.extract;
+    deps.memoryGen.extract = async (turns) => {
+      extractCalls += 1;
+      return baseExtract(turns);
+    };
+    deps.memoryGen.judgeFacts = async () => {
+      throw new Error("judge backend down");
+    };
+
+    const first = await syncWearableSource(
+      fakeConnector(byDate),
+      settings({ memoryMode: "smart" }),
+      config(),
+      { days: 1 },
+      deps,
+    );
+    assert.ok(first.warnings.some((warning) => warning.includes("judge unavailable")));
+    assert.equal(first.memoriesCreated, 1, "degraded pass still writes");
+    const callsAfterFirst = extractCalls;
+
+    // Unchanged day, judge still down: the degraded-but-complete pass
+    // must have recorded completion — no re-extraction.
+    const second = await syncWearableSource(
+      fakeConnector(byDate),
+      settings({ memoryMode: "smart" }),
+      config(),
+      { days: 1 },
+      deps,
+    );
+    assert.equal(extractCalls, callsAfterFirst, "no repeat extraction for an unchanged day");
+    assert.equal(second.memoriesCreated, 0);
+    assert.equal(memoryWrites.length, 1);
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("smart mode: another device's stored day transcript corroborates borderline facts", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const byDate = {
+      "2026-06-11": [
+        makeConversation("c1", "2026-06-11", [
+          { speaker: "user", isWearer: true, text: "We are moving the launch to September twelfth after the vendor call." },
+          { speaker: "Speaker 2", text: "September twelfth works for everyone on the vendor side too." },
+        ]),
+      ],
+    };
+    const { deps, memoryWrites } = makeDeps(memoryDir);
+    assert.ok(deps.memoryGen);
+    // Borderline extraction: 0.75 * 0.8 = 0.6 — review band unless corroborated.
+    deps.memoryGen.extract = async () => ({
+      facts: [
+        {
+          category: "fact",
+          content: "The launch moved to September twelfth after the vendor call.",
+          confidence: 0.75,
+          tags: [],
+        },
+      ],
+      profileUpdates: [],
+      entities: [],
+      questions: [],
+    });
+    // A second device already stored a transcript covering the same day.
+    deps.readOtherSourceDayBodies = async (date, excludeSource) => {
+      assert.equal(date, "2026-06-11");
+      assert.equal(excludeSource, "testsource");
+      return new Map([
+        ["bee", "They said the launch moves to September twelfth right after that vendor call wrapped."],
+      ]);
+    };
+    deps.listSupportMemories = async () => [];
+
+    const summary = await syncWearableSource(
+      fakeConnector(byDate),
+      settings({ memoryMode: "smart" }),
+      config(),
+      { days: 1 },
+      deps,
+    );
+    assert.equal(summary.memoriesCreated, 1);
+    assert.equal(memoryWrites[0].options.status, "active", "corroboration lifts review -> active");
+    const attrs = memoryWrites[0].options.structuredAttributes as Record<string, string>;
+    assert.equal(attrs.corroboratedBySources, "bee");
+    assert.equal(attrs.trustDecision, "auto-approved");
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("smart native import never uses day-scoped cross-source corroboration", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const { deps, memoryWrites } = makeDeps(memoryDir);
+    assert.ok(deps.memoryGen);
+    let dayBodiesRequested = 0;
+    deps.readOtherSourceDayBodies = async () => {
+      dayBodiesRequested += 1;
+      return new Map([["bee", "the launch moves to september twelfth after that vendor call"]]);
+    };
+    deps.listSupportMemories = async () => [
+      { id: "fact-9", content: "User volunteers at the food bank every month with the team." },
+    ];
+    const summary = await syncWearableSource(
+      fakeConnector({}, [
+        // No day attached — must not be scored against any day's tokens,
+        // but corpus support still applies: 0.7*(0.8*0.9)+0.10 = 0.604 -> review.
+        { id: "nat-1", content: "User volunteers at the food bank every month with the team." },
+      ]),
+      settings({ memoryMode: "smart", importNativeMemories: "smart" }),
+      config(),
+      { days: 1 },
+      deps,
+    );
+    assert.equal(dayBodiesRequested, 0, "native import must not read day bodies");
+    assert.equal(summary.nativeMemoriesImported, 1);
+    const attrs = memoryWrites[0].options.structuredAttributes as Record<string, string>;
+    assert.equal(attrs.corroboratedBySources, undefined, "no cross-source evidence without a day");
+    assert.equal(attrs.supportingMemoryId, "fact-9", "corpus support still applies");
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("facts written earlier in a multi-day backfill support later days in the same run", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const byDate = {
+      "2026-06-10": [
+        makeConversation("c1", "2026-06-10", [
+          { speaker: "user", isWearer: true, text: "The launch moved to September twelfth after the vendor call." },
+          { speaker: "Speaker 2", text: "September twelfth confirmed with the vendor on the call." },
+        ]),
+      ],
+      "2026-06-11": [
+        makeConversation("c2", "2026-06-11", [
+          { speaker: "user", isWearer: true, text: "Reminder that the launch moved to September twelfth after the vendor call." },
+          { speaker: "Speaker 2", text: "Yes, the September date is locked in now." },
+        ]),
+      ],
+    };
+    const { deps, memoryWrites } = makeDeps(memoryDir);
+    assert.ok(deps.memoryGen);
+    // Borderline confidence so day 2 only crosses the auto threshold
+    // with the +0.10 corpus-support boost from day 1's write.
+    let call = 0;
+    deps.memoryGen.extract = async () => {
+      call += 1;
+      return {
+        facts: [
+          {
+            category: "fact",
+            content:
+              call === 1
+                ? "The launch moved to September twelfth after the vendor call."
+                : "Launch moved to September twelfth after the vendor call.",
+            confidence: 0.75,
+            tags: [],
+          },
+        ],
+        profileUpdates: [],
+        entities: [],
+        questions: [],
+      };
+    };
+    // listSupportMemories reflects what this run has written so far —
+    // mirroring storage, whose readAllMemories cache invalidates on
+    // every write.
+    deps.listSupportMemories = async () =>
+      memoryWrites.map((write, index) => ({ id: `mem-${index + 1}`, content: write.content }));
+
+    const summary = await syncWearableSource(
+      fakeConnector(byDate),
+      settings({ memoryMode: "smart" }),
+      config(),
+      { days: 2 },
+      deps,
+    );
+    assert.equal(summary.memoriesCreated, 2);
+    assert.equal(memoryWrites[0].options.status, "pending_review", "day 1 borderline stays in review");
+    assert.equal(memoryWrites[1].options.status, "active", "day 2 lifted by day 1's write");
+    const attrs = memoryWrites[1].options.structuredAttributes as Record<string, string>;
+    assert.equal(attrs.supportingMemoryId, "mem-1");
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("a second device's day write invalidates the first device's memory-pass completion", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const day = "2026-06-11";
+    const conversationFor = (source: string) =>
+      makeConversation(`${source}-c1`, day, [
+        { speaker: "user", isWearer: true, text: "We are moving the launch to September twelfth after the vendor call today." },
+        { speaker: "Speaker 2", text: "The vendor confirmed the September launch date on the call." },
+      ]);
+    const { deps } = makeDeps(memoryDir);
+
+    // Device A syncs first and completes its memory pass for the day.
+    const connectorA = { ...fakeConnector({ [day]: [conversationFor("a")] }), id: "sourcea" };
+    await syncWearableSource(connectorA, settings({ memoryMode: "smart" }), config(), { days: 1 }, deps);
+    let state = await loadSyncState(memoryDir);
+    assert.ok(state.sources.sourcea.memoryDayHashes?.[day], "A's pass recorded");
+
+    // Device B then writes a transcript for the same day: A's
+    // completion record for that day must be invalidated so A's next
+    // sync re-scores with B's evidence available.
+    const connectorB = { ...fakeConnector({ [day]: [conversationFor("b")] }), id: "sourceb" };
+    await syncWearableSource(connectorB, settings({ memoryMode: "smart" }), config(), { days: 1 }, deps);
+    state = await loadSyncState(memoryDir);
+    assert.equal(
+      state.sources.sourcea.memoryDayHashes?.[day],
+      undefined,
+      "A's completion cleared by B's new same-day evidence",
+    );
+    assert.ok(state.sources.sourceb.memoryDayHashes?.[day], "B's own pass recorded");
+  } finally {
+    rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("a promotion-only re-pass still fires the reindex hook", async () => {
+  const memoryDir = mkdtempSync(path.join(tmpdir(), "remnic-pipeline-"));
+  try {
+    const day = "2026-06-11";
+    const byDate = {
+      [day]: [
+        makeConversation("c1", day, [
+          { speaker: "user", isWearer: true, text: "We are moving the launch to September twelfth after the vendor call today." },
+          { speaker: "Speaker 2", text: "The vendor confirmed the September launch date on the call." },
+        ]),
+      ],
+    };
+    const { deps, reindexes, memoryWrites } = makeDeps(memoryDir);
+    assert.ok(deps.memoryGen);
+    const borderline = "The launch moved to September twelfth after the vendor call.";
+    deps.memoryGen.extract = async () => ({
+      facts: [{ category: "fact", content: borderline, confidence: 0.75, tags: [] }],
+      profileUpdates: [],
+      entities: [],
+      questions: [],
+    });
+
+    // Sync 1: borderline fact lands in review. Reindex fires (a memory
+    // was created).
+    await syncWearableSource(fakeConnector(byDate), settings({ memoryMode: "smart" }), config(), { days: 1 }, deps);
+    assert.equal(memoryWrites[0].options.status, "pending_review");
+    const reindexesAfterFirst = reindexes.count;
+
+    // Another source's same-day transcript arrives, then sync 1's
+    // source re-passes: unchanged transcript, duplicate fact — but now
+    // corroborated, so it PROMOTES. The reindex hook must still fire.
+    const written: string[] = [];
+    deps.memoryGen.writer.findWearableMemoryByContent = async (content) =>
+      content.trim() === borderline ? { id: "mem-1", status: "pending_review" } : null;
+    deps.memoryGen.writer.promoteWearableMemory = async (id) => {
+      written.push(id);
+      return true;
+    };
+    deps.memoryGen.writer.hasFactContentHash = async (content) =>
+      content.trim() === borderline;
+    deps.readOtherSourceDayBodies = async () =>
+      new Map([["bee", "They said the launch moves to September twelfth right after that vendor call wrapped."]]);
+    // Clear the completion record the way a sibling-source write would.
+    const { loadSyncState: load, saveSyncState: save } = await import("./sync-state.js");
+    const state = await load(memoryDir);
+    delete state.sources.testsource.memoryDayHashes?.[day];
+    await save(memoryDir, state);
+
+    const second = await syncWearableSource(
+      fakeConnector(byDate),
+      settings({ memoryMode: "smart" }),
+      config(),
+      { days: 1 },
+      deps,
+    );
+    assert.equal(second.transcriptsWritten.length, 0, "no transcript write");
+    assert.equal(second.memoriesPromoted, 1, "promotion happened");
+    assert.deepEqual(written, ["mem-1"]);
+    assert.ok(
+      reindexes.count > reindexesAfterFirst,
+      "reindex fired for the promotion-only run",
+    );
   } finally {
     rmSync(memoryDir, { recursive: true, force: true });
   }

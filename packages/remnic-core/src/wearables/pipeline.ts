@@ -36,6 +36,7 @@ import {
   writeDailyDigestMemory,
   type WearableMemoryGenDeps,
 } from "./memory-gen.js";
+import { tokenizeDayBody, type CorroborationContext } from "./trust.js";
 import { applyOffTheRecord, compileRedactionPatterns, redactText } from "./redaction.js";
 import { loadSpeakerRegistry } from "./speakers.js";
 import {
@@ -80,14 +81,36 @@ export interface WearableSyncDeps {
     date: string,
     serialized: string,
   ): Promise<void>;
-  /** Optional hook fired once after any day files changed (reindex). */
-  afterTranscriptsWritten?(): Promise<void>;
+  /**
+   * Optional hook fired once after the sync wrote ANYTHING the search
+   * index should see: day transcripts, created memories, in-place
+   * promotions, or native imports. (A cross-source invalidation can
+   * promote memories on a run with zero transcript writes — the index
+   * must still refresh.)
+   */
+  afterWrites?(): Promise<void>;
   /**
    * Memory-generation dependencies, or null when no extraction engine
    * is available in this context (transcripts still sync; memory
    * creation is skipped with a warning when the mode wanted it).
    */
   memoryGen: WearableMemoryGenDeps | null;
+  /**
+   * Same-day transcript bodies from OTHER sources, for cross-device
+   * corroboration in smart mode. Absent disables the boost.
+   */
+  readOtherSourceDayBodies?(
+    date: string,
+    excludeSource: string,
+  ): Promise<Map<string, string>>;
+  /**
+   * Existing memories usable as support evidence: status "active" or
+   * "pending_review" (explicit allow-list — a borderline fact observed
+   * again on a later day is repetition signal, and the +0.10 boost is
+   * how it earns promotion). Rejected/quarantined/superseded/archived/
+   * forgotten rows are never support evidence.
+   */
+  listSupportMemories?(): Promise<Array<{ id: string; content: string }>>;
   /** Clock injection for tests. */
   now?: () => Date;
 }
@@ -276,6 +299,8 @@ export async function syncWearableSource(
     correctionsApplied: 0,
     transcriptsWritten: [],
     memoriesCreated: 0,
+    memoriesPromoted: 0,
+    memoriesDemoted: 0,
     memoriesSkipped: 0,
     nativeMemoriesImported: 0,
     warnings: [],
@@ -380,6 +405,9 @@ export async function syncWearableSource(
 
     if (allElided) continue;
 
+    const needsSmartContext =
+      settings.memoryMode === "smart" || settings.importNativeMemories === "smart";
+
     // The memory pass runs when the day changed, when forced, or when
     // the last pass for this exact content didn't complete cleanly —
     // a sync that stored the transcript but failed mid-memory-write
@@ -406,18 +434,31 @@ export async function syncWearableSource(
         // re-runs the day.
         let passClean = false;
         try {
+          const corroboration = needsSmartContext
+            ? await buildCorroborationContext(connector.id, date, deps)
+            : undefined;
+          const dayMemoryGen: WearableMemoryGenDeps = {
+            ...deps.memoryGen,
+            ...(corroboration !== undefined ? { corroboration } : {}),
+          };
           const generated = await generateWearableMemories(
             connector.id,
             date,
             cleaned.conversations,
             settings,
             registry,
-            deps.memoryGen,
+            dayMemoryGen,
           );
           summary.memoriesCreated += generated.created;
+          summary.memoriesPromoted += generated.promoted;
+          summary.memoriesDemoted += generated.demoted;
           summary.memoriesSkipped += generated.skipped;
           summary.warnings.push(...generated.warnings);
-          passClean = generated.warnings.length === 0;
+          // Degraded-but-complete passes (e.g. judge unavailable) still
+          // record completion — only an aborted extraction should force
+          // the day to re-run on the next sync (Cursor review on PR
+          // #1462).
+          passClean = generated.completed;
           if (config.digestEnabled) {
             const wrote = await writeDailyDigestMemory(
               connector.id,
@@ -448,7 +489,7 @@ export async function syncWearableSource(
   }
 
   if (
-    settings.importNativeMemories === "review" &&
+    settings.importNativeMemories !== "off" &&
     typeof connector.fetchNativeMemories === "function"
   ) {
     if (!deps.memoryGen) {
@@ -459,6 +500,26 @@ export async function syncWearableSource(
       const alreadyImported = new Set(
         previousState?.importedNativeMemoryIds ?? [],
       );
+      // Native memories carry no day, so same-day cross-device
+      // corroboration does not apply to them — scoring a provider fact
+      // against an arbitrary day's tokens would be wrong-day evidence
+      // (Cursor review on PR #1462). They keep only the day-independent
+      // existing-memory support boost.
+      const nativeCorroboration =
+        settings.importNativeMemories === "smart"
+          ? {
+              otherSourceDayTokens: new Map<string, Set<string>>(),
+              existingMemories: deps.listSupportMemories
+                ? await deps.listSupportMemories()
+                : [],
+            }
+          : undefined;
+      const nativeMemoryGen: WearableMemoryGenDeps = {
+        ...deps.memoryGen,
+        ...(nativeCorroboration !== undefined
+          ? { corroboration: nativeCorroboration }
+          : {}),
+      };
       let cursor: string | null | undefined = undefined;
       for (let page = 0; page < MAX_NATIVE_PAGES; page++) {
         const result = await connector.fetchNativeMemories({
@@ -469,8 +530,10 @@ export async function syncWearableSource(
           connector.id,
           result.memories,
           alreadyImported,
-          deps.memoryGen.writer,
+          settings,
+          nativeMemoryGen,
         );
+        summary.warnings.push(...imported.warnings);
         summary.nativeMemoriesImported += imported.imported;
         importedNativeIds.push(...imported.importedIds);
         for (const id of imported.importedIds) alreadyImported.add(id);
@@ -485,12 +548,18 @@ export async function syncWearableSource(
     }
   }
 
-  if (summary.transcriptsWritten.length > 0 && deps.afterTranscriptsWritten) {
+  const wroteAnything =
+    summary.transcriptsWritten.length > 0 ||
+    summary.memoriesCreated > 0 ||
+    summary.memoriesPromoted > 0 ||
+    summary.memoriesDemoted > 0 ||
+    summary.nativeMemoriesImported > 0;
+  if (wroteAnything && deps.afterWrites) {
     try {
-      await deps.afterTranscriptsWritten();
+      await deps.afterWrites();
     } catch (err) {
       summary.warnings.push(
-        `search reindex failed (transcripts are stored and will index on the next update): ${describeErrorForOperator(err)}`,
+        `search reindex failed (writes are stored and will index on the next update): ${describeErrorForOperator(err)}`,
       );
     }
   }
@@ -505,9 +574,62 @@ export async function syncWearableSource(
     clearMemoryDays: failedMemoryDays,
     importedNativeMemoryIds: importedNativeIds,
   });
+  // New same-day evidence invalidates OTHER sources' memory-pass
+  // completion for the days this source just (re)wrote: their next
+  // sync re-scores with this transcript available, and the promotion
+  // path upgrades earlier borderline writes in place (Cursor review on
+  // PR #1462).
+  if (summary.transcriptsWritten.length > 0) {
+    const cleared: typeof syncState.sources = {};
+    for (const [otherId, otherState] of Object.entries(syncState.sources)) {
+      if (otherId === connector.id || otherState.memoryDayHashes === undefined) {
+        cleared[otherId] = otherState;
+        continue;
+      }
+      const memoryDays = { ...otherState.memoryDayHashes };
+      let touched = false;
+      for (const date of summary.transcriptsWritten) {
+        if (date in memoryDays) {
+          delete memoryDays[date];
+          touched = true;
+        }
+      }
+      cleared[otherId] = touched
+        ? { ...otherState, memoryDayHashes: memoryDays }
+        : otherState;
+    }
+    syncState = { version: 1, sources: cleared };
+  }
   await saveSyncState(deps.memoryDir, syncState);
 
   return summary;
+}
+
+/**
+ * Assemble smart-mode corroboration evidence: other sources' same-day
+ * transcript tokens + existing active memories. The memory list loads
+ * fresh per day (not per run) so facts written on earlier days of a
+ * multi-day backfill are visible as support evidence on later days —
+ * the underlying readAllMemories is cached in storage and invalidated
+ * by writes, so the per-day refresh is cheap (Cursor review on PR
+ * #1462).
+ */
+async function buildCorroborationContext(
+  sourceId: string,
+  date: string,
+  deps: WearableSyncDeps,
+): Promise<CorroborationContext> {
+  const otherSourceDayTokens = new Map<string, Set<string>>();
+  if (deps.readOtherSourceDayBodies) {
+    const bodies = await deps.readOtherSourceDayBodies(date, sourceId);
+    for (const [otherSource, body] of bodies) {
+      otherSourceDayTokens.set(otherSource, tokenizeDayBody(body));
+    }
+  }
+  const existingMemories = deps.listSupportMemories
+    ? await deps.listSupportMemories()
+    : [];
+  return { otherSourceDayTokens, existingMemories };
 }
 
 export function defaultTimezone(): string {

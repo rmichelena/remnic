@@ -1168,6 +1168,27 @@ export class ContentHashIndex {
  *   normalizeAttributePairs({ foo: "bar", BAZ: "qux" })
  *   // → "baz: qux; foo: bar"
  */
+/**
+ * Remove the "[Attributes: ...]" suffix `writeMemory` appends to the
+ * stored body when structuredAttributes are present, yielding the raw
+ * fact text for content comparison. Inverse companion of
+ * `normalizeAttributePairs` enrichment. String operations, not regex —
+ * CodeQL js/polynomial-redos on a suffix-anchored pattern over
+ * library-supplied content.
+ */
+export function stripAttributesSuffix(content: string): string {
+  const trimmed = content.trimEnd();
+  if (!trimmed.endsWith("]")) return content.trim();
+  const marker = "\n[Attributes: ";
+  const markerIndex = trimmed.lastIndexOf(marker);
+  if (markerIndex === -1) return content.trim();
+  // The block must be the FINAL line and contain no "]" before the
+  // closing bracket (mirrors the shape normalizeAttributePairs emits).
+  const inner = trimmed.slice(markerIndex + marker.length, -1);
+  if (inner.includes("]") || inner.includes("\n")) return content.trim();
+  return trimmed.slice(0, markerIndex).trim();
+}
+
 export function normalizeAttributePairs(pairs: Record<string, string>): string {
   return Object.entries(pairs)
     .map(([k, v]) => [k.trim().toLowerCase(), v.trim()] as [string, string])
@@ -2594,6 +2615,85 @@ export class StorageManager {
       return 0;
     });
     return days;
+  }
+
+  /**
+   * Locate a wearable-sourced memory by exact (trimmed) content,
+   * ignoring the "[Attributes: ...]" suffix writeMemory appends for
+   * structuredAttributes — callers pass the raw fact text. Used by the
+   * smart trust pipeline to find an earlier borderline write when the
+   * same fact re-extracts with stronger evidence.
+   */
+  async findWearableMemoryByContent(
+    content: string,
+  ): Promise<{ id: string; status: MemoryStatus | undefined } | null> {
+    const needle = stripAttributesSuffix(content);
+    const memories = await this.readAllMemories();
+    for (const memory of memories) {
+      if (
+        typeof memory.frontmatter.source === "string" &&
+        memory.frontmatter.source.startsWith("wearable:") &&
+        stripAttributesSuffix(memory.content) === needle
+      ) {
+        return { id: memory.frontmatter.id, status: memory.frontmatter.status };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Promote a pending_review wearable memory to active in place,
+   * merging updated trust evidence into structuredAttributes. Returns
+   * false when the memory is missing or no longer pending_review (a
+   * concurrent review decision wins).
+   */
+  async promoteWearableMemory(
+    id: string,
+    attributeUpdates: Record<string, string>,
+    confidence?: number,
+  ): Promise<boolean> {
+    const memories = await this.readAllMemories();
+    const memory = memories.find((entry) => entry.frontmatter.id === id);
+    if (!memory) return false;
+    if (memory.frontmatter.status !== "pending_review") return false;
+    return this.writeMemoryFrontmatter(memory, {
+      status: "active",
+      // Keep frontmatter confidence in step with the re-scored trust —
+      // new smart writes persist trust as confidence, and a promoted
+      // row must not keep its stale borderline value.
+      ...(typeof confidence === "number" && Number.isFinite(confidence)
+        ? { confidence: Math.min(1, Math.max(0, confidence)) }
+        : {}),
+      structuredAttributes: {
+        ...(memory.frontmatter.structuredAttributes ?? {}),
+        ...attributeUpdates,
+      },
+    });
+  }
+
+  /**
+   * Demote a pending_review wearable memory to rejected when a re-pass
+   * produced an explicit judge-reject verdict, merging the evidence.
+   * Returns false when the memory is missing or no longer
+   * pending_review — active rows are NEVER auto-demoted (operator
+   * approvals and accrued recall signals win; contradiction scans and
+   * supersession own active-row retirement).
+   */
+  async demoteWearableMemory(
+    id: string,
+    attributeUpdates: Record<string, string>,
+  ): Promise<boolean> {
+    const memories = await this.readAllMemories();
+    const memory = memories.find((entry) => entry.frontmatter.id === id);
+    if (!memory) return false;
+    if (memory.frontmatter.status !== "pending_review") return false;
+    return this.writeMemoryFrontmatter(memory, {
+      status: "rejected",
+      structuredAttributes: {
+        ...(memory.frontmatter.structuredAttributes ?? {}),
+        ...attributeUpdates,
+      },
+    });
   }
 
   private get factsDir(): string {
