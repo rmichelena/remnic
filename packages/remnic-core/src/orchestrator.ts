@@ -1700,6 +1700,7 @@ export class Orchestrator {
   >();
   private qmdMaintenanceTimer: NodeJS.Timeout | null = null;
   private wearablesServiceInstance: WearablesService | null = null;
+  private wearablesAutoSyncHandle: { stop(): Promise<void> } | null = null;
   private qmdMaintenancePending = false;
   private qmdMaintenanceInFlight = false;
   private lastQmdEmbedAtMs = 0;
@@ -1781,6 +1782,12 @@ export class Orchestrator {
    */
   async destroy(): Promise<void> {
     this.abortDeferredInit();
+    if (this.wearablesAutoSyncHandle) {
+      // Aborts in-flight provider fetches and waits for the tick to
+      // settle, so nothing is writing or reindexing past destroy().
+      await this.wearablesAutoSyncHandle.stop();
+      this.wearablesAutoSyncHandle = null;
+    }
     if (this.qmdMaintenanceTimer) {
       clearTimeout(this.qmdMaintenanceTimer);
       this.qmdMaintenanceTimer = null;
@@ -2954,6 +2961,57 @@ export class Orchestrator {
         }
       } catch (err) {
         log.warn(`first-start lifecycle migration failed (non-fatal): ${err}`);
+      }
+    }
+
+    // Wearables auto-sync: in-process periodic transcript refresh for
+    // long-lived hosts (default on). Today's transcript keeps growing
+    // while the wearable records; a once-per-local-day deep pass picks
+    // up late uploads and provider re-processing. Static config gate —
+    // sources can't appear at runtime, so checking once here is safe.
+    // The timer is unref'd, so one-shot CLI runs exit naturally without
+    // ever ticking; idempotent across stop/start cycles via the handle
+    // guard. Non-fatal: a failure to start must not break init.
+    if (signal.aborted) return;
+    if (
+      !this.wearablesAutoSyncHandle &&
+      this.config.wearables.enabled &&
+      this.config.wearables.autoSyncEnabled &&
+      Object.values(this.config.wearables.sources).some((source) => source.enabled)
+    ) {
+      try {
+        const { startWearablesAutoSync } = await import("./wearables/auto-sync.js");
+        // Re-check after the await: destroy() may have aborted while
+        // the import was in flight, having found no handle to stop —
+        // starting now would leave a live interval on a destroyed
+        // orchestrator (Cursor review on PR #1464). Handle creation
+        // below is synchronous, so no further window exists.
+        if (signal.aborted) return;
+        this.wearablesAutoSyncHandle = startWearablesAutoSync(
+          {
+            intervalMinutes: this.config.wearables.autoSyncIntervalMinutes,
+            days: this.config.wearables.autoSyncDays,
+            deepDays: this.config.wearables.autoSyncDeepDays,
+            ...(this.config.wearables.timezone !== undefined
+              ? { timezone: this.config.wearables.timezone }
+              : {}),
+          },
+          {
+            sync: (options) => this.getWearablesService().sync(options),
+            log: {
+              info: (message) => log.info(message),
+              warn: (message) => log.warn(message),
+            },
+          },
+        );
+        log.info(
+          `wearables auto-sync started: every ${this.config.wearables.autoSyncIntervalMinutes}m over ${this.config.wearables.autoSyncDays}d (deep ${this.config.wearables.autoSyncDeepDays}d daily)`,
+        );
+      } catch (err) {
+        const { displayErrorDetail } = await import("./runtime/better-sqlite.js");
+        log.warn(
+          `wearables auto-sync failed to start (non-fatal): ${displayErrorDetail(err)}`,
+        );
       }
     }
 
