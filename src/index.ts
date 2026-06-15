@@ -242,6 +242,74 @@ export async function loadHourlySummaryCronJobsData(
   }
 }
 
+/**
+ * Build the auto-registered hourly summary cron job definition.
+ *
+ * Exported for testing. Model selection follows the same precedence as the
+ * memory flush plan: explicit `summaryModel`, then `model`, then the configured
+ * `taskModelChain.primary`. When none is configured the model is omitted
+ * entirely so the Gateway falls back to its own default + provider (avoiding an
+ * unroutable bare `gpt-5.5`). Issue #1469.
+ *
+ * The resolved model is written to BOTH the job root (`model`) and the isolated
+ * `agentTurn` payload (`payload.model`). For `sessionTarget: "isolated"` jobs
+ * OpenClaw honors the per-job `payload.model` as the primary selection; the root
+ * field is kept only for backward compatibility with older host builds. Writing
+ * payload.model is what makes the configured task model actually route instead
+ * of silently falling through to the agent default (codex review on PR #1470).
+ */
+export function buildHourlySummaryCronJob(
+  cfg: Pick<
+    ReturnType<typeof parseConfig>,
+    "summaryModel" | "model" | "taskModelChain"
+  >,
+  opts: { jobId: string; minute: number; nowMs: number },
+): HourlySummaryCronJob {
+  // Prefer explicit summary/default models, then the configured task-model primary.
+  const model = cfg.summaryModel || cfg.model || cfg.taskModelChain?.primary;
+
+  // Create the hourly summary job.
+  //
+  // NOTE:
+  // - `sessionTarget: "main"` only supports `payload.kind: "systemEvent"` in this install.
+  // - For agent-driven automation, use `sessionTarget: "isolated"` + `payload.kind: "agentTurn"`.
+  // - We intentionally avoid sending messages anywhere; success is silent.
+  return {
+    id: opts.jobId,
+    agentId: "generalist",
+    ...(model ? { model } : {}),
+    name: "Remnic Hourly Summary",
+    enabled: true,
+    createdAtMs: opts.nowMs,
+    updatedAtMs: opts.nowMs,
+    schedule: {
+      kind: "cron",
+      expr: `${opts.minute} * * * *`, // Every hour at the given minute
+      tz: "America/Chicago",
+    },
+    sessionTarget: "isolated",
+    wakeMode: "now",
+    payload: {
+      kind: "agentTurn",
+      timeoutSeconds: 120,
+      thinking: "off",
+      ...(model ? { model } : {}),
+      message:
+        "You are OpenClaw automation.\n\n" +
+        "Task: Generate Remnic hourly summaries.\n\n" +
+        "Call the tool `memory_summarize_hourly` with empty params.\n\n" +
+        "Output policy:\n" +
+        "- If you generated summaries successfully: output exactly NO_REPLY.\n" +
+        "- If there is an error: output one concise line describing it.\n\n" +
+        "Rules:\n" +
+        "- Do NOT send anything to Discord.\n" +
+        "- Never print secrets.\n",
+    },
+    delivery: { mode: "none" },
+    state: {},
+  };
+}
+
 async function realPathLater(filePath: string): Promise<string> {
   const fs = await import(NODE_FS_PROMISES_MODULE_ID);
   return fs.realpath(filePath);
@@ -4640,51 +4708,14 @@ const pluginDefinition = {
           return;
         }
 
-        // Prefer explicit summary/default models, then the configured task-model primary.
-        const model = cfg.summaryModel || cfg.model || cfg.taskModelChain?.primary;
-
         // Pick a random minute (1-59) to avoid colliding with other top-of-hour crons
         const randomMinute = Math.floor(Math.random() * 59) + 1;
 
-        // Create the hourly summary job.
-        //
-        // NOTE:
-        // - `sessionTarget: "main"` only supports `payload.kind: "systemEvent"` in this install.
-        // - For agent-driven automation, use `sessionTarget: "isolated"` + `payload.kind: "agentTurn"`.
-        // - We intentionally avoid sending messages anywhere; success is silent.
-        const newJob = {
-          id: jobId,
-          agentId: "generalist",
-          ...(model ? { model } : {}),
-          name: "Remnic Hourly Summary",
-          enabled: true,
-          createdAtMs: Date.now(),
-          updatedAtMs: Date.now(),
-          schedule: {
-            kind: "cron" as const,
-            expr: `${randomMinute} * * * *`, // Every hour at random minute
-            tz: "America/Chicago",
-          },
-          sessionTarget: "isolated",
-          wakeMode: "now" as const,
-          payload: {
-            kind: "agentTurn" as const,
-            timeoutSeconds: 120,
-            thinking: "off" as const,
-            message:
-              "You are OpenClaw automation.\n\n" +
-              "Task: Generate Remnic hourly summaries.\n\n" +
-              "Call the tool `memory_summarize_hourly` with empty params.\n\n" +
-              "Output policy:\n" +
-              "- If you generated summaries successfully: output exactly NO_REPLY.\n" +
-              "- If there is an error: output one concise line describing it.\n\n" +
-              "Rules:\n" +
-              "- Do NOT send anything to Discord.\n" +
-              "- Never print secrets.\n",
-          },
-          delivery: { mode: "none" as const },
-          state: {},
-        };
+        const newJob = buildHourlySummaryCronJob(cfg, {
+          jobId,
+          minute: randomMinute,
+          nowMs: Date.now(),
+        });
 
         jobsData.jobs.push(newJob);
 
