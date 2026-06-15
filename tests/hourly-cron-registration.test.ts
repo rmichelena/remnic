@@ -9,7 +9,36 @@ import {
   buildHourlySummaryCronJob,
   loadHourlySummaryCronJobsData,
   parseHourlySummaryCronJobsData,
+  reconcileHourlySummaryCronRouting,
 } from "../src/index.js";
+
+// A pre-fix auto-registered job: model pinned at the root only (no payload.model
+// / payload.fallbacks), as produced before the #1469 routing fix.
+function staleExistingJob(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "engram-hourly-summary",
+    agentId: "generalist",
+    model: "gpt-5.5",
+    name: "Remnic Hourly Summary",
+    enabled: true,
+    createdAtMs: 111,
+    updatedAtMs: 111,
+    schedule: { kind: "cron", expr: "42 * * * *", tz: "America/Chicago" },
+    sessionTarget: "isolated",
+    wakeMode: "now",
+    payload: {
+      kind: "agentTurn",
+      timeoutSeconds: 120,
+      thinking: "off",
+      message: "Call the tool `memory_summarize_hourly` with empty params.",
+    },
+    delivery: { mode: "none" },
+    state: {},
+    ...overrides,
+  };
+}
 
 const CRON_OPTS = {
   jobId: "engram-hourly-summary",
@@ -113,4 +142,90 @@ test("hourly cron job omits the model when no task model is configured", () => {
   assert.equal("model" in job, false);
   assert.equal("model" in payload, false);
   assert.equal("fallbacks" in payload, false);
+});
+
+test("reconcile migrates a stale existing job to the configured task model + fallbacks", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+  });
+  const existing = staleExistingJob();
+
+  const { changed, job } = reconcileHourlySummaryCronRouting(existing, cfg, {
+    nowMs: 222,
+  });
+  const payload = job.payload as Record<string, unknown>;
+
+  assert.equal(changed, true);
+  assert.equal(job.model, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(payload.model, "openrouter/deepseek/deepseek-v4-flash");
+  assert.deepEqual(payload.fallbacks, ["zai/glm-4.5-air"]);
+  // Schedule / delivery / message / createdAtMs preserved; updatedAtMs bumped.
+  assert.deepEqual(job.schedule, { kind: "cron", expr: "42 * * * *", tz: "America/Chicago" });
+  assert.deepEqual(job.delivery, { mode: "none" });
+  assert.equal(payload.message, "Call the tool `memory_summarize_hourly` with empty params.");
+  assert.equal(job.createdAtMs, 111);
+  assert.equal(job.updatedAtMs, 222);
+});
+
+test("reconcile is idempotent for an already-correct job", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+  });
+  const correct = buildHourlySummaryCronJob(cfg, CRON_OPTS);
+
+  const { changed, job } = reconcileHourlySummaryCronRouting(correct, cfg, {
+    nowMs: 999,
+  });
+
+  assert.equal(changed, false);
+  assert.equal(job, correct); // unchanged reference; no rewrite
+});
+
+test("reconcile strips a now-unroutable stale model when no task model is configured", () => {
+  const cfg = parseConfig({ modelSource: "gateway" });
+  const existing = staleExistingJob({
+    payload: {
+      kind: "agentTurn",
+      timeoutSeconds: 120,
+      thinking: "off",
+      model: "gpt-5.5",
+      fallbacks: ["gpt-5.5-mini"],
+      message: "keep me",
+    },
+  });
+
+  const { changed, job } = reconcileHourlySummaryCronRouting(existing, cfg, {
+    nowMs: 222,
+  });
+  const payload = job.payload as Record<string, unknown>;
+
+  assert.equal(changed, true);
+  // Bare/stale routing removed so the Gateway default wins; message preserved.
+  assert.equal("model" in job, false);
+  assert.equal("model" in payload, false);
+  assert.equal("fallbacks" in payload, false);
+  assert.equal(payload.message, "keep me");
+});
+
+test("reconcile leaves a malformed payload untouched", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
+  });
+  const existing = staleExistingJob({ payload: "not-an-object" });
+
+  const { changed, job } = reconcileHourlySummaryCronRouting(existing, cfg, {
+    nowMs: 222,
+  });
+
+  assert.equal(changed, false);
+  assert.equal(job, existing);
 });

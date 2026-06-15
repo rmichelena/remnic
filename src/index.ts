@@ -258,28 +258,43 @@ export async function loadHourlySummaryCronJobsData(
  * payload.model is what makes the configured task model actually route instead
  * of silently falling through to the agent default (codex review on PR #1470).
  */
-export function buildHourlySummaryCronJob(
-  cfg: Pick<
-    ReturnType<typeof parseConfig>,
-    "summaryModel" | "taskModelChain"
-  >,
-  opts: { jobId: string; minute: number; nowMs: number },
-): HourlySummaryCronJob {
-  // `summaryModel` already resolves explicit summary/base model → gateway
-  // task-chain primary → "" (gateway mode). Do NOT fall back to `cfg.model`
-  // here: it is direct-compatible and may be a bare id the Gateway can't route
-  // (issue #1469). Empty → omit so the Gateway default wins.
-  const model = cfg.summaryModel || cfg.taskModelChain?.primary;
-  // When the model is the configured gateway task-chain primary, propagate the
-  // chain's fallbacks to `payload.fallbacks`. OpenClaw treats payload-level
-  // fallbacks as a REPLACEMENT for the configured chain, and an isolated job
-  // with a model but no payload fallbacks runs strict (primary only) — so
-  // without this the operator's configured task fallbacks are dropped for the
-  // hourly summary run (codex review on PR #1470).
+type HourlySummaryCronConfig = Pick<
+  ReturnType<typeof parseConfig>,
+  "summaryModel" | "taskModelChain"
+>;
+
+/**
+ * Resolve the gateway-routed model + fallbacks for the hourly summary cron.
+ *
+ * Single source of truth shared by the job builder and the in-place
+ * reconciler (gotcha #22). `summaryModel` is already resolved by parseConfig
+ * (explicit summary/base model → gateway task-chain primary → ""), so a bare id
+ * is never produced in gateway mode. We do NOT fall back to `cfg.model` here: it
+ * is direct-compatible and may be a bare id the Gateway can't route (#1469).
+ *
+ * When the model is the configured task-chain primary, the chain's fallbacks are
+ * carried alongside it: OpenClaw treats payload-level fallbacks as a REPLACEMENT
+ * for the configured chain, and an isolated job with a model but no payload
+ * fallbacks runs strict (primary only), which would drop the operator's
+ * configured task fallbacks for the hourly summary run.
+ */
+function resolveHourlySummaryCronRouting(cfg: HourlySummaryCronConfig): {
+  model: string | undefined;
+  fallbacks: string[];
+} {
+  const model = cfg.summaryModel || cfg.taskModelChain?.primary || undefined;
   const fallbacks =
     model && model === cfg.taskModelChain?.primary
       ? (cfg.taskModelChain?.fallbacks ?? [])
       : [];
+  return { model, fallbacks };
+}
+
+export function buildHourlySummaryCronJob(
+  cfg: HourlySummaryCronConfig,
+  opts: { jobId: string; minute: number; nowMs: number },
+): HourlySummaryCronJob {
+  const { model, fallbacks } = resolveHourlySummaryCronRouting(cfg);
 
   // Create the hourly summary job.
   //
@@ -322,6 +337,65 @@ export function buildHourlySummaryCronJob(
     delivery: { mode: "none" },
     state: {},
   };
+}
+
+/**
+ * Reconcile an EXISTING auto-registered hourly summary cron job's model routing
+ * with the current config, preserving everything else (schedule, delivery,
+ * payload message, timestamps).
+ *
+ * Existing installs are exactly the population affected by the #1469 routing
+ * bug: the job is registered once and the `exists` guard skips re-creation, so
+ * an operator who upgrades and configures `taskModelChain` would otherwise keep
+ * a job that still pins a bare/stale model (or none) and never honors the route.
+ * Only the routing fields (`model`, `payload.model`, `payload.fallbacks`) are
+ * touched, and only when they actually differ — so it is idempotent across
+ * restarts and never clobbers a user's schedule/delivery customizations.
+ * Exported for testing.
+ */
+export function reconcileHourlySummaryCronRouting(
+  existing: HourlySummaryCronJob,
+  cfg: HourlySummaryCronConfig,
+  opts: { nowMs: number },
+): { changed: boolean; job: HourlySummaryCronJob } {
+  // Only reconcile a well-formed Remnic agentTurn payload; never rebuild a
+  // malformed payload from scratch (that would drop the message/kind).
+  if (!isRecordLike(existing.payload)) {
+    return { changed: false, job: existing };
+  }
+
+  const { model, fallbacks } = resolveHourlySummaryCronRouting(cfg);
+  const desiredModel = model ?? undefined;
+  const desiredFallbacks = fallbacks.length > 0 ? fallbacks : undefined;
+
+  const payload: Record<string, unknown> = { ...existing.payload };
+  const curRoot = typeof existing.model === "string" ? existing.model : undefined;
+  const curPayloadModel = typeof payload.model === "string" ? payload.model : undefined;
+  const curFallbacks = Array.isArray(payload.fallbacks) ? payload.fallbacks : undefined;
+
+  const fallbacksEqual =
+    curFallbacks === undefined && desiredFallbacks === undefined
+      ? true
+      : JSON.stringify(curFallbacks) === JSON.stringify(desiredFallbacks);
+  const changed =
+    curRoot !== desiredModel || curPayloadModel !== desiredModel || !fallbacksEqual;
+
+  if (!changed) return { changed: false, job: existing };
+
+  if (desiredModel === undefined) delete payload.model;
+  else payload.model = desiredModel;
+  if (desiredFallbacks === undefined) delete payload.fallbacks;
+  else payload.fallbacks = desiredFallbacks;
+
+  const job: Record<string, unknown> = {
+    ...existing,
+    payload,
+    updatedAtMs: opts.nowMs,
+  };
+  if (desiredModel === undefined) delete job.model;
+  else job.model = desiredModel;
+
+  return { changed: true, job: job as HourlySummaryCronJob };
 }
 
 async function realPathLater(filePath: string): Promise<string> {
@@ -4717,10 +4791,27 @@ const pluginDefinition = {
             ? loadedJobs.jobsData
             : { version: 1, jobs: [] };
 
-        // Check if job already exists
-        const exists = jobsData.jobs.some((j) => j.id === jobId);
-        if (exists) {
-          log.debug("hourly summary cron job already exists");
+        // If the job already exists, reconcile its model routing in place so
+        // upgraded installs (the population affected by #1469) pick up the
+        // configured task model/fallbacks without the operator deleting the job.
+        // Schedule, delivery, message, and createdAtMs are preserved.
+        const existingIndex = jobsData.jobs.findIndex((j) => j.id === jobId);
+        if (existingIndex >= 0) {
+          const { changed, job } = reconcileHourlySummaryCronRouting(
+            jobsData.jobs[existingIndex],
+            cfg,
+            { nowMs: Date.now() },
+          );
+          if (!changed) {
+            log.debug("hourly summary cron job already up to date");
+            return;
+          }
+          jobsData.jobs[existingIndex] = job;
+          await writeTextFileLater(
+            cronFilePath,
+            JSON.stringify(jobsData, null, 2),
+          );
+          log.info("reconciled hourly summary cron job routing to configured task model");
           return;
         }
 
