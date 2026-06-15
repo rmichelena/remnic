@@ -260,7 +260,7 @@ export async function loadHourlySummaryCronJobsData(
  */
 type HourlySummaryCronConfig = Pick<
   ReturnType<typeof parseConfig>,
-  "summaryModel" | "taskModelChain"
+  "summaryModel" | "taskModelChain" | "gatewayConfig"
 >;
 
 /**
@@ -272,21 +272,43 @@ type HourlySummaryCronConfig = Pick<
  * is never produced in gateway mode. We do NOT fall back to `cfg.model` here: it
  * is direct-compatible and may be a bare id the Gateway can't route (#1469).
  *
- * When the model is the configured task-chain primary, the chain's fallbacks are
- * carried alongside it: OpenClaw treats payload-level fallbacks as a REPLACEMENT
- * for the configured chain, and an isolated job with a model but no payload
- * fallbacks runs strict (primary only), which would drop the operator's
- * configured task fallbacks for the hourly summary run.
+ * When the model is the configured task-chain primary, the fallback list carries
+ * the chain's own fallbacks AND then the gateway default chain
+ * (`agents.defaults.model`) as an implicit last resort — matching `fallback-llm`
+ * and the documented invariant that an exhausted task chain never blocks a flush
+ * (docs/config-reference.md). OpenClaw treats payload-level fallbacks as a
+ * REPLACEMENT for the host chain, so the gateway default must be appended here
+ * explicitly or the hourly job would stop once the task chain is exhausted.
+ * Entries are de-duplicated and never include the primary model itself.
  */
 function resolveHourlySummaryCronRouting(cfg: HourlySummaryCronConfig): {
   model: string | undefined;
   fallbacks: string[];
 } {
   const model = cfg.summaryModel || cfg.taskModelChain?.primary || undefined;
-  const fallbacks =
-    model && model === cfg.taskModelChain?.primary
-      ? (cfg.taskModelChain?.fallbacks ?? [])
-      : [];
+  // Only the task-chain primary carries fallbacks. An omitted model (Gateway
+  // default wins) or an explicit summaryModel override (a deliberate single-model
+  // choice) gets none.
+  if (!model || model !== cfg.taskModelChain?.primary) {
+    return { model, fallbacks: [] };
+  }
+  const fallbacks: string[] = [];
+  const seen = new Set<string>([model]);
+  const add = (value: unknown): void => {
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    fallbacks.push(trimmed);
+  };
+  for (const fb of cfg.taskModelChain?.fallbacks ?? []) add(fb);
+  const gatewayDefault = cfg.gatewayConfig?.agents?.defaults?.model;
+  add(gatewayDefault?.primary);
+  for (const fb of Array.isArray(gatewayDefault?.fallbacks)
+    ? gatewayDefault.fallbacks
+    : []) {
+    add(fb);
+  }
   return { model, fallbacks };
 }
 

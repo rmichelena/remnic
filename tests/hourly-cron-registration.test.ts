@@ -99,6 +99,40 @@ test("hourly cron job pins the gateway task model in the isolated agentTurn payl
   assert.deepEqual(payload.fallbacks, ["zai/glm-4.5-air"]);
 });
 
+test("hourly cron job appends the gateway default chain after the task fallbacks", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+    gatewayConfig: {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.5",
+            // duplicate of a task fallback (deduped) + a fresh last-resort model
+            fallbacks: ["zai/glm-4.5-air", "openai/gpt-5.5-mini"],
+          },
+        },
+      },
+    },
+  });
+
+  const job = buildHourlySummaryCronJob(cfg, CRON_OPTS);
+  const payload = job.payload as Record<string, unknown>;
+
+  // Task fallbacks first, then the gateway default chain (primary + its
+  // fallbacks) as an implicit last resort, de-duplicated and excluding the
+  // primary model itself. Matches fallback-llm + the documented invariant that
+  // an exhausted task chain never blocks a flush. Codex review on PR #1470.
+  assert.deepEqual(payload.fallbacks, [
+    "zai/glm-4.5-air",
+    "openai/gpt-5.5",
+    "openai/gpt-5.5-mini",
+  ]);
+});
+
 test("hourly cron job lets an explicit summaryModel win over the task chain", () => {
   const cfg = parseConfig({
     modelSource: "gateway",
