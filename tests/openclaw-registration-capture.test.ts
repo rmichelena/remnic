@@ -111,6 +111,30 @@ test("shim plugin ids keep flush-plan artifacts in their own plugin state namesp
   });
 });
 
+test("flush plan pins configured gateway task model", async () => {
+  await withCapturedRegistration((plugin) => {
+    const capture = captureOpenClawRegistrationApi({
+      pluginConfig: {
+        modelSource: "gateway",
+        taskModelChain: {
+          primary: "openrouter/deepseek/deepseek-v4-flash",
+          fallbacks: ["zai/glm-4.5-air"],
+        },
+      },
+    });
+
+    plugin.register(capture.api);
+
+    const [flushPlanResolver] = capture.registrations("registerMemoryFlushPlan")[0] as [
+      () => Record<string, unknown>,
+    ];
+    assert.equal(
+      flushPlanResolver().model,
+      "openrouter/deepseek/deepseek-v4-flash",
+    );
+  });
+});
+
 test("split-only SDKs receive runtime and flush-plan registrations without unified capability", async () => {
   await withCapturedRegistration((plugin) => {
     const capture = captureOpenClawRegistrationApi({

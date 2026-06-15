@@ -774,10 +774,15 @@ export function parseConfig(raw: unknown): PluginConfig {
   // API key is optional at load time — retrieval works without it.
   // Extraction will log a warning if called without a key.
 
+  const taskModelChain = parseModelChainConfig(cfg.taskModelChain, "taskModelChain");
+  const taskModelFallback =
+    modelSource === "gateway"
+      ? (taskModelChain?.primary ?? "")
+      : DEFAULT_REASONING_MODEL;
   const model =
     typeof cfg.model === "string" && cfg.model.length > 0
       ? cfg.model
-      : DEFAULT_REASONING_MODEL;
+      : taskModelFallback;
   const captureMode =
     cfg.captureMode === "explicit" || cfg.captureMode === "hybrid"
       ? cfg.captureMode
@@ -2540,7 +2545,7 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.fastGatewayAgentId === "string" && cfg.fastGatewayAgentId.length > 0
         ? cfg.fastGatewayAgentId
         : "",
-    taskModelChain: parseModelChainConfig(cfg.taskModelChain, "taskModelChain"),
+    taskModelChain,
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,
@@ -2899,7 +2904,7 @@ export function parseConfig(raw: unknown): PluginConfig {
     recallPlannerModel:
       typeof cfg.recallPlannerModel === "string" && cfg.recallPlannerModel.trim().length > 0
         ? cfg.recallPlannerModel.trim()
-        : DEFAULT_REASONING_MODEL,
+        : taskModelFallback,
     recallPlannerTimeoutMs:
       typeof cfg.recallPlannerTimeoutMs === "number" ? cfg.recallPlannerTimeoutMs : 1500,
     recallPlannerUseResponsesApi: coerceBooleanLike(cfg.recallPlannerUseResponsesApi) ?? true,

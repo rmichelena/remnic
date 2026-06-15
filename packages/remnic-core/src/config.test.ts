@@ -353,6 +353,44 @@ test("parseConfig rejects unknown taskModelChain keys (codex review #1425)", () 
   );
 });
 
+test("parseConfig uses taskModelChain primary for gateway task-model defaults", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+  });
+
+  assert.equal(cfg.model, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(cfg.recallPlannerModel, "openrouter/deepseek/deepseek-v4-flash");
+});
+
+test("parseConfig lets explicit task models override taskModelChain defaults", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "openrouter/model-override",
+    summaryModel: "openrouter/summary-override",
+    recallPlannerModel: "openrouter/planner-override",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+    },
+  });
+
+  assert.equal(cfg.model, "openrouter/model-override");
+  assert.equal(cfg.summaryModel, "openrouter/summary-override");
+  assert.equal(cfg.recallPlannerModel, "openrouter/planner-override");
+});
+
+test("parseConfig leaves gateway task-model defaults empty without taskModelChain", () => {
+  const cfg = parseConfig({ modelSource: "gateway" });
+
+  assert.equal(cfg.model, "");
+  assert.equal(cfg.summaryModel, "");
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {
   const original = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "sk-env-should-not-be-used";

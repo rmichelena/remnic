@@ -3,7 +3,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import OpenAI from "openai";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { DEFAULT_REASONING_MODEL, parseConfig } from "./config.js";
+import { parseConfig } from "./config.js";
 import { initLogger } from "./logger.js";
 import { log } from "./logger.js";
 import {
@@ -3588,14 +3588,17 @@ const pluginDefinition = {
           typeof cfg.extractionMaxTurnChars === "number" && Number.isFinite(cfg.extractionMaxTurnChars)
             ? Math.max(1_000, Math.floor(cfg.extractionMaxTurnChars))
             : 8_000;
+        const flushModel =
+          typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
+            ? cfg.summaryModel
+            : typeof cfg.model === "string" && cfg.model.length > 0
+              ? cfg.model
+              : cfg.taskModelChain?.primary;
         return {
           softThresholdTokens: 24_000,
           forceFlushTranscriptBytes: Math.max(16_384, maxTurnChars * 4),
           reserveTokensFloor: 2_000,
-          model:
-            typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
-              ? cfg.summaryModel
-              : cfg.model,
+          ...(flushModel ? { model: flushModel } : {}),
           prompt:
             "Flush the recent OpenClaw transcript into Remnic memory. Preserve durable user preferences, project facts, decisions, corrections, and commitments. Ignore runtime metadata, credentials, and transient command noise.",
           systemPrompt:
@@ -4637,8 +4640,8 @@ const pluginDefinition = {
           return;
         }
 
-        // Get model to use - prefer summary model, then default, then first available
-        const model = cfg.summaryModel || cfg.model || DEFAULT_REASONING_MODEL;
+        // Prefer explicit summary/default models, then the configured task-model primary.
+        const model = cfg.summaryModel || cfg.model || cfg.taskModelChain?.primary;
 
         // Pick a random minute (1-59) to avoid colliding with other top-of-hour crons
         const randomMinute = Math.floor(Math.random() * 59) + 1;
@@ -4652,7 +4655,7 @@ const pluginDefinition = {
         const newJob = {
           id: jobId,
           agentId: "generalist",
-          model,
+          ...(model ? { model } : {}),
           name: "Remnic Hourly Summary",
           enabled: true,
           createdAtMs: Date.now(),
