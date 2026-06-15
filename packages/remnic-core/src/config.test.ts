@@ -387,6 +387,22 @@ test("parseConfig lets explicit task models override taskModelChain defaults", (
   assert.equal(cfg.recallPlannerModel, "openrouter/planner-override");
 });
 
+test("parseConfig lets a provider-qualified base model feed summaryModel in gateway mode without a task chain (#1469)", () => {
+  // A provider-qualified explicit `model` (no summaryModel, no taskModelChain) is
+  // routable through the gateway, so summaryModel inherits it as its second-priority
+  // source. This exercises the `gatewayTaskModel(explicitModel)` leg of the chain.
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "openrouter/my-model",
+  });
+
+  assert.equal(cfg.model, "openrouter/my-model");
+  assert.equal(cfg.summaryModel, "openrouter/my-model");
+  // recallPlannerModel intentionally does NOT inherit cfg.model — it only
+  // considers its own explicit field then the gateway task fallback.
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
 test("parseConfig treats the injected bare schema-default model as absent for gateway task routing (#1469)", () => {
   // OpenClaw applies the manifest schema defaults (model + recallPlannerModel
   // default to "gpt-5.5") BEFORE parseConfig sees the config, so an operator who
