@@ -270,6 +270,16 @@ export function buildHourlySummaryCronJob(
   // here: it is direct-compatible and may be a bare id the Gateway can't route
   // (issue #1469). Empty → omit so the Gateway default wins.
   const model = cfg.summaryModel || cfg.taskModelChain?.primary;
+  // When the model is the configured gateway task-chain primary, propagate the
+  // chain's fallbacks to `payload.fallbacks`. OpenClaw treats payload-level
+  // fallbacks as a REPLACEMENT for the configured chain, and an isolated job
+  // with a model but no payload fallbacks runs strict (primary only) — so
+  // without this the operator's configured task fallbacks are dropped for the
+  // hourly summary run (codex review on PR #1470).
+  const fallbacks =
+    model && model === cfg.taskModelChain?.primary
+      ? (cfg.taskModelChain?.fallbacks ?? [])
+      : [];
 
   // Create the hourly summary job.
   //
@@ -297,6 +307,7 @@ export function buildHourlySummaryCronJob(
       timeoutSeconds: 120,
       thinking: "off",
       ...(model ? { model } : {}),
+      ...(fallbacks.length > 0 ? { fallbacks } : {}),
       message:
         "You are OpenClaw automation.\n\n" +
         "Task: Generate Remnic hourly summaries.\n\n" +

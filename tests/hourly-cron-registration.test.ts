@@ -64,30 +64,53 @@ test("hourly cron job pins the gateway task model in the isolated agentTurn payl
   assert.equal(payload.model, "openrouter/deepseek/deepseek-v4-flash");
   // Root model kept for backward compatibility with older host builds.
   assert.equal(job.model, "openrouter/deepseek/deepseek-v4-flash");
+  // When the model is the task-chain primary, the chain fallbacks must be
+  // carried in payload.fallbacks — OpenClaw treats absence as a strict run and
+  // would otherwise drop the operator's configured fallbacks. Codex review on #1470.
+  assert.deepEqual(payload.fallbacks, ["zai/glm-4.5-air"]);
 });
 
 test("hourly cron job lets an explicit summaryModel win over the task chain", () => {
   const cfg = parseConfig({
     modelSource: "gateway",
     summaryModel: "openrouter/summary-override",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+  });
+
+  const job = buildHourlySummaryCronJob(cfg, CRON_OPTS);
+  const payload = job.payload as Record<string, unknown>;
+
+  assert.equal(job.model, "openrouter/summary-override");
+  assert.equal(payload.model, "openrouter/summary-override");
+  // The model came from an explicit summaryModel, not the chain primary, so the
+  // chain fallbacks are not auto-attached.
+  assert.equal("fallbacks" in payload, false);
+});
+
+test("hourly cron job omits fallbacks when the task chain has none", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
     taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
   });
 
   const job = buildHourlySummaryCronJob(cfg, CRON_OPTS);
+  const payload = job.payload as Record<string, unknown>;
 
-  assert.equal(job.model, "openrouter/summary-override");
-  assert.equal(
-    (job.payload as Record<string, unknown>).model,
-    "openrouter/summary-override",
-  );
+  assert.equal(payload.model, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal("fallbacks" in payload, false);
 });
 
 test("hourly cron job omits the model when no task model is configured", () => {
   const cfg = parseConfig({ modelSource: "gateway" });
 
   const job = buildHourlySummaryCronJob(cfg, CRON_OPTS);
+  const payload = job.payload as Record<string, unknown>;
 
   // No bare "gpt-5.5" leaks to the gateway; the Gateway default + provider win.
   assert.equal("model" in job, false);
-  assert.equal("model" in (job.payload as Record<string, unknown>), false);
+  assert.equal("model" in payload, false);
+  assert.equal("fallbacks" in payload, false);
 });
