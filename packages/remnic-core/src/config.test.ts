@@ -387,6 +387,40 @@ test("parseConfig lets explicit task models override taskModelChain defaults", (
   assert.equal(cfg.recallPlannerModel, "openrouter/planner-override");
 });
 
+test("parseConfig treats the injected bare schema-default model as absent for gateway task routing (#1469)", () => {
+  // OpenClaw applies the manifest schema defaults (model + recallPlannerModel
+  // default to "gpt-5.5") BEFORE parseConfig sees the config, so an operator who
+  // only set modelSource + taskModelChain still arrives here with a bare
+  // model === "gpt-5.5". The gateway-routed task models must NOT pin that bare id
+  // (it would resolve to an unroutable <provider>/gpt-5.5); they fall through to
+  // the configured task chain instead (codex review on PR #1470).
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "gpt-5.5", // injected schema default, not an operator choice
+    recallPlannerModel: "gpt-5.5", // injected schema default
+    taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
+  });
+
+  // Base model stays direct-compatible for direct-key call sites...
+  assert.equal(cfg.model, "gpt-5.5");
+  // ...but the gateway-routed task models pick up the task-chain primary.
+  assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(cfg.recallPlannerModel, "openrouter/deepseek/deepseek-v4-flash");
+});
+
+test("parseConfig drops a bare schema-default model in gateway mode with no task chain (#1469)", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "gpt-5.5", // injected schema default
+    recallPlannerModel: "gpt-5.5",
+  });
+
+  // Nothing routable is configured → gateway task models stay empty so the
+  // Gateway default wins (no bare "gpt-5.5" leaks to the flush plan / cron).
+  assert.equal(cfg.summaryModel, "");
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
 test("parseConfig leaves gateway task-model defaults empty without taskModelChain", () => {
   const cfg = parseConfig({ modelSource: "gateway" });
 
