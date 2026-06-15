@@ -261,12 +261,15 @@ export async function loadHourlySummaryCronJobsData(
 export function buildHourlySummaryCronJob(
   cfg: Pick<
     ReturnType<typeof parseConfig>,
-    "summaryModel" | "model" | "taskModelChain"
+    "summaryModel" | "taskModelChain"
   >,
   opts: { jobId: string; minute: number; nowMs: number },
 ): HourlySummaryCronJob {
-  // Prefer explicit summary/default models, then the configured task-model primary.
-  const model = cfg.summaryModel || cfg.model || cfg.taskModelChain?.primary;
+  // `summaryModel` already resolves explicit summary/base model → gateway
+  // task-chain primary → "" (gateway mode). Do NOT fall back to `cfg.model`
+  // here: it is direct-compatible and may be a bare id the Gateway can't route
+  // (issue #1469). Empty → omit so the Gateway default wins.
+  const model = cfg.summaryModel || cfg.taskModelChain?.primary;
 
   // Create the hourly summary job.
   //
@@ -3656,12 +3659,14 @@ const pluginDefinition = {
           typeof cfg.extractionMaxTurnChars === "number" && Number.isFinite(cfg.extractionMaxTurnChars)
             ? Math.max(1_000, Math.floor(cfg.extractionMaxTurnChars))
             : 8_000;
+        // `summaryModel` already resolves explicit summary/base model → gateway
+        // task-chain primary → "" (gateway mode). Do NOT fall back to `cfg.model`
+        // here: it is direct-compatible and may be a bare id the Gateway can't
+        // route (issue #1469). Empty → omit so the Gateway default wins.
         const flushModel =
           typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
             ? cfg.summaryModel
-            : typeof cfg.model === "string" && cfg.model.length > 0
-              ? cfg.model
-              : cfg.taskModelChain?.primary;
+            : cfg.taskModelChain?.primary;
         return {
           softThresholdTokens: 24_000,
           forceFlushTranscriptBytes: Math.max(16_384, maxTurnChars * 4),

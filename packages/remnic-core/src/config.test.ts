@@ -353,7 +353,7 @@ test("parseConfig rejects unknown taskModelChain keys (codex review #1425)", () 
   );
 });
 
-test("parseConfig uses taskModelChain primary for gateway task-model defaults", () => {
+test("parseConfig routes gateway task-model defaults through taskModelChain primary", () => {
   const cfg = parseConfig({
     modelSource: "gateway",
     taskModelChain: {
@@ -362,7 +362,11 @@ test("parseConfig uses taskModelChain primary for gateway task-model defaults", 
     },
   });
 
-  assert.equal(cfg.model, "openrouter/deepseek/deepseek-v4-flash");
+  // Base model stays direct-compatible — direct-key call sites (e.g. briefing
+  // follow-ups) pass it straight to the OpenAI Responses API, so it must never
+  // become a provider-qualified gateway route string (issue #1469 / PR #1470).
+  assert.equal(cfg.model, "gpt-5.5");
+  // Gateway-routed task models pick up the configured task-chain primary.
   assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
   assert.equal(cfg.recallPlannerModel, "openrouter/deepseek/deepseek-v4-flash");
 });
@@ -386,9 +390,35 @@ test("parseConfig lets explicit task models override taskModelChain defaults", (
 test("parseConfig leaves gateway task-model defaults empty without taskModelChain", () => {
   const cfg = parseConfig({ modelSource: "gateway" });
 
-  assert.equal(cfg.model, "");
+  // Base model keeps the direct-compatible default...
+  assert.equal(cfg.model, "gpt-5.5");
+  // ...but gateway-routed task models stay empty so the Gateway default wins
+  // (no unroutable bare id is ever sent to the gateway).
   assert.equal(cfg.summaryModel, "");
   assert.equal(cfg.recallPlannerModel, "");
+});
+
+test("parseConfig keeps model direct-compatible when a direct openaiApiKey coexists with a gateway task chain (#1469)", () => {
+  const original = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const cfg = parseConfig({
+      modelSource: "gateway",
+      openaiApiKey: "sk-direct-key",
+      taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
+    });
+
+    // Direct-key call sites (e.g. briefing follow-ups) use cfg.model against the
+    // OpenAI Responses API, so it must NOT become the provider-qualified gateway
+    // route string even though a task chain is configured. The task chain only
+    // feeds the gateway-routed summary model (codex review on PR #1470).
+    assert.equal(cfg.openaiApiKey, "sk-direct-key");
+    assert.equal(cfg.model, "gpt-5.5");
+    assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  } finally {
+    if (original === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = original;
+  }
 });
 
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {

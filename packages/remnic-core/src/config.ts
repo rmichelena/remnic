@@ -775,14 +775,23 @@ export function parseConfig(raw: unknown): PluginConfig {
   // Extraction will log a warning if called without a key.
 
   const taskModelChain = parseModelChainConfig(cfg.taskModelChain, "taskModelChain");
+  // Gateway-routed background tasks (flush plan, hourly summary cron, recall
+  // planner) default to the configured task-model primary, or empty so the
+  // Gateway default wins — never a bare reasoning id that resolves to an
+  // unroutable `<provider>/gpt-5.5` (issue #1469).
   const taskModelFallback =
     modelSource === "gateway"
       ? (taskModelChain?.primary ?? "")
       : DEFAULT_REASONING_MODEL;
-  const model =
-    typeof cfg.model === "string" && cfg.model.length > 0
-      ? cfg.model
-      : taskModelFallback;
+  const explicitModel =
+    typeof cfg.model === "string" && cfg.model.length > 0 ? cfg.model : "";
+  // Base reasoning/extraction model. Kept DIRECT-compatible: direct-key call
+  // sites (e.g. briefing follow-ups when `openaiApiKey` is set) pass this
+  // straight to the OpenAI Responses API, so it must stay a bare/direct model
+  // id and never a provider-qualified gateway route string. The gateway task
+  // chain is applied at gateway-routed call sites (summaryModel, recall planner)
+  // instead, not here (issue #1469 / codex review on PR #1470).
+  const model = explicitModel || DEFAULT_REASONING_MODEL;
   const captureMode =
     cfg.captureMode === "explicit" || cfg.captureMode === "hybrid"
       ? cfg.captureMode
@@ -2054,10 +2063,17 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.summaryRecallHours === "number" ? cfg.summaryRecallHours : 24,
     maxSummaryCount:
       typeof cfg.maxSummaryCount === "number" ? cfg.maxSummaryCount : 6,
+    // Gateway-routed (memory flush plan + hourly summary cron). Precedence:
+    // explicit summaryModel → explicit base model → gateway task-chain primary →
+    // "" (omit, so the Gateway default wins). Unlike the direct-compatible base
+    // `model`, this never falls back to a bare reasoning id in gateway mode,
+    // which the Gateway would route as an unroutable `<provider>/gpt-5.5` (#1469).
     summaryModel:
-      typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
+      (typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
         ? cfg.summaryModel
-        : model, // default: same as extraction model
+        : "") ||
+      explicitModel ||
+      taskModelFallback,
     // v2.4 Extended hourly summaries (default off)
     hourlySummariesExtendedEnabled: cfg.hourlySummariesExtendedEnabled === true,
     hourlySummariesIncludeToolStats: cfg.hourlySummariesIncludeToolStats === true,
