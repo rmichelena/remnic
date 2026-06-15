@@ -3,7 +3,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import OpenAI from "openai";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { DEFAULT_REASONING_MODEL, parseConfig } from "./config.js";
+import { parseConfig } from "./config.js";
 import { initLogger } from "./logger.js";
 import { log } from "./logger.js";
 import {
@@ -240,6 +240,184 @@ export async function loadHourlySummaryCronJobsData(
       error: err instanceof Error ? err : new Error(String(err)),
     };
   }
+}
+
+/**
+ * Build the auto-registered hourly summary cron job definition.
+ *
+ * Exported for testing. Model selection follows the same precedence as the
+ * memory flush plan: explicit `summaryModel`, then `model`, then the configured
+ * `taskModelChain.primary`. When none is configured the model is omitted
+ * entirely so the Gateway falls back to its own default + provider (avoiding an
+ * unroutable bare `gpt-5.5`). Issue #1469.
+ *
+ * The resolved model is written to BOTH the job root (`model`) and the isolated
+ * `agentTurn` payload (`payload.model`). For `sessionTarget: "isolated"` jobs
+ * OpenClaw honors the per-job `payload.model` as the primary selection; the root
+ * field is kept only for backward compatibility with older host builds. Writing
+ * payload.model is what makes the configured task model actually route instead
+ * of silently falling through to the agent default (codex review on PR #1470).
+ */
+type HourlySummaryCronConfig = Pick<
+  ReturnType<typeof parseConfig>,
+  "summaryModel" | "taskModelChain" | "gatewayConfig"
+>;
+
+/**
+ * Resolve the gateway-routed model + fallbacks for the hourly summary cron.
+ *
+ * Single source of truth shared by the job builder and the in-place
+ * reconciler (gotcha #22). `summaryModel` is already resolved by parseConfig
+ * (explicit summary/base model → gateway task-chain primary → ""), so a bare id
+ * is never produced in gateway mode. We do NOT fall back to `cfg.model` here: it
+ * is direct-compatible and may be a bare id the Gateway can't route (#1469).
+ *
+ * When the model is the configured task-chain primary, the fallback list carries
+ * the chain's own fallbacks AND then the gateway default chain
+ * (`agents.defaults.model`) as an implicit last resort — matching `fallback-llm`
+ * and the documented invariant that an exhausted task chain never blocks a flush
+ * (docs/config-reference.md). OpenClaw treats payload-level fallbacks as a
+ * REPLACEMENT for the host chain, so the gateway default must be appended here
+ * explicitly or the hourly job would stop once the task chain is exhausted.
+ * Entries are de-duplicated and never include the primary model itself.
+ */
+function resolveHourlySummaryCronRouting(cfg: HourlySummaryCronConfig): {
+  model: string | undefined;
+  fallbacks: string[];
+} {
+  const model = cfg.summaryModel || cfg.taskModelChain?.primary || undefined;
+  // Only the task-chain primary carries fallbacks. An omitted model (Gateway
+  // default wins) or an explicit summaryModel override (a deliberate single-model
+  // choice) gets none.
+  if (!model || model !== cfg.taskModelChain?.primary) {
+    return { model, fallbacks: [] };
+  }
+  const fallbacks: string[] = [];
+  const seen = new Set<string>([model]);
+  const add = (value: unknown): void => {
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    fallbacks.push(trimmed);
+  };
+  for (const fb of cfg.taskModelChain?.fallbacks ?? []) add(fb);
+  const gatewayDefault = cfg.gatewayConfig?.agents?.defaults?.model;
+  add(gatewayDefault?.primary);
+  for (const fb of Array.isArray(gatewayDefault?.fallbacks)
+    ? gatewayDefault.fallbacks
+    : []) {
+    add(fb);
+  }
+  return { model, fallbacks };
+}
+
+export function buildHourlySummaryCronJob(
+  cfg: HourlySummaryCronConfig,
+  opts: { jobId: string; minute: number; nowMs: number },
+): HourlySummaryCronJob {
+  const { model, fallbacks } = resolveHourlySummaryCronRouting(cfg);
+
+  // Create the hourly summary job.
+  //
+  // NOTE:
+  // - `sessionTarget: "main"` only supports `payload.kind: "systemEvent"` in this install.
+  // - For agent-driven automation, use `sessionTarget: "isolated"` + `payload.kind: "agentTurn"`.
+  // - We intentionally avoid sending messages anywhere; success is silent.
+  return {
+    id: opts.jobId,
+    agentId: "generalist",
+    ...(model ? { model } : {}),
+    name: "Remnic Hourly Summary",
+    enabled: true,
+    createdAtMs: opts.nowMs,
+    updatedAtMs: opts.nowMs,
+    schedule: {
+      kind: "cron",
+      expr: `${opts.minute} * * * *`, // Every hour at the given minute
+      tz: "America/Chicago",
+    },
+    sessionTarget: "isolated",
+    wakeMode: "now",
+    payload: {
+      kind: "agentTurn",
+      timeoutSeconds: 120,
+      thinking: "off",
+      ...(model ? { model } : {}),
+      ...(fallbacks.length > 0 ? { fallbacks } : {}),
+      message:
+        "You are OpenClaw automation.\n\n" +
+        "Task: Generate Remnic hourly summaries.\n\n" +
+        "Call the tool `memory_summarize_hourly` with empty params.\n\n" +
+        "Output policy:\n" +
+        "- If you generated summaries successfully: output exactly NO_REPLY.\n" +
+        "- If there is an error: output one concise line describing it.\n\n" +
+        "Rules:\n" +
+        "- Do NOT send anything to Discord.\n" +
+        "- Never print secrets.\n",
+    },
+    delivery: { mode: "none" },
+    state: {},
+  };
+}
+
+/**
+ * Reconcile an EXISTING auto-registered hourly summary cron job's model routing
+ * with the current config, preserving everything else (schedule, delivery,
+ * payload message, timestamps).
+ *
+ * Existing installs are exactly the population affected by the #1469 routing
+ * bug: the job is registered once and the `exists` guard skips re-creation, so
+ * an operator who upgrades and configures `taskModelChain` would otherwise keep
+ * a job that still pins a bare/stale model (or none) and never honors the route.
+ * Only the routing fields (`model`, `payload.model`, `payload.fallbacks`) are
+ * touched, and only when they actually differ — so it is idempotent across
+ * restarts and never clobbers a user's schedule/delivery customizations.
+ * Exported for testing.
+ */
+export function reconcileHourlySummaryCronRouting(
+  existing: HourlySummaryCronJob,
+  cfg: HourlySummaryCronConfig,
+  opts: { nowMs: number },
+): { changed: boolean; job: HourlySummaryCronJob } {
+  // Only reconcile a well-formed Remnic agentTurn payload; never rebuild a
+  // malformed payload from scratch (that would drop the message/kind).
+  if (!isRecordLike(existing.payload)) {
+    return { changed: false, job: existing };
+  }
+
+  const { model, fallbacks } = resolveHourlySummaryCronRouting(cfg);
+  const desiredModel = model ?? undefined;
+  const desiredFallbacks = fallbacks.length > 0 ? fallbacks : undefined;
+
+  const payload: Record<string, unknown> = { ...existing.payload };
+  const curRoot = typeof existing.model === "string" ? existing.model : undefined;
+  const curPayloadModel = typeof payload.model === "string" ? payload.model : undefined;
+  const curFallbacks = Array.isArray(payload.fallbacks) ? payload.fallbacks : undefined;
+
+  const fallbacksEqual =
+    curFallbacks === undefined && desiredFallbacks === undefined
+      ? true
+      : JSON.stringify(curFallbacks) === JSON.stringify(desiredFallbacks);
+  const changed =
+    curRoot !== desiredModel || curPayloadModel !== desiredModel || !fallbacksEqual;
+
+  if (!changed) return { changed: false, job: existing };
+
+  if (desiredModel === undefined) delete payload.model;
+  else payload.model = desiredModel;
+  if (desiredFallbacks === undefined) delete payload.fallbacks;
+  else payload.fallbacks = desiredFallbacks;
+
+  const job: Record<string, unknown> = {
+    ...existing,
+    payload,
+    updatedAtMs: opts.nowMs,
+  };
+  if (desiredModel === undefined) delete job.model;
+  else job.model = desiredModel;
+
+  return { changed: true, job: job as HourlySummaryCronJob };
 }
 
 async function realPathLater(filePath: string): Promise<string> {
@@ -3588,14 +3766,19 @@ const pluginDefinition = {
           typeof cfg.extractionMaxTurnChars === "number" && Number.isFinite(cfg.extractionMaxTurnChars)
             ? Math.max(1_000, Math.floor(cfg.extractionMaxTurnChars))
             : 8_000;
+        // `summaryModel` already resolves explicit summary/base model → gateway
+        // task-chain primary → "" (gateway mode). Do NOT fall back to `cfg.model`
+        // here: it is direct-compatible and may be a bare id the Gateway can't
+        // route (issue #1469). Empty → omit so the Gateway default wins.
+        const flushModel =
+          typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
+            ? cfg.summaryModel
+            : cfg.taskModelChain?.primary;
         return {
           softThresholdTokens: 24_000,
           forceFlushTranscriptBytes: Math.max(16_384, maxTurnChars * 4),
           reserveTokensFloor: 2_000,
-          model:
-            typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
-              ? cfg.summaryModel
-              : cfg.model,
+          ...(flushModel ? { model: flushModel } : {}),
           prompt:
             "Flush the recent OpenClaw transcript into Remnic memory. Preserve durable user preferences, project facts, decisions, corrections, and commitments. Ignore runtime metadata, credentials, and transient command noise.",
           systemPrompt:
@@ -4630,58 +4813,38 @@ const pluginDefinition = {
             ? loadedJobs.jobsData
             : { version: 1, jobs: [] };
 
-        // Check if job already exists
-        const exists = jobsData.jobs.some((j) => j.id === jobId);
-        if (exists) {
-          log.debug("hourly summary cron job already exists");
+        // If the job already exists, reconcile its model routing in place so
+        // upgraded installs (the population affected by #1469) pick up the
+        // configured task model/fallbacks without the operator deleting the job.
+        // Schedule, delivery, message, and createdAtMs are preserved.
+        const existingIndex = jobsData.jobs.findIndex((j) => j.id === jobId);
+        if (existingIndex >= 0) {
+          const { changed, job } = reconcileHourlySummaryCronRouting(
+            jobsData.jobs[existingIndex],
+            cfg,
+            { nowMs: Date.now() },
+          );
+          if (!changed) {
+            log.debug("hourly summary cron job already up to date");
+            return;
+          }
+          jobsData.jobs[existingIndex] = job;
+          await writeTextFileLater(
+            cronFilePath,
+            JSON.stringify(jobsData, null, 2),
+          );
+          log.info("reconciled hourly summary cron job routing to configured task model");
           return;
         }
-
-        // Get model to use - prefer summary model, then default, then first available
-        const model = cfg.summaryModel || cfg.model || DEFAULT_REASONING_MODEL;
 
         // Pick a random minute (1-59) to avoid colliding with other top-of-hour crons
         const randomMinute = Math.floor(Math.random() * 59) + 1;
 
-        // Create the hourly summary job.
-        //
-        // NOTE:
-        // - `sessionTarget: "main"` only supports `payload.kind: "systemEvent"` in this install.
-        // - For agent-driven automation, use `sessionTarget: "isolated"` + `payload.kind: "agentTurn"`.
-        // - We intentionally avoid sending messages anywhere; success is silent.
-        const newJob = {
-          id: jobId,
-          agentId: "generalist",
-          model,
-          name: "Remnic Hourly Summary",
-          enabled: true,
-          createdAtMs: Date.now(),
-          updatedAtMs: Date.now(),
-          schedule: {
-            kind: "cron" as const,
-            expr: `${randomMinute} * * * *`, // Every hour at random minute
-            tz: "America/Chicago",
-          },
-          sessionTarget: "isolated",
-          wakeMode: "now" as const,
-          payload: {
-            kind: "agentTurn" as const,
-            timeoutSeconds: 120,
-            thinking: "off" as const,
-            message:
-              "You are OpenClaw automation.\n\n" +
-              "Task: Generate Remnic hourly summaries.\n\n" +
-              "Call the tool `memory_summarize_hourly` with empty params.\n\n" +
-              "Output policy:\n" +
-              "- If you generated summaries successfully: output exactly NO_REPLY.\n" +
-              "- If there is an error: output one concise line describing it.\n\n" +
-              "Rules:\n" +
-              "- Do NOT send anything to Discord.\n" +
-              "- Never print secrets.\n",
-          },
-          delivery: { mode: "none" as const },
-          state: {},
-        };
+        const newJob = buildHourlySummaryCronJob(cfg, {
+          jobId,
+          minute: randomMinute,
+          nowMs: Date.now(),
+        });
 
         jobsData.jobs.push(newJob);
 

@@ -774,10 +774,31 @@ export function parseConfig(raw: unknown): PluginConfig {
   // API key is optional at load time — retrieval works without it.
   // Extraction will log a warning if called without a key.
 
-  const model =
-    typeof cfg.model === "string" && cfg.model.length > 0
-      ? cfg.model
+  const taskModelChain = parseModelChainConfig(cfg.taskModelChain, "taskModelChain");
+  // Gateway-routed background tasks (flush plan, hourly summary cron, recall
+  // planner) default to the configured task-model primary, or empty so the
+  // Gateway default wins — never a bare reasoning id that resolves to an
+  // unroutable `<provider>/gpt-5.5` (issue #1469).
+  const taskModelFallback =
+    modelSource === "gateway"
+      ? (taskModelChain?.primary ?? "")
       : DEFAULT_REASONING_MODEL;
+  const explicitModel =
+    typeof cfg.model === "string" && cfg.model.length > 0 ? cfg.model : "";
+  // Base reasoning/extraction model. Kept DIRECT-compatible: direct-key call
+  // sites (e.g. briefing follow-ups when `openaiApiKey` is set) pass this
+  // straight to the OpenAI Responses API, so it must stay a bare/direct model
+  // id and never a provider-qualified gateway route string. The gateway task
+  // chain is applied at gateway-routed call sites (summaryModel, recall planner)
+  // instead, not here (issue #1469 / codex review on PR #1470).
+  const model = explicitModel || DEFAULT_REASONING_MODEL;
+  // In gateway mode a usable task route must be provider-qualified (`provider/model`).
+  // A bare id — including the `"gpt-5.5"` schema default OpenClaw injects when the
+  // operator only configured `modelSource` + `taskModelChain` — resolves to an
+  // unroutable `<provider>/gpt-5.5`, so it is treated as ABSENT and the configured
+  // task chain wins. Direct (non-gateway) mode keeps bare ids as-is (#1469).
+  const gatewayTaskModel = (value: string): string =>
+    modelSource === "gateway" && !value.includes("/") ? "" : value;
   const captureMode =
     cfg.captureMode === "explicit" || cfg.captureMode === "hybrid"
       ? cfg.captureMode
@@ -2049,10 +2070,19 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.summaryRecallHours === "number" ? cfg.summaryRecallHours : 24,
     maxSummaryCount:
       typeof cfg.maxSummaryCount === "number" ? cfg.maxSummaryCount : 6,
+    // Gateway-routed (memory flush plan + hourly summary cron). Precedence:
+    // explicit summaryModel → explicit base model → gateway task-chain primary →
+    // "" (omit, so the Gateway default wins). In gateway mode bare ids (incl. the
+    // injected `model` schema default) are dropped via `gatewayTaskModel`, so the
+    // Gateway is never sent an unroutable `<provider>/gpt-5.5` (issue #1469).
     summaryModel:
-      typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
-        ? cfg.summaryModel
-        : model, // default: same as extraction model
+      gatewayTaskModel(
+        typeof cfg.summaryModel === "string" && cfg.summaryModel.length > 0
+          ? cfg.summaryModel
+          : "",
+      ) ||
+      gatewayTaskModel(explicitModel) ||
+      taskModelFallback,
     // v2.4 Extended hourly summaries (default off)
     hourlySummariesExtendedEnabled: cfg.hourlySummariesExtendedEnabled === true,
     hourlySummariesIncludeToolStats: cfg.hourlySummariesIncludeToolStats === true,
@@ -2540,7 +2570,7 @@ export function parseConfig(raw: unknown): PluginConfig {
       typeof cfg.fastGatewayAgentId === "string" && cfg.fastGatewayAgentId.length > 0
         ? cfg.fastGatewayAgentId
         : "",
-    taskModelChain: parseModelChainConfig(cfg.taskModelChain, "taskModelChain"),
+    taskModelChain,
 
     // v3.0 namespaces (default off)
     namespacesEnabled: cfg.namespacesEnabled === true,
@@ -2896,10 +2926,15 @@ export function parseConfig(raw: unknown): PluginConfig {
     // CLI/env surfaces (`--config recallPlannerLlmEnabled=true`) actually
     // enable it (gotcha #36); defaults off.
     recallPlannerLlmEnabled: coerceBooleanLike(cfg.recallPlannerLlmEnabled) ?? false,
+    // Gateway-routed via FallbackLlmClient (qualifiedPlannerModel drops bare ids).
+    // Drop the bare schema-default model in gateway mode too so the resolved value
+    // reflects the actual gateway route (task-chain primary) instead of "gpt-5.5".
     recallPlannerModel:
-      typeof cfg.recallPlannerModel === "string" && cfg.recallPlannerModel.trim().length > 0
-        ? cfg.recallPlannerModel.trim()
-        : DEFAULT_REASONING_MODEL,
+      gatewayTaskModel(
+        typeof cfg.recallPlannerModel === "string" && cfg.recallPlannerModel.trim().length > 0
+          ? cfg.recallPlannerModel.trim()
+          : "",
+      ) || taskModelFallback,
     recallPlannerTimeoutMs:
       typeof cfg.recallPlannerTimeoutMs === "number" ? cfg.recallPlannerTimeoutMs : 1500,
     recallPlannerUseResponsesApi: coerceBooleanLike(cfg.recallPlannerUseResponsesApi) ?? true,

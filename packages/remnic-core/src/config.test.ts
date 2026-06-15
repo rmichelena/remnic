@@ -353,6 +353,124 @@ test("parseConfig rejects unknown taskModelChain keys (codex review #1425)", () 
   );
 });
 
+test("parseConfig routes gateway task-model defaults through taskModelChain primary", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+      fallbacks: ["zai/glm-4.5-air"],
+    },
+  });
+
+  // Base model stays direct-compatible — direct-key call sites (e.g. briefing
+  // follow-ups) pass it straight to the OpenAI Responses API, so it must never
+  // become a provider-qualified gateway route string (issue #1469 / PR #1470).
+  assert.equal(cfg.model, "gpt-5.5");
+  // Gateway-routed task models pick up the configured task-chain primary.
+  assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(cfg.recallPlannerModel, "openrouter/deepseek/deepseek-v4-flash");
+});
+
+test("parseConfig lets explicit task models override taskModelChain defaults", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "openrouter/model-override",
+    summaryModel: "openrouter/summary-override",
+    recallPlannerModel: "openrouter/planner-override",
+    taskModelChain: {
+      primary: "openrouter/deepseek/deepseek-v4-flash",
+    },
+  });
+
+  assert.equal(cfg.model, "openrouter/model-override");
+  assert.equal(cfg.summaryModel, "openrouter/summary-override");
+  assert.equal(cfg.recallPlannerModel, "openrouter/planner-override");
+});
+
+test("parseConfig lets a provider-qualified base model feed summaryModel in gateway mode without a task chain (#1469)", () => {
+  // A provider-qualified explicit `model` (no summaryModel, no taskModelChain) is
+  // routable through the gateway, so summaryModel inherits it as its second-priority
+  // source. This exercises the `gatewayTaskModel(explicitModel)` leg of the chain.
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "openrouter/my-model",
+  });
+
+  assert.equal(cfg.model, "openrouter/my-model");
+  assert.equal(cfg.summaryModel, "openrouter/my-model");
+  // recallPlannerModel intentionally does NOT inherit cfg.model — it only
+  // considers its own explicit field then the gateway task fallback.
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
+test("parseConfig treats the injected bare schema-default model as absent for gateway task routing (#1469)", () => {
+  // OpenClaw applies the manifest schema defaults (model + recallPlannerModel
+  // default to "gpt-5.5") BEFORE parseConfig sees the config, so an operator who
+  // only set modelSource + taskModelChain still arrives here with a bare
+  // model === "gpt-5.5". The gateway-routed task models must NOT pin that bare id
+  // (it would resolve to an unroutable <provider>/gpt-5.5); they fall through to
+  // the configured task chain instead (codex review on PR #1470).
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "gpt-5.5", // injected schema default, not an operator choice
+    recallPlannerModel: "gpt-5.5", // injected schema default
+    taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
+  });
+
+  // Base model stays direct-compatible for direct-key call sites...
+  assert.equal(cfg.model, "gpt-5.5");
+  // ...but the gateway-routed task models pick up the task-chain primary.
+  assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  assert.equal(cfg.recallPlannerModel, "openrouter/deepseek/deepseek-v4-flash");
+});
+
+test("parseConfig drops a bare schema-default model in gateway mode with no task chain (#1469)", () => {
+  const cfg = parseConfig({
+    modelSource: "gateway",
+    model: "gpt-5.5", // injected schema default
+    recallPlannerModel: "gpt-5.5",
+  });
+
+  // Nothing routable is configured → gateway task models stay empty so the
+  // Gateway default wins (no bare "gpt-5.5" leaks to the flush plan / cron).
+  assert.equal(cfg.summaryModel, "");
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
+test("parseConfig leaves gateway task-model defaults empty without taskModelChain", () => {
+  const cfg = parseConfig({ modelSource: "gateway" });
+
+  // Base model keeps the direct-compatible default...
+  assert.equal(cfg.model, "gpt-5.5");
+  // ...but gateway-routed task models stay empty so the Gateway default wins
+  // (no unroutable bare id is ever sent to the gateway).
+  assert.equal(cfg.summaryModel, "");
+  assert.equal(cfg.recallPlannerModel, "");
+});
+
+test("parseConfig keeps model direct-compatible when a direct openaiApiKey coexists with a gateway task chain (#1469)", () => {
+  const original = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const cfg = parseConfig({
+      modelSource: "gateway",
+      openaiApiKey: "sk-direct-key",
+      taskModelChain: { primary: "openrouter/deepseek/deepseek-v4-flash" },
+    });
+
+    // Direct-key call sites (e.g. briefing follow-ups) use cfg.model against the
+    // OpenAI Responses API, so it must NOT become the provider-qualified gateway
+    // route string even though a task chain is configured. The task chain only
+    // feeds the gateway-routed summary model (codex review on PR #1470).
+    assert.equal(cfg.openaiApiKey, "sk-direct-key");
+    assert.equal(cfg.model, "gpt-5.5");
+    assert.equal(cfg.summaryModel, "openrouter/deepseek/deepseek-v4-flash");
+  } finally {
+    if (original === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = original;
+  }
+});
+
 test("parseConfig modelSource=gateway still honors an explicit openaiApiKey override", () => {
   const original = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "sk-env-should-not-be-used";
