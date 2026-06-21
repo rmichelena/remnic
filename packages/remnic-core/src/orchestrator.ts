@@ -3181,7 +3181,11 @@ export class Orchestrator {
 
       // Resolve model from config: explicit summaryModel, then taskModelChain.primary
       const model = this.config.summaryModel || this.config.taskModelChain?.primary || undefined;
-      const fallbacks = this.config.taskModelChain?.fallbacks ?? [];
+      // Only attach task-chain fallbacks when the model is the task-chain primary.
+      // If summaryModel overrides the model, its fallbacks would be unrelated.
+      const fallbacks = (!this.config.summaryModel && this.config.taskModelChain?.fallbacks)
+        ? this.config.taskModelChain.fallbacks
+        : [];
 
       // Resolve timezone: configurable override, then server default
       const timezone = this.config.daySummaryTimezone

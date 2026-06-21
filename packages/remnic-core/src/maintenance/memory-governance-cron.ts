@@ -117,7 +117,10 @@ function deepMergeObjects(
 ): Record<string, unknown> {
   const result = { ...target };
   for (const [key, value] of Object.entries(source)) {
-    if (
+    if (value === null) {
+      // null means "remove this key"
+      delete result[key];
+    } else if (
       value && typeof value === "object" && !Array.isArray(value) &&
       result[key] && typeof result[key] === "object" && !Array.isArray(result[key])
     ) {
@@ -232,11 +235,13 @@ export async function ensureDaySummaryCron(
       updateFields: ["agentId"],
       deepMerge: {
         schedule: { tz: options.timezone },
+        // Always write model/fallbacks so stale values are cleared when
+        // an operator removes summaryModel or taskModelChain from config.
         payload: {
-          ...(options.model ? { model: options.model } : {}),
-          ...(options.fallbacks && options.fallbacks.length > 0
-            ? { fallbacks: options.fallbacks }
-            : {}),
+          model: options.model ?? null,
+          fallbacks: (options.fallbacks && options.fallbacks.length > 0)
+            ? options.fallbacks
+            : null,
         },
       },
     },
