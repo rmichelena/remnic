@@ -3195,10 +3195,27 @@ export class Orchestrator {
         : (rawSummaryModel || taskPrimary || undefined);
       // Attach task-chain fallbacks only when the model matches the task-chain
       // primary. If summaryModel is a distinct override, its fallbacks would
-      // be unrelated to the task chain.
-      const fallbacks = (model && taskPrimary && model === taskPrimary && this.config.taskModelChain?.fallbacks)
-        ? this.config.taskModelChain.fallbacks
-        : [];
+      // be unrelated to the task chain. Also append gateway default models as
+      // tail fallbacks (de-duped) so a task-chain outage doesn't stop the cron
+      // before reaching the gateway default chain. Mirrors hourly cron pattern.
+      const fallbacks: string[] = [];
+      if (model && taskPrimary && model === taskPrimary) {
+        const seen = new Set<string>(model ? [model] : []);
+        const addUnique = (value: string | undefined) => {
+          if (typeof value !== "string") return;
+          const trimmed = value.trim();
+          if (trimmed.length > 0 && !seen.has(trimmed)) {
+            seen.add(trimmed);
+            fallbacks.push(trimmed);
+          }
+        };
+        for (const fb of this.config.taskModelChain?.fallbacks ?? []) addUnique(fb);
+        const gwDefaults = this.config.gatewayConfig?.agents?.defaults?.model;
+        addUnique(gwDefaults?.primary);
+        if (Array.isArray(gwDefaults?.fallbacks)) {
+          for (const fb of gwDefaults.fallbacks) addUnique(fb);
+        }
+      }
 
       // Resolve timezone: configurable override, then server default
       const timezone = this.config.daySummaryTimezone
