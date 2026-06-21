@@ -945,6 +945,8 @@ export interface PluginConfig {
   // Hourly summaries
   hourlySummariesEnabled: boolean;
   daySummaryEnabled: boolean;
+  /** Timezone override for the day summary cron (issue #1475). */
+  daySummaryTimezone?: string;
   /** If true, Engram may attempt to auto-register an hourly summary cron job (default off). */
   hourlySummaryCronAutoRegister: boolean;
   /** If true, Engram may attempt to auto-register the nightly governance cron job (default off). */

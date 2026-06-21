@@ -2059,6 +2059,12 @@ export function parseConfig(raw: unknown): PluginConfig {
     hourlySummariesEnabled: cfg.hourlySummariesEnabled !== false, // default: true
     daySummaryEnabled: cfg.daySummaryEnabled !== false, // default: true
     hourlySummaryCronAutoRegister: cfg.hourlySummaryCronAutoRegister === true,
+    // Day summary timezone override (issue #1475). When unset, the plugin
+    // falls back to the server's local timezone.
+    daySummaryTimezone:
+      typeof cfg.daySummaryTimezone === "string" && cfg.daySummaryTimezone.length > 0
+        ? cfg.daySummaryTimezone
+        : undefined,
     // Codex P1 on PR 763 round 2: gate the nightly-governance cron
     // (deep-sleep's primary scheduled execution path) on
     // dreams.phases.deepSleep.enabled. When the phase is disabled the

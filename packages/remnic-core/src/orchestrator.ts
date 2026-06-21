@@ -78,6 +78,7 @@ import { LocalLlmClient } from "./local-llm.js";
 import {
   FallbackLlmClient,
   fallbackLlmRuntimeContextFromConfig,
+  gatewayTaskChainOptions,
 } from "./fallback-llm.js";
 import {
   ensureDaySummaryCron,
@@ -2243,10 +2244,11 @@ export class Orchestrator {
             ? await this._fastGatewayLlm.chatCompletion(messages, {
                 maxTokens: targetTokens * 2,
                 timeoutMs: this.config.localLlmFastTimeoutMs,
-                agentId:
-                  this.config.fastGatewayAgentId ||
-                  this.config.gatewayAgentId ||
-                  undefined,
+                // Route through taskModelChain so LCM uses the same cheap/fast
+                // model tier as other background tasks instead of falling to
+                // the gateway default chain (which may be expensive).
+                // Issue #1473.
+                ...gatewayTaskChainOptions(this.config),
               })
             : await this.localLlm.chatCompletion(messages, {
                 maxTokens: targetTokens * 2,
@@ -3155,8 +3157,10 @@ export class Orchestrator {
   }
 
   /**
-   * Auto-register the engram-day-summary cron job in OpenClaw if it doesn't exist.
+   * Auto-register the engram-day-summary cron job in OpenClaw.
+   * Reconciles model and timezone on every startup so config changes propagate.
    * Fire-and-forget — never blocks init or crashes on failure.
+   * Issues #1474, #1475.
    */
   private async autoRegisterDaySummaryCron(): Promise<void> {
     const home = resolveHomeDir();
@@ -3169,15 +3173,30 @@ export class Orchestrator {
         );
         return;
       }
-      const created = await ensureDaySummaryCron(jobsPath, {
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+
+      // Resolve model from config: explicit summaryModel, then taskModelChain.primary
+      const model = this.config.summaryModel || this.config.taskModelChain?.primary || undefined;
+      const fallbacks = this.config.taskModelChain?.fallbacks ?? [];
+
+      // Resolve timezone: configurable override, then server default
+      const timezone = this.config.daySummaryTimezone
+        || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+      const result = await ensureDaySummaryCron(jobsPath, {
+        timezone,
+        ...(model ? { model } : {}),
+        ...(fallbacks.length > 0 ? { fallbacks } : {}),
       });
-      if (created.created) {
+      if (result.created) {
         log.info(
-          `day-summary cron auto-registered (${created.jobId}, 23:47 ${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
+          `day-summary cron auto-registered (${result.jobId}, 23:47 ${timezone}${model ? `, model: ${model}` : ""})`,
+        );
+      } else if (result.updated) {
+        log.info(
+          `day-summary cron reconciled (${result.jobId}, timezone: ${timezone}${model ? `, model: ${model}` : ""})`,
         );
       } else {
-        log.debug("day-summary cron already exists, skipping auto-register");
+        log.debug("day-summary cron already up to date");
       }
     } catch (err) {
       log.debug(`day-summary cron auto-register error: ${err}`);

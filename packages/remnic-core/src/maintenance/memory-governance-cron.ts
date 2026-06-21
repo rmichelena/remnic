@@ -146,34 +146,56 @@ export async function ensureDaySummaryCron(
   options: {
     timezone: string;
     agentId?: string;
+    /** Optional model override (e.g. from summaryModel or taskModelChain.primary). */
+    model?: string;
+    /** Optional fallbacks to include alongside the model. */
+    fallbacks?: string[];
   },
-): Promise<{ created: boolean; jobId: string }> {
+): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const agentId =
     typeof options.agentId === "string" && options.agentId.trim().length > 0
       ? options.agentId.trim()
       : "main";
 
-  return ensureCronJob(jobsPath, DAY_SUMMARY_CRON_ID, () => ({
-    id: DAY_SUMMARY_CRON_ID,
-    agentId,
-    name: "Remnic Day Summary (auto)",
-    enabled: true,
-    schedule: {
-      kind: "cron",
-      expr: "47 23 * * *",
-      tz: options.timezone,
+  const payload: Record<string, unknown> = {
+    kind: "agentTurn",
+    timeoutSeconds: 900,
+    thinking: "off",
+    message:
+      "You are OpenClaw automation. Call tool engram.day_summary with empty params (it will auto-gather today's facts). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
+  };
+  if (options.model) {
+    payload.model = options.model;
+  }
+  if (options.fallbacks && options.fallbacks.length > 0) {
+    payload.fallbacks = options.fallbacks;
+  }
+
+  return ensureCronJob(
+    jobsPath,
+    DAY_SUMMARY_CRON_ID,
+    () => ({
+      id: DAY_SUMMARY_CRON_ID,
+      agentId,
+      name: "Remnic Day Summary (auto)",
+      enabled: true,
+      schedule: {
+        kind: "cron",
+        expr: "47 23 * * *",
+        tz: options.timezone,
+      },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload,
+      delivery: { mode: "none" },
+    }),
+    // Reconcile on every startup so model/timezone changes propagate.
+    // Issue #1474 (model reconcile) + #1475 (timezone reconcile).
+    {
+      updateExisting: true,
+      updateFields: ["schedule", "payload", "agentId"],
     },
-    sessionTarget: "isolated",
-    wakeMode: "now",
-    payload: {
-      kind: "agentTurn",
-      timeoutSeconds: 900,
-      thinking: "off",
-      message:
-        "You are OpenClaw automation. Call tool engram.day_summary with empty params (it will auto-gather today's facts). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
-    },
-    delivery: { mode: "none" },
-  }));
+  );
 }
 
 export async function ensureNightlyGovernanceCron(
