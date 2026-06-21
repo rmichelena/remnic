@@ -3180,11 +3180,22 @@ export class Orchestrator {
       }
 
       // Resolve model from config: explicit summaryModel, then taskModelChain.primary
-      const model = this.config.summaryModel || this.config.taskModelChain?.primary || undefined;
+      // In plugin mode, summaryModel may default to DEFAULT_REASONING_MODEL even
+      // when the operator didn't configure one. Only inject model into the cron
+      // when there's a gateway route, a task chain, or a non-default override.
+      const rawSummaryModel = this.config.summaryModel;
+      const taskPrimary = this.config.taskModelChain?.primary;
+      const isGateway = this.config.modelSource === "gateway";
+      const hasTaskChain = !!this.config.taskModelChain;
+      // Skip model injection when it's just the bare default (plugin mode, no
+      // task chain, no explicit override) — let the gateway use its own default.
+      const isBareDefault = !isGateway && !hasTaskChain && rawSummaryModel === "gpt-5.5";
+      const model = isBareDefault
+        ? undefined
+        : (rawSummaryModel || taskPrimary || undefined);
       // Attach task-chain fallbacks only when the model matches the task-chain
       // primary. If summaryModel is a distinct override, its fallbacks would
       // be unrelated to the task chain.
-      const taskPrimary = this.config.taskModelChain?.primary;
       const fallbacks = (model && taskPrimary && model === taskPrimary && this.config.taskModelChain?.fallbacks)
         ? this.config.taskModelChain.fallbacks
         : [];
