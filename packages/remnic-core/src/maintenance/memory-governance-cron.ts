@@ -72,7 +72,11 @@ export async function ensureCronJob(
   jobsPath: string,
   jobId: string,
   buildJob: () => Record<string, unknown>,
-  options: { updateExisting?: boolean; updateFields?: string[] } = {},
+  options: {
+    updateExisting?: boolean;
+    updateFields?: string[];
+    deepMerge?: Record<string, unknown>;
+  } = {},
 ): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const releaseLock = await acquireCronJobsLock(jobsPath);
   try {
@@ -87,7 +91,7 @@ export async function ensureCronJob(
 
       const desired = buildJob();
       const existing = jobs[existingIndex];
-      const next = mergeCronJobUpdate(existing, desired, options.updateFields);
+      const next = mergeCronJobUpdate(existing, desired, options.updateFields, options.deepMerge);
       if (stableJson(existing) === stableJson(next)) {
         return { created: false, updated: false, jobId };
       }
@@ -107,23 +111,53 @@ export async function ensureCronJob(
   }
 }
 
+function deepMergeObjects(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      result[key] && typeof result[key] === "object" && !Array.isArray(result[key])
+    ) {
+      result[key] = deepMergeObjects(
+        result[key] as Record<string, unknown>,
+        value as Record<string, unknown>,
+      );
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 function mergeCronJobUpdate(
   existing: Record<string, unknown>,
   desired: Record<string, unknown>,
   updateFields?: string[],
+  deepMerge?: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (!updateFields) {
+  let next = { ...existing };
+
+  if (!updateFields && !deepMerge) {
     return desired;
   }
 
-  const next = { ...existing };
-  for (const field of updateFields) {
-    if (Object.prototype.hasOwnProperty.call(desired, field)) {
-      next[field] = desired[field];
-    } else {
-      delete next[field];
+  if (updateFields) {
+    for (const field of updateFields) {
+      if (Object.prototype.hasOwnProperty.call(desired, field)) {
+        next[field] = desired[field];
+      } else {
+        delete next[field];
+      }
     }
   }
+
+  if (deepMerge) {
+    next = deepMergeObjects(next, deepMerge);
+  }
+
   return next;
 }
 
@@ -191,9 +225,20 @@ export async function ensureDaySummaryCron(
     }),
     // Reconcile on every startup so model/timezone changes propagate.
     // Issue #1474 (model reconcile) + #1475 (timezone reconcile).
+    // Only update managed leaves to avoid clobbering user edits to
+    // schedule.expr, payload.message, payload.timeoutSeconds, etc.
     {
       updateExisting: true,
-      updateFields: ["schedule", "payload", "agentId"],
+      updateFields: ["agentId"],
+      deepMerge: {
+        schedule: { tz: options.timezone },
+        payload: {
+          ...(options.model ? { model: options.model } : {}),
+          ...(options.fallbacks && options.fallbacks.length > 0
+            ? { fallbacks: options.fallbacks }
+            : {}),
+        },
+      },
     },
   );
 }

@@ -128,7 +128,7 @@ const BUILT_IN_PROVIDER_FALLBACKS: Record<string, ModelProviderConfig> = {
   },
   openai: {
     baseUrl: "https://api.openai.com/v1",
-    api: "openai-completions",
+    api: "openai-responses",
     models: [],
     [PROVIDER_API_KEY_FIELD]: MANAGED_SECRETREF_MARKER,
   },

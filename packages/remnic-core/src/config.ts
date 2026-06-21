@@ -2062,8 +2062,15 @@ export function parseConfig(raw: unknown): PluginConfig {
     // Day summary timezone override (issue #1475). When unset, the plugin
     // falls back to the server's local timezone.
     daySummaryTimezone:
-      typeof cfg.daySummaryTimezone === "string" && cfg.daySummaryTimezone.length > 0
-        ? cfg.daySummaryTimezone
+      typeof cfg.daySummaryTimezone === "string" && cfg.daySummaryTimezone.trim().length > 0
+        ? (() => {
+            try {
+              Intl.DateTimeFormat(undefined, { timeZone: cfg.daySummaryTimezone });
+              return cfg.daySummaryTimezone;
+            } catch {
+              return undefined;
+            }
+          })()
         : undefined,
     // Codex P1 on PR 763 round 2: gate the nightly-governance cron
     // (deep-sleep's primary scheduled execution path) on

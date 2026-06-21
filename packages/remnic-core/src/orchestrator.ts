@@ -2249,6 +2249,11 @@ export class Orchestrator {
                 // the gateway default chain (which may be expensive).
                 // Issue #1473.
                 ...gatewayTaskChainOptions(this.config),
+                // Preserve fastGatewayAgentId preference if set, so LCM
+                // summarization can still use a distinct fast persona.
+                ...(this.config.fastGatewayAgentId
+                  ? { agentId: this.config.fastGatewayAgentId }
+                  : {}),
               })
             : await this.localLlm.chatCompletion(messages, {
                 maxTokens: targetTokens * 2,
