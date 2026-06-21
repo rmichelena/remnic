@@ -183,6 +183,8 @@ export async function ensureDaySummaryCron(
   options: {
     timezone: string;
     agentId?: string;
+    /** Whether agentId was explicitly provided (vs defaulted to "main"). */
+    hasExplicitAgentId?: boolean;
     /** Optional model override (e.g. from summaryModel or taskModelChain.primary). */
     model?: string;
     /** Optional fallbacks to include alongside the model. */
@@ -230,9 +232,11 @@ export async function ensureDaySummaryCron(
     // Issue #1474 (model reconcile) + #1475 (timezone reconcile).
     // Only update managed leaves to avoid clobbering user edits to
     // schedule.expr, payload.message, payload.timeoutSeconds, etc.
+    // Only reconcile agentId when explicitly provided, so manually-set
+    // cron personas are preserved.
     {
       updateExisting: true,
-      updateFields: ["agentId"],
+      updateFields: options.hasExplicitAgentId ? ["agentId"] : [],
       deepMerge: {
         schedule: { tz: options.timezone },
         // Always write model/fallbacks so stale values are cleared when

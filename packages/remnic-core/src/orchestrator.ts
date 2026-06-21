@@ -3181,9 +3181,11 @@ export class Orchestrator {
 
       // Resolve model from config: explicit summaryModel, then taskModelChain.primary
       const model = this.config.summaryModel || this.config.taskModelChain?.primary || undefined;
-      // Only attach task-chain fallbacks when the model is the task-chain primary.
-      // If summaryModel overrides the model, its fallbacks would be unrelated.
-      const fallbacks = (!this.config.summaryModel && this.config.taskModelChain?.fallbacks)
+      // Attach task-chain fallbacks only when the model matches the task-chain
+      // primary. If summaryModel is a distinct override, its fallbacks would
+      // be unrelated to the task chain.
+      const taskPrimary = this.config.taskModelChain?.primary;
+      const fallbacks = (model && taskPrimary && model === taskPrimary && this.config.taskModelChain?.fallbacks)
         ? this.config.taskModelChain.fallbacks
         : [];
 
