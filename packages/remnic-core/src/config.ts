@@ -2064,10 +2064,14 @@ export function parseConfig(raw: unknown): PluginConfig {
     daySummaryTimezone:
       typeof cfg.daySummaryTimezone === "string" && cfg.daySummaryTimezone.trim().length > 0
         ? (() => {
+            const tz = cfg.daySummaryTimezone as string;
             try {
-              Intl.DateTimeFormat(undefined, { timeZone: cfg.daySummaryTimezone });
-              return cfg.daySummaryTimezone;
+              Intl.DateTimeFormat(undefined, { timeZone: tz });
+              return tz;
             } catch {
+              log.warn(
+                `daySummaryTimezone: invalid IANA timezone "${tz}", falling back to server timezone`,
+              );
               return undefined;
             }
           })()

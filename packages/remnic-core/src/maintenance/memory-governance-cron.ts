@@ -225,6 +225,9 @@ export async function ensureDaySummaryCron(
       },
       sessionTarget: "isolated",
       wakeMode: "now",
+      // Mirror model at job root for backward compat with older OpenClaw
+      // builds that read root model instead of payload.model.
+      ...(options.model ? { model: options.model } : {}),
       payload,
       delivery: { mode: "none" },
     }),
@@ -239,6 +242,9 @@ export async function ensureDaySummaryCron(
       updateFields: options.hasExplicitAgentId ? ["agentId"] : [],
       deepMerge: {
         schedule: { tz: options.timezone },
+        // Mirror model at job root for backward compat with older OpenClaw
+        // builds that read root model instead of payload.model.
+        model: options.model ?? null,
         // Always write model/fallbacks so stale values are cleared when
         // an operator removes summaryModel or taskModelChain from config.
         payload: {
