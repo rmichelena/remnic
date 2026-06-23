@@ -715,6 +715,69 @@ async function raceRecallAbort<T>(
 const COMPACTION_SIGNAL_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const DEFAULT_QMD_STARTUP_COLLECTION_CHECK_TIMEOUT_MS = 10_000;
 
+type DaySummaryGatherOptions = {
+  timeZone?: string;
+  now?: Date;
+};
+
+function normalizeIanaTimeZone(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: trimmed });
+    return trimmed;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatDateInTimeZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function utcDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function utcDateKeysAround(date: Date): string[] {
+  const dayMs = 86_400_000;
+  const keys = [
+    utcDateKey(new Date(date.getTime() - dayMs)),
+    utcDateKey(date),
+    utcDateKey(new Date(date.getTime() + dayMs)),
+  ];
+  return keys.filter((value, index, array) => array.indexOf(value) === index);
+}
+
+function utcDateKeysForLocalDay(date: Date, timeZone: string): string[] {
+  const targetLocalDate = formatDateInTimeZone(date, timeZone);
+  const keys = new Set<string>();
+  const hourMs = 3_600_000;
+  const scanStart = date.getTime() - 48 * hourMs;
+  const scanEnd = date.getTime() + 48 * hourMs;
+  for (let ms = scanStart; ms <= scanEnd; ms += hourMs) {
+    const candidate = new Date(ms);
+    if (formatDateInTimeZone(candidate, timeZone) === targetLocalDate) {
+      keys.add(utcDateKey(candidate));
+    }
+  }
+  return keys.size > 0 ? [...keys].sort() : utcDateKeysAround(date);
+}
+
+function parseFiniteDate(value: unknown): Date | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
 type SearchCollectionState = "present" | "missing" | "unknown" | "skipped";
 
 function qmdStartupCollectionCheckTimeoutMs(): number {
@@ -3175,20 +3238,13 @@ export class Orchestrator {
         return;
       }
 
-      // Resolve model from config: explicit summaryModel, then taskModelChain.primary
-      // In plugin mode, summaryModel may default to DEFAULT_REASONING_MODEL even
-      // when the operator didn't configure one. Only inject model into the cron
-      // when there's a gateway route, a task chain, or a non-default override.
+      // Resolve an OpenClaw cron-routing model only in gateway mode. In plugin
+      // mode, summaryModel is a direct-client model id for Remnic's own LLM
+      // calls and may be unroutable as an OpenClaw agentTurn model.
       const rawSummaryModel = this.config.summaryModel;
       const taskPrimary = this.config.taskModelChain?.primary;
       const isGateway = this.config.modelSource === "gateway";
-      const hasTaskChain = !!this.config.taskModelChain;
-      // Skip model injection when it's just the bare default (plugin mode, no
-      // task chain, no explicit override) — let the gateway use its own default.
-      const isBareDefault = !isGateway && !hasTaskChain && rawSummaryModel === "gpt-5.5";
-      const model = isBareDefault
-        ? undefined
-        : (rawSummaryModel || taskPrimary || undefined);
+      const model = isGateway ? (rawSummaryModel || taskPrimary || undefined) : undefined;
       // Attach task-chain fallbacks only when the model matches the task-chain
       // primary. If summaryModel is a distinct override, its fallbacks would
       // be unrelated to the task chain. Also append gateway default models as
@@ -4152,8 +4208,9 @@ export class Orchestrator {
    */
   async generateDaySummaryAuto(
     namespace?: string,
+    options: DaySummaryGatherOptions = {},
   ): Promise<DaySummaryResult | null> {
-    const gathered = await this.gatherTodayFacts(namespace);
+    const gathered = await this.gatherTodayFacts(namespace, options);
     if (!gathered || !gathered.trim()) {
       log.warn("generateDaySummaryAuto: no facts found for today, skipping");
       return null;
@@ -4165,24 +4222,27 @@ export class Orchestrator {
    * Read today's facts and hourly summaries from storage, returning them
    * as a formatted string suitable for generateDaySummary().
    */
-  async gatherTodayFacts(namespace?: string): Promise<string> {
+  async gatherTodayFacts(
+    namespace?: string,
+    options: DaySummaryGatherOptions = {},
+  ): Promise<string> {
     const ns =
       namespace && namespace.length > 0
         ? namespace
         : this.config.defaultNamespace;
     const storage = await this.storageRouter.storageFor(ns);
-    // Facts are stored under UTC dates, but a local calendar day can span
-    // two UTC dates (e.g. 23:47 local in UTC-6 is 05:47 UTC the next day). To capture
-    // all facts for the local day, read from both the current UTC date and
-    // yesterday's UTC date (which covers the local day's morning hours).
-    const now = new Date();
-    const utcToday = now.toISOString().slice(0, 10);
-    const yesterday = new Date(now.getTime() - 86_400_000)
-      .toISOString()
-      .slice(0, 10);
-    const datesToScan = [yesterday, utcToday].filter(
-      (v, i, a) => a.indexOf(v) === i,
-    );
+    const configuredTimeZone = normalizeIanaTimeZone(options.timeZone)
+      ?? normalizeIanaTimeZone(this.config.daySummaryTimezone);
+    const timeZone =
+      configuredTimeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const now = options.now instanceof Date && Number.isFinite(options.now.getTime())
+      ? options.now
+      : new Date();
+    const targetLocalDate = formatDateInTimeZone(now, timeZone);
+    // Facts are stored under UTC date directories, while the summary target is
+    // a local calendar day. Scan the UTC-date envelope that overlaps the local
+    // day, then filter parseable fact timestamps to that configured local day.
+    const datesToScan = utcDateKeysForLocalDay(now, timeZone);
     const factsBaseDir = path.join(storage.dir, "facts");
     const MAX_CHARS = 100_000;
 
@@ -4209,13 +4269,21 @@ export class Orchestrator {
                 .slice(colonIdx + 1)
                 .trim();
             }
+            const created = fm.created || "unknown";
+            const createdAt = parseFiniteDate(created);
+            if (
+              createdAt &&
+              formatDateInTimeZone(createdAt, timeZone) !== targetLocalDate
+            ) {
+              continue;
+            }
             facts.push({
               path: fullPath,
               frontmatter: {
                 id: fm.id || path.basename(entry.name, ".md"),
                 category: (fm.category as any) || "fact",
-                created: fm.created || "unknown",
-                updated: fm.updated || fm.created || "unknown",
+                created,
+                updated: fm.updated || created,
                 source: fm.source || "unknown",
                 confidence: parseFloat(fm.confidence || "0.8"),
                 confidenceTier: (fm.confidenceTier as any) || "implied",
@@ -4233,9 +4301,10 @@ export class Orchestrator {
     }
 
     // Sort facts by created timestamp (most recent last) so truncation keeps newest
-    facts.sort((a, b) =>
-      a.frontmatter.created < b.frontmatter.created ? -1 : 1,
-    );
+    facts.sort((a, b) => {
+      if (a.frontmatter.created === b.frontmatter.created) return 0;
+      return a.frontmatter.created < b.frontmatter.created ? -1 : 1;
+    });
 
     // --- Read hourly summaries for the scanned dates ---
     const hourlySummaries: string[] = [];
@@ -4287,7 +4356,7 @@ export class Orchestrator {
     }
 
     log.info(
-      `gatherTodayFacts: collected ${facts.length} facts, ${hourlySummaries.length} hourly summaries (${formatted.length} chars)`,
+      `gatherTodayFacts: collected ${facts.length} facts, ${hourlySummaries.length} hourly summaries for ${targetLocalDate} (${timeZone}, ${formatted.length} chars)`,
     );
 
     return formatted;

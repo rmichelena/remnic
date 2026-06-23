@@ -2064,7 +2064,7 @@ export function parseConfig(raw: unknown): PluginConfig {
     daySummaryTimezone:
       typeof cfg.daySummaryTimezone === "string" && cfg.daySummaryTimezone.trim().length > 0
         ? (() => {
-            const tz = cfg.daySummaryTimezone as string;
+            const tz = (cfg.daySummaryTimezone as string).trim();
             try {
               Intl.DateTimeFormat(undefined, { timeZone: tz });
               return tz;

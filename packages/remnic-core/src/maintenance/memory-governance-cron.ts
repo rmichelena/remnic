@@ -195,13 +195,14 @@ export async function ensureDaySummaryCron(
     typeof options.agentId === "string" && options.agentId.trim().length > 0
       ? options.agentId.trim()
       : "main";
+  const daySummaryParams = JSON.stringify({ timeZone: options.timezone });
 
   const payload: Record<string, unknown> = {
     kind: "agentTurn",
     timeoutSeconds: 900,
     thinking: "off",
     message:
-      "You are OpenClaw automation. Call tool engram.day_summary with empty params (it will auto-gather today's facts). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
+      `You are OpenClaw automation. Call tool engram.day_summary with params ${daySummaryParams} (it will auto-gather today's facts for that timezone). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.`,
   };
   if (options.model) {
     payload.model = options.model;

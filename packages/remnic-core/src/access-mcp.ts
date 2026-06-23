@@ -8,6 +8,7 @@ import {
   type CapsuleExportRequest,
   type CapsuleImportRequest,
   type CapsuleListRequest,
+  type DaySummaryRequest,
   type MemoryStoreRequest,
   type SchemaName,
   type SchemaTypeFor,
@@ -102,6 +103,12 @@ function resolveChatGptInspectorRecallSessionKey(
 }
 
 const STRICT_MCP_SCHEMA_KEYS: Partial<Record<SchemaName, readonly string[]>> = {
+  daySummary: [
+    "memories",
+    "sessionKey",
+    "namespace",
+    "timeZone",
+  ],
   memoryStore: [
     "schemaVersion",
     "idempotencyKey",
@@ -765,6 +772,7 @@ export class EngramMcpServer {
             memories: { type: "string" },
             sessionKey: { type: "string" },
             namespace: { type: "string" },
+            timeZone: { type: "string" },
           },
           required: [],
           additionalProperties: false,
@@ -2638,12 +2646,10 @@ export class EngramMcpServer {
           actionConfidence,
         );
       }
-      case "engram.day_summary":
-        return this.service.daySummary({
-          memories: typeof args.memories === "string" ? args.memories : "",
-          sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
-          namespace: typeof args.namespace === "string" ? args.namespace : undefined,
-        });
+      case "engram.day_summary": {
+        const body: DaySummaryRequest = parseMcpRequest("daySummary", args);
+        return this.service.daySummary(body);
+      }
       case "engram.capsule_export": {
         const body: CapsuleExportRequest = parseMcpRequest("capsuleExport", args);
         return this.service.capsuleExport({
