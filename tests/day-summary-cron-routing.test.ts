@@ -64,6 +64,32 @@ async function writeFact(
   );
 }
 
+async function writeHourlySummary(
+  memoryDir: string,
+  sessionKey: string,
+  utcDate: string,
+  sections: Array<{ hour: string; text: string }>,
+): Promise<void> {
+  const dir = path.join(memoryDir, "summaries", "hourly", sessionKey);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, `${utcDate}.md`),
+    [
+      `# Hourly Summaries — ${utcDate}`,
+      "",
+      `*Session: ${sessionKey}*`,
+      "",
+      ...sections.flatMap((section) => [
+        `## ${section.hour}:00`,
+        "",
+        `- ${section.text}`,
+        "",
+      ]),
+    ].join("\n"),
+    "utf-8",
+  );
+}
+
 test("day-summary cron omits direct plugin summary models from OpenClaw routing", async () => {
   await withHome("remnic-day-summary-home-", async (homeDir) => {
     const cronDir = path.join(homeDir, ".openclaw", "cron");
@@ -150,6 +176,39 @@ test("day-summary auto-gather filters facts by configured local day", async () =
     assert.match(gathered, /Afternoon Chicago fact/);
     assert.match(gathered, /Late Chicago fact/);
     assert.doesNotMatch(gathered, /Next Chicago day fact/);
+  } finally {
+    await rm(memoryDir, { recursive: true, force: true });
+  }
+});
+
+test("day-summary auto-gather filters hourly summary sections by configured local day", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-day-summary-hourly-gather-"));
+  try {
+    await writeHourlySummary(memoryDir, "session-a", "2026-06-23", [
+      { hour: "03", text: "Previous Chicago day hourly" },
+      { hour: "19", text: "Target Chicago afternoon hourly" },
+    ]);
+    await writeHourlySummary(memoryDir, "session-a", "2026-06-24", [
+      { hour: "04", text: "Target Chicago late hourly" },
+      { hour: "05", text: "Next Chicago day hourly" },
+    ]);
+
+    const config = parseConfig({
+      openaiApiKey: "sk-test",
+      memoryDir,
+      workspaceDir: path.join(memoryDir, "workspace"),
+      daySummaryTimezone: "America/Chicago",
+    });
+    const orchestrator = new Orchestrator(config);
+
+    const gathered = await orchestrator.gatherTodayFacts(undefined, {
+      now: new Date("2026-06-24T04:30:00Z"),
+    });
+
+    assert.match(gathered, /Target Chicago afternoon hourly/);
+    assert.match(gathered, /Target Chicago late hourly/);
+    assert.doesNotMatch(gathered, /Previous Chicago day hourly/);
+    assert.doesNotMatch(gathered, /Next Chicago day hourly/);
   } finally {
     await rm(memoryDir, { recursive: true, force: true });
   }

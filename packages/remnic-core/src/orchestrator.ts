@@ -778,6 +778,42 @@ function parseFiniteDate(value: unknown): Date | null {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function filterHourlySummaryMarkdownForLocalDay(
+  raw: string,
+  utcDate: string,
+  timeZone: string,
+  targetLocalDate: string,
+): string | null {
+  const hourHeaderPattern = /^## ([01]\d|2[0-3]):00[ \t]*$/gm;
+  const matches = Array.from(raw.matchAll(hourHeaderPattern));
+  if (matches.length === 0) return null;
+
+  const firstSectionStart = matches[0]?.index ?? 0;
+  const preamble = raw.slice(0, firstSectionStart).trim();
+  const sections: string[] = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const hour = match[1];
+    if (!hour) continue;
+    const sectionTimestamp = parseFiniteDate(`${utcDate}T${hour}:00:00.000Z`);
+    if (
+      !sectionTimestamp ||
+      formatDateInTimeZone(sectionTimestamp, timeZone) !== targetLocalDate
+    ) {
+      continue;
+    }
+    const sectionStart = match.index ?? 0;
+    const sectionEnd = matches[index + 1]?.index ?? raw.length;
+    const section = raw.slice(sectionStart, sectionEnd).trim();
+    if (section.length > 0) sections.push(section);
+  }
+
+  if (sections.length === 0) return null;
+  return [preamble, ...sections]
+    .filter((section) => section.length > 0)
+    .join("\n\n");
+}
+
 type SearchCollectionState = "present" | "missing" | "unknown" | "skipped";
 
 function qmdStartupCollectionCheckTimeoutMs(): number {
@@ -4317,8 +4353,14 @@ export class Orchestrator {
           const summaryFile = path.join(hourlyBaseDir, sk.name, `${date}.md`);
           try {
             const raw = await readFile(summaryFile, "utf-8");
-            if (raw.trim().length > 0) {
-              hourlySummaries.push(raw.trim());
+            const filtered = filterHourlySummaryMarkdownForLocalDay(
+              raw,
+              date,
+              timeZone,
+              targetLocalDate,
+            );
+            if (filtered) {
+              hourlySummaries.push(filtered);
             }
           } catch {
             // No summary file for this session/date
