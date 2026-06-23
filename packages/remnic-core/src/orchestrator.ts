@@ -2244,16 +2244,12 @@ export class Orchestrator {
             ? await this._fastGatewayLlm.chatCompletion(messages, {
                 maxTokens: targetTokens * 2,
                 timeoutMs: this.config.localLlmFastTimeoutMs,
-                // Route through taskModelChain so LCM uses the same cheap/fast
-                // model tier as other background tasks instead of falling to
-                // the gateway default chain (which may be expensive).
-                // Issue #1473.
-                ...gatewayTaskChainOptions(this.config),
-                // Preserve fastGatewayAgentId preference if set, so LCM
-                // summarization can still use a distinct fast persona.
+                // LCM is latency-sensitive. A configured fast persona is the
+                // explicit fast-tier route; otherwise use taskModelChain so LCM
+                // avoids falling to an expensive gateway default. Issue #1473.
                 ...(this.config.fastGatewayAgentId
                   ? { agentId: this.config.fastGatewayAgentId }
-                  : {}),
+                  : gatewayTaskChainOptions(this.config)),
               })
             : await this.localLlm.chatCompletion(messages, {
                 maxTokens: targetTokens * 2,
