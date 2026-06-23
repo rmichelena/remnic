@@ -115,6 +115,13 @@ test("day-summary request rejects invalid timeZone values", () => {
   assert.deepEqual(result.error.details, [{ field: "timeZone", message: "must be a valid IANA timezone" }]);
 });
 
+test("parseConfig rejects invalid daySummaryTimezone values", () => {
+  assert.throws(
+    () => parseConfig({ openaiApiKey: "sk-test", daySummaryTimezone: "Mars/Olympus" }),
+    /daySummaryTimezone must be a valid IANA timezone: Mars\/Olympus/,
+  );
+});
+
 test("day-summary auto-gather filters facts by configured local day", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-day-summary-gather-"));
   try {

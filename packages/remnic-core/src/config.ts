@@ -2069,10 +2069,7 @@ export function parseConfig(raw: unknown): PluginConfig {
               Intl.DateTimeFormat(undefined, { timeZone: tz });
               return tz;
             } catch {
-              log.warn(
-                `daySummaryTimezone: invalid IANA timezone "${tz}", falling back to server timezone`,
-              );
-              return undefined;
+              throw new Error(`daySummaryTimezone must be a valid IANA timezone: ${tz}`);
             }
           })()
         : undefined,

@@ -108,6 +108,8 @@ const STRICT_MCP_SCHEMA_KEYS: Partial<Record<SchemaName, readonly string[]>> = {
     "sessionKey",
     "namespace",
     "timeZone",
+    "cwd",
+    "projectTag",
   ],
   memoryStore: [
     "schemaVersion",
@@ -773,6 +775,7 @@ export class EngramMcpServer {
             sessionKey: { type: "string" },
             namespace: { type: "string" },
             timeZone: { type: "string" },
+            ...MCP_GIT_CONTEXT_SCHEMA_PROPS_IGNORED,
           },
           required: [],
           additionalProperties: false,
